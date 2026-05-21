@@ -483,5 +483,13 @@ def main() -> int:
     return 0
 
 
+def _cli_entry() -> int:
+    try:
+        return main()
+    except policy.ConfigError as error:
+        print(f"stop: {error}", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_cli_entry())

@@ -77,9 +77,22 @@ NEVER_SUPERVISOR_OWNED_VALIDATION_PREFIX_REASONS: tuple[tuple[str, str], ...] = 
 )
 
 
+class ConfigError(Exception):
+    """Raised when supervisor or context input is missing or malformed in a user-fixable way.
+
+    Catch this at CLI entry points to print a friendly message and exit non-zero instead of
+    surfacing a Python traceback to a consumer who is bootstrapping the reusable automation.
+    """
+
+
 def load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError as error:
+        raise ConfigError(f"missing file: {path}") from error
+    except json.JSONDecodeError as error:
+        raise ConfigError(f"invalid JSON in {path}: {error}") from error
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -195,6 +208,12 @@ def _matches_type(node: Any, expected_type: str) -> bool:
 
 
 def load_queue(queue_path: Path, schema_path: Path) -> dict[str, Any]:
+    if not queue_path.exists():
+        raise ConfigError(
+            f"queue file not found: {queue_path}\n"
+            "hint: copy automation/examples/example-slices.json to that path "
+            "and edit it for this repository's slices."
+        )
     queue_data = load_json(queue_path)
     schema = load_schema(schema_path)
     validation = validate_document(queue_data, schema)
@@ -324,13 +343,31 @@ def git_dirty_paths(repo_root: Path) -> list[str]:
     dirty_paths: list[str] = []
 
     for command in commands:
-        result = subprocess.run(
-            command,
-            cwd=repo_root,
-            check=True,
-            capture_output=True,
-            text=True
-        )
+        try:
+            result = subprocess.run(
+                command,
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+        except FileNotFoundError as error:
+            raise ConfigError(
+                f"git executable not found on PATH: {error}\n"
+                "hint: install Git, or ensure git is on PATH for this process."
+            ) from error
+        except subprocess.CalledProcessError as error:
+            if not (repo_root / ".git").exists():
+                raise ConfigError(
+                    f"not a Git repository: {repo_root}\n"
+                    "hint: run 'git init -b main' in this directory, "
+                    "commit the bootstrap, then re-run."
+                ) from error
+            stderr_text = (error.stderr or "").strip() or "(empty)"
+            raise ConfigError(
+                f"git command failed in {repo_root}: {' '.join(command)}\n"
+                f"stderr: {stderr_text}"
+            ) from error
         for raw_line in result.stdout.splitlines():
             if not raw_line:
                 continue

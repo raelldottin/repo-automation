@@ -196,19 +196,34 @@ in `automation/tests/test_repo_automation_sync.py` is:
 
 ### Known consumer-side failure modes
 
-The smoke test asserts the current failure behavior so future changes to the
-reusable supervisor do not silently degrade it. As of this slice the failures
-remain raw Python tracebacks rather than friendly messages, which is acceptable
-for a smoke proof but is named here so a follow-up slice can improve it:
+The smoke test asserts the friendly message shape so future changes to the
+reusable supervisor do not silently regress it back into raw tracebacks. The
+common consumer-side failure modes now exit with code 2 and a two-line
+`stop: <reason>` + `hint: <fix>` shape:
 
-- Missing `automation/queue/slices.json` raises `FileNotFoundError` from both
-  `automation/supervisor/run_next.py` and `automation/context/build_context.py`,
-  with the missing path in the message.
-- Running the supervisor outside a Git working tree fails with a
-  `subprocess.CalledProcessError` from `git diff --name-only --relative`.
+- Missing `automation/queue/slices.json` (either via
+  `automation/supervisor/run_next.py` or `automation/context/build_context.py`):
+
+  ```text
+  stop: queue file not found: <path>
+  hint: copy automation/examples/example-slices.json to that path and edit it for this repository's slices.
+  ```
+
+- Running the supervisor outside a Git working tree:
+
+  ```text
+  stop: not a Git repository: <consumer path>
+  hint: run 'git init -b main' in this directory, commit the bootstrap, then re-run.
+  ```
+
 - Running the supervisor on a dirty working tree returns the supervisor's own
   `stop: repo is dirty outside the next slice scope` message and a non-zero
-  exit code (this path is already friendly).
+  exit code. This path was already friendly before this slice.
+
+The friendly messages flow through a `policy.ConfigError` exception raised by
+`automation/supervisor/policy.py` (`load_json`, `load_queue`, `git_dirty_paths`)
+and caught at the CLI entry points (`run_next.py:_cli_entry`,
+`build_context.py:_cli_entry`).
 
 ### Manual steps that remain for a real consumer
 
@@ -237,13 +252,12 @@ work:
 - That the reusable supervisor handles consumer-side prompts or LLM
   invocations end-to-end. The smoke proof is limited to `--dry-run` slice
   selection.
-- That non-friendly tracebacks for missing repo-specific configuration are
-  acceptable long-term. They are asserted as the current behavior, not endorsed
-  as the final shape.
 
 ## Next Slice Boundary
 
-Consumer adoption proof is complete at the smoke level. The next implementation
-boundary is friendlier consumer-side failure messages (currently named in the
-known-failure-modes list above) and a real third-party consumer migration when a
-specific repository is named.
+Consumer adoption proof is complete at the smoke level and the common failure
+modes a consumer encounters now exit with friendly `stop:` + `hint:` messages.
+The next implementation boundaries (not queued by this slice) are a real
+third-party consumer migration when a specific repository is named, prompt
+fragment override portability proof, and a consumer Makefile / hooks / CI
+smoke.
