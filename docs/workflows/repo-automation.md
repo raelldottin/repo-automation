@@ -139,12 +139,111 @@ https://github.com/raelldottin/repo-automation.git
 
 The GitHub repository also exposes the SSH URL `git@github.com:raelldottin/repo-automation.git`, but this machine does not currently have GitHub SSH key authentication configured. Publication used the GitHub CLI authenticated HTTPS path.
 
+## Consumer Adoption Bootstrap
+
+A non-Owlory repository can adopt the reusable automation package by syncing the
+manifest-owned subset from Owlory and then committing it into a fresh local Git
+repository. The exact sequence proven by `RepoAutomationConsumerAdoptionSmokeTests`
+in `automation/tests/test_repo_automation_sync.py` is:
+
+1. Create the consumer directory and run
+
+   ```bash
+   Tools/repo-automation-sync.sh --sync --target <consumer-path>
+   ```
+
+   from inside Owlory. The manifest at `automation/reusable-manifest.json` decides
+   what lands; Owlory product state (live queue, handoffs, proofs, SecondBrain,
+   `owlory_xcode/`, localization, product/runtime docs, release tooling, Owlory
+   pre-push hook) is rejected by the sync tool unless an entry explicitly opts
+   in with `allow_owlory_specific: true`.
+
+2. From the consumer directory:
+
+   ```bash
+   git init -b main
+   git config user.email <consumer-email>
+   git config user.name <consumer-name>
+   git add -A
+   git commit -m "Bootstrap reusable automation"
+   ```
+
+   The supervisor and `make repo-automation-update` both require a clean Git
+   working tree. The very first sync produces many untracked files, so the
+   bootstrap commit must happen before normal automation runs.
+
+3. Provide the repo-specific local state the reusable assets expect:
+
+   - `automation/queue/slices.json` — copy `automation/examples/example-slices.json`
+     as a starting point and rewrite it for the consumer's own slices.
+   - `automation/handoffs/` — create the directory; the supervisor writes
+     handoff artifacts here.
+   - `.gitignore` entry for `__pycache__/`, or invocations should set
+     `PYTHONDONTWRITEBYTECODE=1`. Without one of those, supervisor runs
+     leave pycache files that the supervisor's own dirty-tree check then
+     refuses on the next invocation.
+
+4. Smoke-verify by running the supervisor inside the consumer:
+
+   ```bash
+   PYTHONDONTWRITEBYTECODE=1 python3 automation/supervisor/run_next.py --dry-run
+   ```
+
+   The dry-run prints `selected_slice` plus a handoff path that resolves under
+   the consumer repo (not Owlory). `automation/supervisor/run_next.py` derives
+   `REPO_ROOT` from its own file location, so syncing the supervisor file tree
+   into the consumer is what makes it operate on the consumer's queue.
+
+### Known consumer-side failure modes
+
+The smoke test asserts the current failure behavior so future changes to the
+reusable supervisor do not silently degrade it. As of this slice the failures
+remain raw Python tracebacks rather than friendly messages, which is acceptable
+for a smoke proof but is named here so a follow-up slice can improve it:
+
+- Missing `automation/queue/slices.json` raises `FileNotFoundError` from both
+  `automation/supervisor/run_next.py` and `automation/context/build_context.py`,
+  with the missing path in the message.
+- Running the supervisor outside a Git working tree fails with a
+  `subprocess.CalledProcessError` from `git diff --name-only --relative`.
+- Running the supervisor on a dirty working tree returns the supervisor's own
+  `stop: repo is dirty outside the next slice scope` message and a non-zero
+  exit code (this path is already friendly).
+
+### Manual steps that remain for a real consumer
+
+These are not covered by the smoke test and require explicit per-repository
+work:
+
+- A consumer-specific `Makefile` with targets that map to the consumer's own
+  build, test, and validation commands. The reusable tree does not ship a
+  Makefile because Owlory's targets are app-specific.
+- A consumer-specific `AGENTS.md` (or equivalent) that names the consumer's
+  read order, allowed paths, and validation expectations.
+- Optional `core.hooksPath` configuration if the consumer wants the same
+  commit-msg or pre-push behavior as Owlory.
+- Optional override of the prompt fragments under `automation/prompts/` if the
+  consumer needs different policy language.
+- Optional update of `pyrightconfig.json` includes if the consumer wants its
+  own Python paths type-checked.
+- A consumer-specific remote (e.g., `git remote add origin <url>`) and an
+  initial push. The smoke test does not exercise remote publication.
+
+### What the smoke test does not prove
+
+- That any specific external repository has actually adopted the package.
+- That Make targets, hooks, or prompt fragments composed into a real consumer
+  Makefile produce a working CI integration.
+- That the reusable supervisor handles consumer-side prompts or LLM
+  invocations end-to-end. The smoke proof is limited to `--dry-run` slice
+  selection.
+- That non-friendly tracebacks for missing repo-specific configuration are
+  acceptable long-term. They are asserted as the current behavior, not endorsed
+  as the final shape.
+
 ## Next Slice Boundary
 
-`repo-automation-consumer-adoption-smoke` owns the next implementation step:
-
-- prove a non-Owlory repository can consume the reusable automation package
-- exercise bootstrap instructions and required local configuration in a temp repo where practical
-- document remaining manual steps for real repositories
-
-It must not migrate another real repository. Consumer adoption proof is a separate slice.
+Consumer adoption proof is complete at the smoke level. The next implementation
+boundary is friendlier consumer-side failure messages (currently named in the
+known-failure-modes list above) and a real third-party consumer migration when a
+specific repository is named.
