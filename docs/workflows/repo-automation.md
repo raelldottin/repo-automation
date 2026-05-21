@@ -113,7 +113,7 @@ New repositories must start from examples or templates, not Owlory's live queue,
 
 ## Bootstrap Status
 
-As of 2026-05-21, `/Users/raelldottin/Documents/Personal/repo-automation` is initialized as a local Git repository on `main` at commit `6ab871bbf957df24e648b02ef002c0efa2d7c609`.
+As of 2026-05-21, `/Users/raelldottin/Documents/Personal/repo-automation` is initialized as a Git repository on `main`. The bootstrap commit is `6ab871bbf957df24e648b02ef002c0efa2d7c609`; the current published external HEAD is `ed52956174cdb0add2f7a9574572079a3ad08af6`.
 
 The bootstrap commit was populated only by `Tools/repo-automation-sync.sh --sync --target /Users/raelldottin/Documents/Personal/repo-automation`, then verified with:
 
@@ -121,7 +121,17 @@ The bootstrap commit was populated only by `Tools/repo-automation-sync.sh --sync
 Tools/repo-automation-sync.sh --check --target /Users/raelldottin/Documents/Personal/repo-automation
 ```
 
-No remote is configured for the external repository.
+## Remote Status
+
+The external repository remote is:
+
+```text
+https://github.com/raelldottin/repo-automation.git
+```
+
+`main` tracks `origin/main`, and `git -C /Users/raelldottin/Documents/Personal/repo-automation rev-list --left-right --count HEAD...@{u}` returns `0 0`.
+
+The GitHub repository also exposes the SSH URL `git@github.com:raelldottin/repo-automation.git`, but this machine does not currently have GitHub SSH key authentication configured. Publication used the GitHub CLI authenticated HTTPS path.
 
 ## Next Slice Boundary
 
