@@ -111,13 +111,24 @@ A future repository should consume `repo-automation` as a reusable package or te
 
 New repositories must start from examples or templates, not Owlory's live queue, handoffs, proofs, or SecondBrain history.
 
+## Bootstrap Status
+
+As of 2026-05-21, `/Users/raelldottin/Documents/Personal/repo-automation` is initialized as a local Git repository on `main` at commit `6ab871bbf957df24e648b02ef002c0efa2d7c609`.
+
+The bootstrap commit was populated only by `Tools/repo-automation-sync.sh --sync --target /Users/raelldottin/Documents/Personal/repo-automation`, then verified with:
+
+```bash
+Tools/repo-automation-sync.sh --check --target /Users/raelldottin/Documents/Personal/repo-automation
+```
+
+No remote is configured for the external repository.
+
 ## Next Slice Boundary
 
-`repo-automation-external-repo-bootstrap` owns the next implementation step:
+`repo-automation-auto-update-gate` owns the next implementation step:
 
-- initialize `/Users/raelldottin/Documents/Personal/repo-automation` as a Git repository if needed
-- run the tested sync tool in `--sync` mode to populate it
-- run `Tools/repo-automation-sync.sh --check --target /Users/raelldottin/Documents/Personal/repo-automation`
-- record the external repository status and sync proof
+- wire the sync check into Owlory's validation or pre-push path
+- define how local automatic updates handle external repo dirt
+- keep remote push behavior explicit and opt-in
 
-It must not wire automatic hooks. That is a separate slice.
+It must not migrate another real repository. Consumer adoption proof is a separate slice.
