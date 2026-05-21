@@ -113,7 +113,7 @@ New repositories must start from examples or templates, not Owlory's live queue,
 
 ## Bootstrap Status
 
-As of 2026-05-21, `/Users/raelldottin/Documents/Personal/repo-automation` is initialized as a Git repository on `main`. The bootstrap commit is `6ab871bbf957df24e648b02ef002c0efa2d7c609`; the current published external HEAD is `ed52956174cdb0add2f7a9574572079a3ad08af6`.
+As of 2026-05-21, `/Users/raelldottin/Documents/Personal/repo-automation` is initialized as a Git repository on `main`. The bootstrap commit is `6ab871bbf957df24e648b02ef002c0efa2d7c609`. Exact publication commits are recorded in Owlory handoffs so this manifest-synced workflow doc does not have to change for every external commit.
 
 The bootstrap commit was populated only by `Tools/repo-automation-sync.sh --sync --target /Users/raelldottin/Documents/Personal/repo-automation`, then verified with:
 
