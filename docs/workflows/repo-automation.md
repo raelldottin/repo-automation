@@ -79,6 +79,7 @@ Use `Tools/repo-automation-sync.sh` for manifest-owned sync:
 
 - `--check`: report drift between Owlory reusable sources and the external folder without changing files.
 - `--sync`: update the external folder to match the manifest.
+- `--auto-update`: for validation and pre-push use only; require the target to be an existing clean Git repository, sync manifest-owned files, then verify `--check` passes.
 - `--target <path>`: override the target path for tests and future consumers.
 - `--source <path>` and `--manifest <path>`: test hooks for temp repositories and alternate manifests.
 
@@ -88,14 +89,19 @@ Stale-file deletion is allowed only under manifest-owned destination paths. The 
 
 ## Automatic Update Contract
 
-The automatic update slice should wire the tested sync tool into Owlory's normal automation path.
+Owlory wires repo-automation currentness into the normal local automation path:
+
+- `make repo-automation-check` runs `Tools/repo-automation-sync.sh --check --target /Users/raelldottin/Documents/Personal/repo-automation`.
+- `make repo-automation-update` runs `Tools/repo-automation-sync.sh --auto-update --target /Users/raelldottin/Documents/Personal/repo-automation`.
+- `.githooks/pre-push` detects whether the pending push touches manifest-owned reusable automation sources. If so, it runs `make repo-automation-update` before allowing the push.
 
 Expected behavior:
 
-- If a commit changes manifest-owned reusable automation, the validation or pre-push path syncs `/Users/raelldottin/Documents/Personal/repo-automation` or fails with a clear remediation.
-- If the external target is missing, the check fails and points to the bootstrap slice or sync command.
-- If the external target has unsafe local dirt, the check fails rather than overwriting unrelated work.
-- Automatic update means the external folder contents are updated locally. External Git commit or remote push must be explicit unless a later slice adds documented opt-in behavior.
+- If a commit changes manifest-owned reusable automation, the pre-push path syncs `/Users/raelldottin/Documents/Personal/repo-automation` locally and verifies the target is current.
+- If the external target is missing, `--auto-update` fails and points to the bootstrap path.
+- If the external target is not a Git repository, `--auto-update` fails rather than creating an untracked copy.
+- If the external target has local dirt before the update, `--auto-update` fails rather than overwriting external work.
+- Automatic update means the external folder contents are updated locally. External Git commit or remote push remains explicit unless a later slice adds documented opt-in behavior.
 
 ## Consumer Repository Contract
 
@@ -135,10 +141,10 @@ The GitHub repository also exposes the SSH URL `git@github.com:raelldottin/repo-
 
 ## Next Slice Boundary
 
-`repo-automation-auto-update-gate` owns the next implementation step:
+`repo-automation-consumer-adoption-smoke` owns the next implementation step:
 
-- wire the sync check into Owlory's validation or pre-push path
-- define how local automatic updates handle external repo dirt
-- keep remote push behavior explicit and opt-in
+- prove a non-Owlory repository can consume the reusable automation package
+- exercise bootstrap instructions and required local configuration in a temp repo where practical
+- document remaining manual steps for real repositories
 
 It must not migrate another real repository. Consumer adoption proof is a separate slice.

@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -289,6 +290,48 @@ def sync_entries(source_root: Path, target_root: Path, entries: list[Entry], *, 
     return 0
 
 
+def target_git_status(target_root: Path) -> tuple[bool, list[str]]:
+    git_root = subprocess.run(
+        ["git", "-C", str(target_root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    if git_root.returncode != 0:
+        return False, []
+
+    status = subprocess.run(
+        ["git", "-C", str(target_root), "status", "--short", "--untracked-files=all"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = [line for line in status.stdout.splitlines() if line.strip()]
+    return True, lines
+
+
+def ensure_auto_update_target_safe(target_root: Path) -> int:
+    if not target_root.exists():
+        print(f"missing target: {target_root}")
+        print("result: auto-update refused (target missing)")
+        print("remediation: run the repo-automation bootstrap slice or sync the target explicitly with --sync first")
+        return 1
+
+    is_git_repo, dirty_lines = target_git_status(target_root)
+    if not is_git_repo:
+        print(f"repo-automation-sync: error: auto-update target is not a Git repository: {target_root}", file=sys.stderr)
+        print("remediation: initialize the external repo-automation folder before enabling automatic updates", file=sys.stderr)
+        return 2
+
+    if dirty_lines:
+        print(f"repo-automation-sync: error: refusing auto-update because target has local dirt: {target_root}", file=sys.stderr)
+        for line in dirty_lines:
+            print(f"  {line}", file=sys.stderr)
+        print("remediation: commit, stash, or clean the external repo-automation worktree, then retry", file=sys.stderr)
+        return 1
+
+    return 0
+
+
 def main(argv: list[str]) -> int:
     repo_root = Path(argv[0]).resolve()
 
@@ -296,6 +339,7 @@ def main(argv: list[str]) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="Report drift without changing files.")
     mode.add_argument("--sync", action="store_true", help="Update the target to match the reusable manifest.")
+    mode.add_argument("--auto-update", action="store_true", help="Safely update an existing clean Git target, then verify it is current.")
     parser.add_argument("--target", help="Destination repo-automation folder. Defaults to manifest default_target.")
     parser.add_argument("--source", default=str(repo_root), help="Source repository root. Defaults to this checkout.")
     parser.add_argument("--manifest", help="Manifest path. Defaults to <source>/automation/reusable-manifest.json.")
@@ -305,6 +349,15 @@ def main(argv: list[str]) -> int:
     manifest = Path(args.manifest).expanduser() if args.manifest else source_root / "automation/reusable-manifest.json"
     default_target, entries = load_manifest(manifest)
     target_root = Path(args.target).expanduser() if args.target else default_target
+
+    if args.auto_update:
+        safe_result = ensure_auto_update_target_safe(target_root)
+        if safe_result != 0:
+            return safe_result
+        sync_result = sync_entries(source_root, target_root, entries, check=False)
+        if sync_result != 0:
+            return sync_result
+        return sync_entries(source_root, target_root, entries, check=True)
 
     if args.sync:
         target_root.mkdir(parents=True, exist_ok=True)
