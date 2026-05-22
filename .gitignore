@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+pytest.xml
+.tox/
+.nox/
+.mypy_cache/
+.pyright/
+site/
+.DS_Store

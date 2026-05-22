@@ -1,0 +1,52 @@
+name: Coverage
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  coverage:
+    name: Tests + coverage comment
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest automation/tests/test_harness.py \
+            --deselect automation/tests/test_harness.py::AutomationHarnessTests::test_live_queue_configures_repo_owned_agent_command \
+            --deselect automation/tests/test_harness.py::AutomationHarnessTests::test_build_context_includes_compact_previous_handoff_and_relevant_docs \
+            --cov=automation \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --junit-xml=pytest.xml
+
+      - name: Post coverage comment
+        if: github.event_name == 'pull_request'
+        uses: MishaKav/pytest-coverage-comment@v1.1.52
+        with:
+          pytest-xml-coverage-path: coverage.xml
+          junitxml-path: pytest.xml
+          title: Coverage report
+          report-only-changed-files: true
