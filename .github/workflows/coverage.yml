@@ -44,7 +44,7 @@ jobs:
 
       - name: Post coverage comment
         if: github.event_name == 'pull_request'
-        uses: MishaKav/pytest-coverage-comment@v1.1.52
+        uses: MishaKav/pytest-coverage-comment@v1.7.2
         with:
           pytest-xml-coverage-path: coverage.xml
           junitxml-path: pytest.xml
