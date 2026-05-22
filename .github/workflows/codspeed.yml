@@ -44,7 +44,7 @@ jobs:
 
       - name: Run CodSpeed benchmarks
         if: steps.codspeed.outputs.configured == '1'
-        uses: CodSpeedHQ/action@v3
+        uses: CodSpeedHQ/action@v4
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
           run: pytest automation/tests/test_benchmarks.py --codspeed
