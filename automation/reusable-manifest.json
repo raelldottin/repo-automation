@@ -23,7 +23,7 @@
       "destination": "automation/examples",
       "kind": "directory",
       "preserve_executable": false,
-      "delete_stale": true,
+      "delete_stale": false,
       "template": true
     },
     {
@@ -31,7 +31,7 @@
       "destination": "automation/prompts",
       "kind": "directory",
       "preserve_executable": false,
-      "delete_stale": true,
+      "delete_stale": false,
       "template": true
     },
     {

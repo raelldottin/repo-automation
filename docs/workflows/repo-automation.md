@@ -256,7 +256,7 @@ asserted by
 `automation/tests/test_repo_automation_sync.py`, which writes sentinel
 markers into both files and verifies they appear in the rendered prompt.
 
-Two consumer-side constraints apply:
+The consumer-side flow:
 
 1. **Commit the override first.** The supervisor's dirty-tree check refuses
    to run when files outside the current slice's `allowed_paths` are dirty.
@@ -264,22 +264,22 @@ Two consumer-side constraints apply:
    before running the supervisor; otherwise the run aborts with the existing
    `stop: repo is dirty outside the next slice scope` message.
 
-2. **Re-syncing the prompts entry overwrites the override.** The manifest
-   entry for `automation/prompts/` currently has `delete_stale: true` and
-   `template: true`, which means
-   `Tools/repo-automation-sync.sh --sync --target <consumer>` against the
-   Owlory source rewrites the consumer's `base.md` / `slice.md` back to
-   Owlory's content and deletes any added files in the directory. A
-   consumer who needs durable overrides must either:
+2. **Overrides survive re-sync.** The manifest entries marked
+   `template: true` (currently `automation/prompts/`, `automation/examples/`,
+   and `pyrightconfig.json`) are first-time-only: `Tools/repo-automation-sync.sh`
+   copies them when the destination file does not yet exist and otherwise
+   leaves them alone. Consumer-added files in those directories also survive
+   (those entries set `delete_stale: false`).
+   `test_consumer_prompt_override_survives_resync` and
+   `test_consumer_added_prompt_file_survives_resync` cover both cases.
 
-   - skip the `automation/prompts/` manifest entry on re-sync (e.g., by
-     editing their local copy of the manifest to remove that entry), or
-   - vendor the prompts to a separate path that is not manifest-owned (such
-     as `automation/prompts.local/`) and point `render_prompt` at that path
-     via a small wrapper.
-
-   Neither path is automated today; the manifest entry is shipped as a
-   starter template, not a long-lived consumer override surface.
+3. **Owlory updates to template files don't auto-propagate.** Because the
+   sync skips existing template files, an upstream Owlory improvement to
+   `base.md` or `slice.md` does not reach a consumer who already has those
+   files. A consumer who wants the upstream content must delete the local
+   file and re-run `--sync`, or merge the change manually. Non-template
+   entries (the supervisor, context builder, schemas, harness test, docs)
+   continue to be authoritative on every sync.
 
 ### What the smoke test does not prove
 

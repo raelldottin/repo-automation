@@ -212,7 +212,7 @@ def file_drift(source: Path, target: Path, *, preserve_executable: bool) -> str 
 
 
 def stale_files(target_root: Path, entry: Entry, expected: set[Path]) -> list[tuple[Path, str]]:
-    if entry.kind != "directory" or not entry.delete_stale:
+    if entry.kind != "directory" or not entry.delete_stale or entry.template:
         return []
 
     destination = resolve_under(target_root, entry.destination, must_exist=False)
@@ -249,6 +249,9 @@ def sync_entries(source_root: Path, target_root: Path, entries: list[Entry], *, 
         expected = {target for _, target, _ in pairs}
 
         for source, target, display in pairs:
+            if entry.template and target.exists():
+                continue
+
             drift = file_drift(source, target, preserve_executable=entry.preserve_executable)
             if drift is None:
                 continue
