@@ -238,11 +238,48 @@ work:
 - Optional `core.hooksPath` configuration if the consumer wants the same
   commit-msg or pre-push behavior as Owlory.
 - Optional override of the prompt fragments under `automation/prompts/` if the
-  consumer needs different policy language.
+  consumer needs different policy language (see Customizing prompt fragments
+  below).
 - Optional update of `pyrightconfig.json` includes if the consumer wants its
   own Python paths type-checked.
 - A consumer-specific remote (e.g., `git remote add origin <url>`) and an
   initial push. The smoke test does not exercise remote publication.
+
+### Customizing prompt fragments
+
+`automation/supervisor/run_next.py:render_prompt` reads
+`automation/prompts/base.md` and `automation/prompts/slice.md` from the
+consumer's own `repo_root`, so a consumer can rewrite either file and the
+supervisor will use the customized text for every subsequent run. This is
+asserted by
+`test_consumer_can_override_prompt_fragments` in
+`automation/tests/test_repo_automation_sync.py`, which writes sentinel
+markers into both files and verifies they appear in the rendered prompt.
+
+Two consumer-side constraints apply:
+
+1. **Commit the override first.** The supervisor's dirty-tree check refuses
+   to run when files outside the current slice's `allowed_paths` are dirty.
+   A consumer who edits `automation/prompts/*.md` must `git add` and commit
+   before running the supervisor; otherwise the run aborts with the existing
+   `stop: repo is dirty outside the next slice scope` message.
+
+2. **Re-syncing the prompts entry overwrites the override.** The manifest
+   entry for `automation/prompts/` currently has `delete_stale: true` and
+   `template: true`, which means
+   `Tools/repo-automation-sync.sh --sync --target <consumer>` against the
+   Owlory source rewrites the consumer's `base.md` / `slice.md` back to
+   Owlory's content and deletes any added files in the directory. A
+   consumer who needs durable overrides must either:
+
+   - skip the `automation/prompts/` manifest entry on re-sync (e.g., by
+     editing their local copy of the manifest to remove that entry), or
+   - vendor the prompts to a separate path that is not manifest-owned (such
+     as `automation/prompts.local/`) and point `render_prompt` at that path
+     via a small wrapper.
+
+   Neither path is automated today; the manifest entry is shipped as a
+   starter template, not a long-lived consumer override surface.
 
 ### What the smoke test does not prove
 
