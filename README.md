@@ -1,5 +1,7 @@
 # repo-automation
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/raelldottin/repo-automation?utm_source=badge)
+
 Reusable supervised automation for bounded agent work.
 
 `repo-automation` packages a slice-based supervisor harness: queue records, context building, prompt fragments, validation ownership, handoff schemas, and stop rules for keeping AI-assisted repository work scoped and reviewable.
@@ -73,9 +75,7 @@ The repository ships with seven GitHub Actions workflows in `.github/`:
 
 - **CodSpeed** (`.github/workflows/codspeed.yml`) — runs `pytest-codspeed`
   benchmarks defined in `automation/tests/test_benchmarks.py` on every push
-  and pull request. Skips with a notice when the `CODSPEED_TOKEN` secret is
-  unset; configure it under **Settings -> Secrets and variables -> Actions**
-  to enable performance regression tracking.
+  and pull request. Uses OIDC authentication with the CodSpeed GitHub App.
 - **Pylint** (`.github/workflows/pylint.yml`) — recursive lint across
   `automation/` on Python 3.11 and 3.12. Pylint configuration lives in
   `pyproject.toml`.
@@ -99,18 +99,12 @@ The repository ships with seven GitHub Actions workflows in `.github/`:
 ### Manual setup that remains
 
 The build artifacts on `main` are green by default once these files land,
-but two integrations require repository-settings actions before they go
+but one integration requires a repository-settings action before it goes
 live end-to-end:
 
-1. **CodSpeed**: install the CodSpeed GitHub App on this repository, then
-   add `CODSPEED_TOKEN` under **Settings -> Secrets and variables ->
-   Actions -> New repository secret**.
-2. **GitHub Pages**: under **Settings -> Pages**, set **Source** to
+1. **GitHub Pages**: under **Settings -> Pages**, set **Source** to
    **GitHub Actions**. The publish-docs workflow will then deploy the
    MkDocs site on the next push.
-
-Until those settings exist the corresponding workflows print actionable
-notices instead of failing.
 
 ## Status
 
