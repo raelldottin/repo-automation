@@ -31,7 +31,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      - name: Detect CodSpeed configuration
+        id: codspeed
+        env:
+          HAS_TOKEN: ${{ secrets.CODSPEED_TOKEN != '' && '1' || '0' }}
+        run: echo "configured=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when token is unset
+        if: steps.codspeed.outputs.configured != '1'
+        run: |
+          echo "::notice title=CodSpeed not configured::CODSPEED_TOKEN secret is not set. Add it under Settings -> Secrets and variables -> Actions to enable performance regression tracking."
+
       - name: Run CodSpeed benchmarks
+        if: steps.codspeed.outputs.configured == '1'
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}

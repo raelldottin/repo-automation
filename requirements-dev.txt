@@ -1,7 +1,7 @@
 coverage==7.6.1
 mkdocs-material==9.5.34
 pip-audit==2.7.3
-pylint==3.2.7
+pylint==4.0.5
 pytest==9.0.3
 pytest-codspeed==5.0.2
 pytest-cov==6.0.0
