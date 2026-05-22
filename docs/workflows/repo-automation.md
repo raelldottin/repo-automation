@@ -276,10 +276,24 @@ The consumer-side flow:
 3. **Owlory updates to template files don't auto-propagate.** Because the
    sync skips existing template files, an upstream Owlory improvement to
    `base.md` or `slice.md` does not reach a consumer who already has those
-   files. A consumer who wants the upstream content must delete the local
-   file and re-run `--sync`, or merge the change manually. Non-template
-   entries (the supervisor, context builder, schemas, harness test, docs)
-   continue to be authoritative on every sync.
+   files. Non-template entries (the supervisor, context builder, schemas,
+   harness test, docs) continue to be authoritative on every sync.
+
+   To deliberately re-baseline template files to the current Owlory
+   content, run:
+
+   ```bash
+   Tools/repo-automation-sync.sh --sync --force-templates --target <consumer>
+   ```
+
+   `--force-templates` bypasses the first-time-only guard so all template
+   entries are rewritten to source content, replacing any local
+   customizations. The flag intentionally does NOT remove
+   consumer-added files in template directories — those still survive
+   because the manifest entries set `delete_stale: false`. This is
+   asserted by `test_force_templates_overwrites_consumer_override` and
+   `test_force_templates_preserves_consumer_added_files` in
+   `automation/tests/test_repo_automation_sync.py`.
 
 ### What the smoke test does not prove
 
