@@ -221,6 +221,8 @@ def stale_files(target_root: Path, entry: Entry, expected: set[Path]) -> list[tu
 
     stale: list[tuple[Path, str]] = []
     for child in sorted(destination.rglob("*")):
+        if should_skip(child):
+            continue
         if child.is_dir():
             continue
         if child not in expected:

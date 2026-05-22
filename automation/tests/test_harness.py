@@ -38,6 +38,30 @@ class AutomationHarnessTests(unittest.TestCase):
             self.fail("Expected test fixture to have an eligible selected slice.")
         return slice_record
 
+    def example_queue_data(self) -> dict[str, Any]:
+        return policy.load_queue(self.example_queue_path, self.queue_schema_path)
+
+    def example_slice_at(self, index: int) -> dict[str, Any]:
+        return self.example_queue_data()["slices"][index]
+
+    def example_slice_id_at(self, index: int) -> str:
+        return self.example_slice_at(index)["slice_id"]
+
+    def example_handoff_filename(self) -> str:
+        return f"20260421T153000Z-{self.example_slice_id_at(0)}.json"
+
+    def example_allowed_file(self, slice_record: dict[str, Any], filename: str = "Changed.swift") -> str:
+        for allowed_path in slice_record["allowed_paths"]:
+            if allowed_path.endswith("/"):
+                return f"{allowed_path}{filename}"
+        return slice_record["allowed_paths"][0]
+
+    def example_markdown_path(self, slice_record: dict[str, Any]) -> str:
+        for allowed_path in slice_record["allowed_paths"]:
+            if allowed_path.endswith(".md"):
+                return allowed_path
+        return f"docs/product/domains/{slice_record['domain']}.md"
+
     def test_example_queue_matches_schema(self) -> None:
         queue_data = policy.load_json(self.example_queue_path)
         queue_schema = policy.load_schema(self.queue_schema_path)
@@ -102,7 +126,7 @@ class AutomationHarnessTests(unittest.TestCase):
         reports = policy.blocked_slice_reports(queue_data)
 
         self.assertEqual(1, len(reports))
-        self.assertEqual("today-nonfocus-add-to-focus", reports[0].slice_id)
+        self.assertEqual(self.example_slice_id_at(0), reports[0].slice_id)
         self.assertEqual("Reviewed values exist.", reports[0].entry_condition)
         self.assertEqual("review-packet", reports[0].recommended_unblocker)
 
@@ -217,8 +241,11 @@ class AutomationHarnessTests(unittest.TestCase):
         )
 
     def test_live_queue_configures_repo_owned_agent_command(self) -> None:
+        queue_path = self.repo_root / "automation/queue/slices.json"
+        if not queue_path.exists():
+            self.skipTest("consumer live queue is not present in this checkout")
         queue_data = policy.load_queue(
-            self.repo_root / "automation/queue/slices.json",
+            queue_path,
             self.queue_schema_path
         )
         command_template = queue_data["policy"]["agent_command_template"]
@@ -239,14 +266,14 @@ class AutomationHarnessTests(unittest.TestCase):
                 "runner --repo {repo_root} --prompt {prompt_file} "
                 "--context {context_file} --handoff {handoff_file} --slice {slice_id}"
             ),
-            repo_root=Path("/tmp/Owlory With Space"),
+            repo_root=Path("/tmp/Repo With Space"),
             prompt_path=Path("/tmp/prompt file.md"),
             context_path=Path("/tmp/context file.json"),
             handoff_path=Path("/tmp/handoff file.json"),
             slice_id="today slice"
         )
 
-        self.assertIn("--repo '/tmp/Owlory With Space'", formatted)
+        self.assertIn("--repo '/tmp/Repo With Space'", formatted)
         self.assertIn("--prompt '/tmp/prompt file.md'", formatted)
         self.assertIn("--context '/tmp/context file.json'", formatted)
         self.assertIn("--handoff '/tmp/handoff file.json'", formatted)
@@ -373,12 +400,13 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertEqual([], unexpected)
 
     def test_completion_decision_stops_on_required_validation_failure(self) -> None:
-        queue_data = self.example_queue_with_slice_status("today-nonfocus-add-to-focus", "in_progress")
-        slice_record = self.require_slice_record(queue_data, "today-nonfocus-add-to-focus")
+        first_slice_id = self.example_slice_id_at(0)
+        queue_data = self.example_queue_with_slice_status(first_slice_id, "in_progress")
+        slice_record = self.require_slice_record(queue_data, first_slice_id)
         handoff = policy.load_json(self.example_handoff_path)
         handoff["validations_passed"] = [
-            "make architecture",
-            "make test-domain DOMAIN=today"
+            validation for validation in slice_record["required_validations"]
+            if validation != "git diff --check"
         ]
         handoff["recommended_next_slice"] = ""
         handoff["recommended_next_reason"] = ""
@@ -399,8 +427,9 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertEqual(["git diff --check"], decision.required_validation_failures)
 
     def test_completion_decision_rejects_unknown_recommended_next_slice(self) -> None:
-        queue_data = self.example_queue_with_slice_status("today-nonfocus-add-to-focus", "in_progress")
-        slice_record = self.require_slice_record(queue_data, "today-nonfocus-add-to-focus")
+        first_slice_id = self.example_slice_id_at(0)
+        queue_data = self.example_queue_with_slice_status(first_slice_id, "in_progress")
+        slice_record = self.require_slice_record(queue_data, first_slice_id)
         handoff = policy.load_json(self.example_handoff_path)
         handoff["recommended_next_slice"] = "brand-new-slice"
         handoff["recommended_next_reason"] = "The agent guessed at unqueued work."
@@ -502,11 +531,13 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertIn("highest-priority eligible queued slice", decision.stop_reason)
 
     def test_completion_decision_fails_when_files_touched_leave_scope(self) -> None:
-        queue_data = self.example_queue_with_slice_status("today-nonfocus-add-to-focus", "in_progress")
-        slice_record = self.require_slice_record(queue_data, "today-nonfocus-add-to-focus")
+        first_slice_id = self.example_slice_id_at(0)
+        queue_data = self.example_queue_with_slice_status(first_slice_id, "in_progress")
+        slice_record = self.require_slice_record(queue_data, first_slice_id)
+        allowed_file = self.example_allowed_file(slice_record)
         handoff = policy.load_json(self.example_handoff_path)
         handoff["files_touched"] = [
-            "owlory_xcode/Owlory/Features/Today/TodayView.swift",
+            allowed_file,
             "README.md"
         ]
 
@@ -515,7 +546,7 @@ class AutomationHarnessTests(unittest.TestCase):
             slice_record=slice_record,
             handoff=handoff,
             dirty_paths_before_run=[],
-            dirty_paths_after_run=["owlory_xcode/Owlory/Features/Today/TodayView.swift"],
+            dirty_paths_after_run=[allowed_file],
             completed_autonomous_runs=1,
             run_limit=3
         )
@@ -525,12 +556,13 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertEqual(["README.md"], decision.files_touched_outside_scope)
 
     def test_completion_decision_fails_when_diff_budget_is_exceeded(self) -> None:
-        queue_data = self.example_queue_with_slice_status("today-nonfocus-add-to-focus", "in_progress")
-        slice_record = self.require_slice_record(queue_data, "today-nonfocus-add-to-focus")
+        first_slice_id = self.example_slice_id_at(0)
+        queue_data = self.example_queue_with_slice_status(first_slice_id, "in_progress")
+        slice_record = self.require_slice_record(queue_data, first_slice_id)
         handoff = policy.load_json(self.example_handoff_path)
         handoff["files_touched"] = [
-            f"owlory_xcode/Owlory/Features/Today/file-{index}.swift"
-            for index in range(13)
+            self.example_allowed_file(slice_record, f"file-{index}.swift")
+            for index in range(slice_record["max_files_changed"] + 1)
         ]
         handoff["recommended_next_slice"] = ""
         handoff["recommended_next_reason"] = ""
@@ -550,8 +582,9 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertIn("max_files_changed", decision.stop_reason)
 
     def test_completion_decision_fails_when_supervisor_replay_fails(self) -> None:
-        queue_data = self.example_queue_with_slice_status("today-nonfocus-add-to-focus", "in_progress")
-        slice_record = self.require_slice_record(queue_data, "today-nonfocus-add-to-focus")
+        first_slice_id = self.example_slice_id_at(0)
+        queue_data = self.example_queue_with_slice_status(first_slice_id, "in_progress")
+        slice_record = self.require_slice_record(queue_data, first_slice_id)
         handoff = policy.load_json(self.example_handoff_path)
         validation_replays = [
             policy.ValidationReplayResult(
@@ -579,8 +612,9 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertEqual(1, len(decision.supervisor_validation_replays))
 
     def test_completion_decision_stops_for_review_at_autonomous_limit(self) -> None:
-        queue_data = self.example_queue_with_slice_status("today-nonfocus-add-to-focus", "in_progress")
-        slice_record = self.require_slice_record(queue_data, "today-nonfocus-add-to-focus")
+        first_slice_id = self.example_slice_id_at(0)
+        queue_data = self.example_queue_with_slice_status(first_slice_id, "in_progress")
+        slice_record = self.require_slice_record(queue_data, first_slice_id)
         handoff = policy.load_json(self.example_handoff_path)
 
         decision = policy.evaluate_completion(
@@ -599,8 +633,10 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertIn("human review", decision.stop_reason)
 
     def test_completion_decision_continues_when_recommended_next_is_known_and_eligible(self) -> None:
-        queue_data = self.example_queue_with_slice_status("today-nonfocus-add-to-focus", "in_progress")
-        slice_record = self.require_slice_record(queue_data, "today-nonfocus-add-to-focus")
+        first_slice_id = self.example_slice_id_at(0)
+        second_slice_id = self.example_slice_id_at(1)
+        queue_data = self.example_queue_with_slice_status(first_slice_id, "in_progress")
+        slice_record = self.require_slice_record(queue_data, first_slice_id)
         handoff = policy.load_json(self.example_handoff_path)
 
         decision = policy.evaluate_completion(
@@ -616,11 +652,14 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertEqual("done", decision.queue_status)
         self.assertEqual("continue", decision.decision)
         self.assertTrue(decision.should_continue)
-        self.assertEqual("today-continue-ui-regression-coverage", decision.next_slice_id)
+        self.assertEqual(second_slice_id, decision.next_slice_id)
 
     def test_first_proof_runs_two_adjacent_slices_then_stops_for_review(self) -> None:
-        first_queue = self.example_queue_with_slice_status("today-nonfocus-add-to-focus", "in_progress")
-        first_slice = self.require_slice_record(first_queue, "today-nonfocus-add-to-focus")
+        first_slice_id = self.example_slice_id_at(0)
+        second_slice_id = self.example_slice_id_at(1)
+        third_slice_id = self.example_slice_id_at(2)
+        first_queue = self.example_queue_with_slice_status(first_slice_id, "in_progress")
+        first_slice = self.require_slice_record(first_queue, first_slice_id)
         first_handoff = policy.load_json(self.example_handoff_path)
         first_replays = self.successful_replays(
             ["make architecture", "git diff --check"]
@@ -638,43 +677,39 @@ class AutomationHarnessTests(unittest.TestCase):
         )
 
         self.assertEqual("continue", first_decision.decision)
-        self.assertEqual("today-continue-ui-regression-coverage", first_decision.next_slice_id)
+        self.assertEqual(second_slice_id, first_decision.next_slice_id)
 
-        second_queue = policy.set_slice_status(first_queue, "today-nonfocus-add-to-focus", "done")
+        second_queue = policy.set_slice_status(first_queue, first_slice_id, "done")
         second_queue = policy.set_slice_status(
             second_queue,
-            "today-continue-ui-regression-coverage",
+            second_slice_id,
             "in_progress"
         )
-        second_slice = self.require_slice_record(second_queue, "today-continue-ui-regression-coverage")
+        second_slice = self.require_slice_record(second_queue, second_slice_id)
         queue_if_second_done = policy.set_slice_status(
             second_queue,
-            "today-continue-ui-regression-coverage",
+            second_slice_id,
             "done"
         )
         self.assertEqual(
-            "today-continue-copy-proofread",
+            third_slice_id,
             self.require_selected_slice(queue_if_second_done)["slice_id"]
         )
 
         second_handoff = {
-            "slice_id": "today-continue-ui-regression-coverage",
+            "slice_id": second_slice_id,
             "status": "done",
-            "summary": "Added targeted regression coverage for the Continue Add to Focus interaction.",
+            "summary": "Added targeted regression coverage for the next example interaction.",
             "files_touched": [
-                "owlory_xcode/OwloryCoreTests/TodayStoreTests.swift",
-                "docs/product/domains/today.md"
+                self.example_allowed_file(second_slice, "RegressionTests.swift"),
+                self.example_markdown_path(second_slice)
             ],
-            "validations_passed": [
-                "make architecture",
-                "make test-domain DOMAIN=today",
-                "git diff --check"
-            ],
+            "validations_passed": second_slice["required_validations"],
             "validations_failed": [],
             "risks": [
                 "No manual simulator pass for the regression flow"
             ],
-            "recommended_next_slice": "today-continue-copy-proofread",
+            "recommended_next_slice": third_slice_id,
             "recommended_next_reason": "Adjacent proofread slice after the regression coverage pass.",
             "dirty_paths_outside_scope": [],
             "timestamp": "2026-04-21T16:00:00Z"
@@ -698,42 +733,51 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertEqual("stop_for_review", second_decision.decision)
         self.assertFalse(second_decision.should_continue)
         self.assertEqual(
-            "today-continue-copy-proofread",
+            third_slice_id,
             second_decision.recommended_next_slice
         )
         self.assertIn("human review", second_decision.stop_reason)
 
     def test_build_context_includes_compact_previous_handoff_and_relevant_docs(self) -> None:
+        first_slice_id = self.example_slice_id_at(0)
+        second_slice = self.example_slice_at(1)
+        second_slice_id = second_slice["slice_id"]
+        third_slice_id = self.example_slice_id_at(2)
+        example_handoff = policy.load_json(self.example_handoff_path)
         with tempfile.TemporaryDirectory() as temp_dir:
             handoff_dir = Path(temp_dir)
             shutil.copy(
                 self.example_handoff_path,
-                handoff_dir / "20260421T153000Z-today-nonfocus-add-to-focus.json"
+                handoff_dir / self.example_handoff_filename()
             )
 
             bundle = build_context_bundle(
                 repo_root=self.repo_root,
                 queue_path=self.example_queue_path,
                 handoff_dir=handoff_dir,
-                slice_id="today-continue-ui-regression-coverage",
+                slice_id=second_slice_id,
                 max_doc_chars=1200
             )
 
         document_paths = [document["path"] for document in bundle["documents"]]
-        self.assertIn("docs/product/domains/today.md", document_paths)
-        self.assertNotIn("docs/product/domains/train.md", document_paths)
-        self.assertEqual("today-nonfocus-add-to-focus", bundle["previous_handoff"]["slice_id"])
+        expected_doc = self.example_markdown_path(second_slice)
+        if (self.repo_root / expected_doc).exists():
+            self.assertIn(expected_doc, document_paths)
+        self.assertEqual(first_slice_id, bundle["previous_handoff"]["slice_id"])
         self.assertEqual("domain-tested", bundle["previous_handoff"]["proof_level"])
         self.assertIn("running-app-smoke", bundle["previous_handoff"]["missing_proof_levels"])
         self.assertIn(
-            "Today Continue Add to Focus interaction",
+            example_handoff["contract_status_changes"][0]["contract"],
             bundle["previous_handoff"]["contract_status_changes"][0]["contract"]
         )
         self.assertEqual("clean", bundle["previous_handoff"]["repo_clean_status"])
         self.assertEqual("not-checked", bundle["previous_handoff"]["git_mirror_status"])
-        self.assertIn("Added explicit Add to Focus action", bundle["previous_handoff_summary"])
+        self.assertIn(example_handoff["summary"].split(".")[0], bundle["previous_handoff_summary"])
         self.assertIn("Proof level: `domain-tested`", bundle["previous_handoff_summary"])
-        self.assertIn("Contract status changes: Today Continue Add to Focus interaction", bundle["previous_handoff_summary"])
+        self.assertIn(
+            f"Contract status changes: {example_handoff['contract_status_changes'][0]['contract']}",
+            bundle["previous_handoff_summary"]
+        )
         self.assertIn("Residual risks: No manual simulator pass", bundle["previous_handoff_summary"])
         self.assertIn("Repo clean status: `clean`", bundle["previous_handoff_summary"])
         self.assertIn("Git mirror status: `not-checked`", bundle["previous_handoff_summary"])
@@ -746,52 +790,59 @@ class AutomationHarnessTests(unittest.TestCase):
             [item["tier"] for item in bundle["validation_ownership"]]
         )
         self.assertEqual(
-            "today-continue-copy-proofread",
+            third_slice_id,
             bundle["queue"]["adjacent_queued_slices"][0]["slice_id"]
         )
 
     def test_build_context_preserves_legacy_previous_handoff_as_read_only_context(self) -> None:
+        first_slice_id = self.example_slice_id_at(0)
+        second_slice_id = self.example_slice_id_at(1)
+        example_handoff = policy.load_json(self.example_handoff_path)
         with tempfile.TemporaryDirectory() as temp_dir:
             handoff_dir = Path(temp_dir)
-            legacy_handoff = policy.load_json(self.example_handoff_path)
+            legacy_handoff = json.loads(json.dumps(example_handoff))
             legacy_handoff.pop("proof_level")
             legacy_handoff.pop("missing_proof_levels")
             legacy_handoff["risks"] = legacy_handoff.pop("residual_risks")
             legacy_handoff.pop("contract_status_changes")
             legacy_handoff.pop("repo_clean_status")
             legacy_handoff.pop("git_mirror_status")
-            legacy_path = handoff_dir / "20260421T153000Z-today-nonfocus-add-to-focus.json"
+            legacy_path = handoff_dir / self.example_handoff_filename()
             legacy_path.write_text(json.dumps(legacy_handoff), encoding="utf-8")
 
             bundle = build_context_bundle(
                 repo_root=self.repo_root,
                 queue_path=self.example_queue_path,
                 handoff_dir=handoff_dir,
-                slice_id="today-continue-ui-regression-coverage",
+                slice_id=second_slice_id,
                 max_doc_chars=1200
             )
 
-        self.assertEqual("today-nonfocus-add-to-focus", bundle["previous_handoff"]["slice_id"])
+        self.assertEqual(first_slice_id, bundle["previous_handoff"]["slice_id"])
         self.assertEqual("legacy-unknown", bundle["previous_handoff"]["proof_level"])
-        self.assertEqual(["No manual simulator pass for the new interaction"], bundle["previous_handoff"]["residual_risks"])
+        self.assertEqual(example_handoff["residual_risks"], bundle["previous_handoff"]["residual_risks"])
         self.assertEqual("legacy-unknown", bundle["previous_handoff"]["repo_clean_status"])
         self.assertEqual("legacy-unknown", bundle["previous_handoff"]["git_mirror_status"])
         self.assertIn("Proof level: `legacy-unknown`", bundle["previous_handoff_summary"])
 
     def test_render_prompt_includes_slice_fields_previous_handoff_and_template(self) -> None:
+        first_slice_id = self.example_slice_id_at(0)
+        second_slice = self.example_slice_at(1)
+        second_slice_id = second_slice["slice_id"]
+        third_slice_id = self.example_slice_id_at(2)
         with tempfile.TemporaryDirectory() as temp_dir:
             handoff_dir = Path(temp_dir)
             shutil.copy(
                 self.example_handoff_path,
-                handoff_dir / "20260421T153000Z-today-nonfocus-add-to-focus.json"
+                handoff_dir / self.example_handoff_filename()
             )
             queue_data = policy.load_queue(self.example_queue_path, self.queue_schema_path)
-            slice_record = self.require_slice_record(queue_data, "today-continue-ui-regression-coverage")
+            slice_record = self.require_slice_record(queue_data, second_slice_id)
             context_bundle = build_context_bundle(
                 repo_root=self.repo_root,
                 queue_path=self.example_queue_path,
                 handoff_dir=handoff_dir,
-                slice_id="today-continue-ui-regression-coverage",
+                slice_id=second_slice_id,
                 max_doc_chars=1200
             )
             prompt_text = render_prompt(
@@ -801,15 +852,15 @@ class AutomationHarnessTests(unittest.TestCase):
                 handoff_path=Path("/tmp/handoff.json")
             )
 
-        self.assertIn("today-continue-ui-regression-coverage", prompt_text)
-        self.assertIn("Add regression coverage for Continue Add to Focus interaction", prompt_text)
-        self.assertIn("`today`", prompt_text)
+        self.assertIn(second_slice_id, prompt_text)
+        self.assertIn(second_slice["title"], prompt_text)
+        self.assertIn(f"`{second_slice['domain']}`", prompt_text)
         self.assertIn("`git diff --check`", prompt_text)
         self.assertIn("`supervisor_replayable`", prompt_text)
         self.assertIn("`run_report_only`", prompt_text)
-        self.assertIn("`10`", prompt_text)
-        self.assertIn("today-nonfocus-add-to-focus", prompt_text)
-        self.assertIn("today-continue-copy-proofread", prompt_text)
+        self.assertIn(f"`{second_slice['max_files_changed']}`", prompt_text)
+        self.assertIn(first_slice_id, prompt_text)
+        self.assertIn(third_slice_id, prompt_text)
         self.assertIn("/tmp/handoff.json", prompt_text)
         self.assertIn("<describe what changed", prompt_text)
         self.assertIn('"proof_level"', prompt_text)

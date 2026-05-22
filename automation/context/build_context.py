@@ -25,6 +25,7 @@ POLICY_SENTENCE = (
 CORE_DOCS = [
     ("AGENTS.md", "repo operating contract"),
     ("automation/README.md", "automation harness loop"),
+    ("Gymphant/Docs/ARCHITECTURE.md", "boundary model"),
     ("docs/architecture/boundaries.md", "boundary model"),
     ("docs/workflows/validation.md", "validation workflow"),
     ("docs/workflows/agent-handoff.md", "handoff workflow")
@@ -36,45 +37,6 @@ DOMAIN_DOCS = {
     ],
     "repo-tooling": [
         ("automation/README.md", "automation harness contract")
-    ],
-    "today": [
-        ("docs/product/domain-index.md", "owner lookup"),
-        ("docs/product/domains/today.md", "Today domain contract")
-    ],
-    "train": [
-        ("docs/product/domain-index.md", "owner lookup"),
-        ("docs/product/domains/train.md", "Train domain contract")
-    ],
-    "write": [
-        ("docs/product/domain-index.md", "owner lookup"),
-        ("docs/product/domains/write.md", "Write domain contract")
-    ],
-    "career": [
-        ("docs/product/domain-index.md", "owner lookup"),
-        ("docs/product/domains/career.md", "Career domain contract")
-    ],
-    "home": [
-        ("docs/product/domain-index.md", "owner lookup"),
-        ("docs/product/domains/home.md", "Home domain contract")
-    ],
-    "patterns": [
-        ("docs/product/domain-index.md", "owner lookup"),
-        ("docs/product/domains/patterns.md", "Patterns domain contract")
-    ],
-    "reminders": [
-        ("docs/product/domain-index.md", "owner lookup"),
-        ("docs/product/domains/reminders.md", "Reminders domain contract")
-    ],
-    "runtime": [
-        ("docs/product/domain-index.md", "owner lookup"),
-        ("docs/product/domains/app-runtime.md", "App runtime contract"),
-        ("docs/runtime/observability.md", "runtime observability")
-    ],
-    "voice": [
-        ("docs/product/domain-index.md", "owner lookup"),
-        ("docs/product/voice-transcription.md", "voice transcription contract"),
-        ("docs/runtime/ml-privacy.md", "ML privacy and local-first rules"),
-        ("docs/runtime/ml-model-posture.md", "model posture")
     ]
 }
 
@@ -384,6 +346,10 @@ def resolve_document_specs(
 ) -> list[tuple[str, str]]:
     specs = list(CORE_DOCS)
     specs.extend(DOMAIN_DOCS.get(slice_record["domain"], []))
+    if slice_record["domain"] not in DOMAIN_DOCS:
+        domain_index = "docs/product/domain-index.md"
+        if (repo_root / domain_index).exists():
+            specs.append((domain_index, "owner lookup"))
     specs.extend(slice_scoped_doc_specs(slice_record, repo_root))
 
     fallback_domain_doc = f"docs/product/domains/{slice_record['domain']}.md"
