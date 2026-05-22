@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -75,4 +75,4 @@ jobs:
       - name: Deploy
         if: steps.pages.outputs.enabled == 'true'
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
