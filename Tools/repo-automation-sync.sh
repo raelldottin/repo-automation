@@ -239,7 +239,14 @@ def remove_empty_dirs(root: Path) -> None:
             pass
 
 
-def sync_entries(source_root: Path, target_root: Path, entries: list[Entry], *, check: bool) -> int:
+def sync_entries(
+    source_root: Path,
+    target_root: Path,
+    entries: list[Entry],
+    *,
+    check: bool,
+    force_templates: bool = False
+) -> int:
     target_root_resolved = target_root.resolve(strict=False)
     issues: list[str] = []
     changes = 0
@@ -249,7 +256,7 @@ def sync_entries(source_root: Path, target_root: Path, entries: list[Entry], *, 
         expected = {target for _, target, _ in pairs}
 
         for source, target, display in pairs:
-            if entry.template and target.exists():
+            if entry.template and target.exists() and not force_templates:
                 continue
 
             drift = file_drift(source, target, preserve_executable=entry.preserve_executable)
@@ -346,6 +353,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--target", help="Destination repo-automation folder. Defaults to manifest default_target.")
     parser.add_argument("--source", default=str(repo_root), help="Source repository root. Defaults to this checkout.")
     parser.add_argument("--manifest", help="Manifest path. Defaults to <source>/automation/reusable-manifest.json.")
+    parser.add_argument(
+        "--force-templates",
+        action="store_true",
+        help="Re-baseline template entries to source content even when destination files already exist. "
+        "Consumer-added files in template directories still survive."
+    )
     args = parser.parse_args(argv[1:])
 
     source_root = Path(args.source).expanduser().resolve(strict=True)
@@ -357,10 +370,22 @@ def main(argv: list[str]) -> int:
         safe_result = ensure_auto_update_target_safe(target_root)
         if safe_result != 0:
             return safe_result
-        sync_result = sync_entries(source_root, target_root, entries, check=False)
+        sync_result = sync_entries(
+            source_root,
+            target_root,
+            entries,
+            check=False,
+            force_templates=args.force_templates
+        )
         if sync_result != 0:
             return sync_result
-        return sync_entries(source_root, target_root, entries, check=True)
+        return sync_entries(
+            source_root,
+            target_root,
+            entries,
+            check=True,
+            force_templates=args.force_templates
+        )
 
     if args.sync:
         target_root.mkdir(parents=True, exist_ok=True)
@@ -369,7 +394,13 @@ def main(argv: list[str]) -> int:
         print("result: drift found (target missing)")
         return 1
 
-    return sync_entries(source_root, target_root, entries, check=args.check)
+    return sync_entries(
+        source_root,
+        target_root,
+        entries,
+        check=args.check,
+        force_templates=args.force_templates
+    )
 
 
 if __name__ == "__main__":
