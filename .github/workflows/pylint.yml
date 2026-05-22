@@ -37,12 +37,4 @@ jobs:
           python -m pip install -r requirements-dev.txt
 
       - name: Run Pylint
-        run: |
-          pylint \
-            --recursive=y \
-            --source-roots=. \
-            --output-format=colorized \
-            --disable=missing-module-docstring,missing-class-docstring,missing-function-docstring \
-            --disable=too-few-public-methods,too-many-arguments,too-many-locals \
-            --disable=import-error,duplicate-code \
-            automation/
+        run: pylint --output-format=colorized automation/

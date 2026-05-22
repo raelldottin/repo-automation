@@ -15,3 +15,30 @@ omit = [
 show_missing = true
 skip_covered = false
 precision = 1
+
+[tool.pylint.main]
+recursive = true
+source-roots = ["."]
+
+[tool.pylint.format]
+max-line-length = 130
+
+[tool.pylint."messages control"]
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-locals",
+    "too-many-public-methods",
+    "too-many-instance-attributes",
+    "too-many-return-statements",
+    "too-many-branches",
+    "too-many-statements",
+    "too-many-positional-arguments",
+    "import-error",
+    "duplicate-code",
+    "broad-exception-caught",
+    "redefined-outer-name",
+]
