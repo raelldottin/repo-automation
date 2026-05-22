@@ -1,5 +1,5 @@
 coverage==7.6.1
-mkdocs-material==9.5.34
+mkdocs-material==9.7.6
 pip-audit==2.7.3
 pylint==4.0.5
 pytest==9.0.3
