@@ -1,16 +1,14 @@
 """CodSpeed benchmarks for the reusable supervisor.
 
-Benchmarks are pytest fixtures with the ``benchmark`` marker provided by
-``pytest-codspeed``. CodSpeed runs each benchmark function under instrumentation
-and reports performance deltas across commits.
-
-These benchmarks are intentionally light: they exercise the schema loader,
-context bundle builder, and policy selection helpers without external I/O
-beyond reading bundled example payloads.
+These benchmarks use the ``pytest-codspeed`` benchmark fixture for precise
+measurement of the core harness paths CodSpeed should track across commits.
+They stay intentionally light: each benchmark exercises bundled examples and
+asserts the measured result without touching consumer repository state.
 """
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -28,21 +26,44 @@ HANDOFF_SCHEMA = REPO_ROOT / "automation/schemas/handoff.schema.json"
 
 @pytest.mark.benchmark
 def test_load_queue_benchmark(benchmark):
-    benchmark(policy.load_queue, EXAMPLE_QUEUE, SLICE_SCHEMA)
+    queue_data = benchmark(policy.load_queue, EXAMPLE_QUEUE, SLICE_SCHEMA)
+
+    assert queue_data["version"] == 1
+    assert len(queue_data["slices"]) == 3
 
 
 @pytest.mark.benchmark
 def test_select_next_slice_benchmark(benchmark):
     queue_data = policy.load_queue(EXAMPLE_QUEUE, SLICE_SCHEMA)
-    benchmark(policy.select_next_slice, queue_data)
+    selected_slice = benchmark(policy.select_next_slice, queue_data)
+
+    assert selected_slice is not None
+    assert selected_slice["slice_id"] == "today-continue-ui-regression-coverage"
+
+
+@pytest.mark.benchmark
+def test_validate_handoff_benchmark(benchmark):
+    handoff = policy.load_json(EXAMPLE_HANDOFF)
+    handoff_schema = policy.load_schema(HANDOFF_SCHEMA)
+
+    validation = benchmark(policy.validate_document, handoff, handoff_schema)
+
+    assert validation.is_valid
+    assert validation.errors == []
 
 
 @pytest.mark.benchmark
 def test_build_context_bundle_benchmark(benchmark, tmp_path):
     queue_data = policy.load_queue(EXAMPLE_QUEUE, SLICE_SCHEMA)
-    slice_id = queue_data["slices"][0]["slice_id"]
+    selected_slice = policy.select_next_slice(queue_data)
+    assert selected_slice is not None
+    slice_id = selected_slice["slice_id"]
     handoff_dir = tmp_path / "handoffs"
     handoff_dir.mkdir()
+    shutil.copy2(
+        EXAMPLE_HANDOFF,
+        handoff_dir / "20260421T153000Z-today-nonfocus-add-to-focus.json",
+    )
 
     def run():
         return build_context_bundle(
@@ -53,4 +74,7 @@ def test_build_context_bundle_benchmark(benchmark, tmp_path):
             max_doc_chars=200,
         )
 
-    benchmark(run)
+    context_bundle = benchmark(run)
+
+    assert context_bundle["slice"]["slice_id"] == slice_id
+    assert context_bundle["previous_handoff"]["slice_id"] == "today-nonfocus-add-to-focus"
