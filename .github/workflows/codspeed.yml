@@ -33,8 +33,7 @@ jobs:
           python -m pip install -r requirements-dev.txt
 
       - name: Run CodSpeed benchmarks
-        if: steps.codspeed.outputs.configured == '1'
         uses: CodSpeedHQ/action@v4
         with:
           mode: simulation
-          run: pytest automation/tests/test_benchmarks.py --codspeed
+          run: python -m pytest automation/tests/test_benchmarks.py --codspeed
