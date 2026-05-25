@@ -65,6 +65,12 @@ List relevant higher proof that still has not been run in `missing_proof_levels`
 - Include any out-of-scope dirt you observed in `dirty_paths_outside_scope`.
 - Use UTC ISO-8601 in `timestamp`.
 
+## Clean GitHub Stop
+
+- A clean stop requires all changes in every touched repository to be committed and pushed to GitHub.
+- Before final handoff, verify `git status --short` is empty and `git rev-list --left-right --count HEAD...@{u}` is `0 0` for each touched repository.
+- Use `git_mirror_status: "mirrored"` only when the current branch is even with its upstream. If the branch has no upstream or push fails, report the blocker and do not claim a clean stop.
+
 ## Stop Conditions
 
 Stop and write a `blocked` or `failed` handoff when any of these are true:

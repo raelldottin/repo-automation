@@ -149,7 +149,18 @@ Use `contract_status_changes` for durable contract movement, not for every small
 
 Use `residual_risks` for gaps that still matter after validation. Do not leave this empty; use `No known residual risk.` only when there is genuinely nothing useful to call out.
 
-Use `repo_clean_status` and `git_mirror_status` to separate local handoff truth from GitHub/Xcode/release mirroring. `mirrored` should mean the current local branch is even with its upstream; otherwise use `not-mirrored`, `not-relevant`, or `not-checked`.
+Use `repo_clean_status` and `git_mirror_status` to separate local handoff truth from GitHub/Xcode/release mirroring. `mirrored` means the current local branch is even with its upstream after all changes have been committed and pushed to GitHub; otherwise use `not-mirrored`, `not-relevant`, or `not-checked`.
+
+## Clean GitHub Stop
+
+Every completed task must end with a clean GitHub stop for each touched repository:
+
+1. Commit all changes in logical commits.
+2. Push the current branch to its GitHub upstream.
+3. Verify `git status --short` prints no output.
+4. Verify `git rev-list --left-right --count HEAD...@{u}` prints `0 0`.
+
+If the branch has no upstream, the push is rejected, credentials are unavailable, or any other blocker prevents the check, record the concrete blocker and do not call the stop clean.
 
 ## Proof Level Ladder
 
