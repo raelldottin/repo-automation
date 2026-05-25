@@ -260,6 +260,143 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertTrue(script_path.exists())
         self.assertTrue(os.access(script_path, os.X_OK))
 
+    def test_agent_wrapper_auto_selects_claude_for_claude_code_context(self) -> None:
+        script_path = self.repo_root / "automation/supervisor/run_agent.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repo_root = temp_path / "repo"
+            repo_root.mkdir()
+            (repo_root / ".git").mkdir()
+            prompt_path = temp_path / "prompt.md"
+            prompt_path.write_text("slice prompt", encoding="utf-8")
+            context_path = temp_path / "context.json"
+            context_path.write_text("{}", encoding="utf-8")
+            handoff_path = temp_path / "handoff.json"
+            capture_path = temp_path / "capture.txt"
+            bin_dir = temp_path / "bin"
+            bin_dir.mkdir()
+            self.write_fake_executable(
+                bin_dir / "claude",
+                """#!/usr/bin/env bash
+{
+  for arg in "$@"; do printf 'arg:%s\\n' "$arg"; done
+  printf 'cwd:%s\\n' "$PWD"
+  printf 'context:%s\\n' "${REPO_AUTOMATION_SUPERVISOR_CONTEXT_FILE:-}"
+  printf 'handoff:%s\\n' "${REPO_AUTOMATION_SUPERVISOR_HANDOFF_FILE:-}"
+  printf 'slice:%s\\n' "${REPO_AUTOMATION_SUPERVISOR_SLICE_ID:-}"
+  printf 'legacy_context:%s\\n' "${OWLORY_SUPERVISOR_CONTEXT_FILE:-}"
+  printf 'stdin:'
+  cat
+  printf '\\n'
+} > "$CAPTURE_FILE"
+"""
+            )
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+            env["CAPTURE_FILE"] = str(capture_path)
+            env["CLAUDE_CODE"] = "1"
+            env.pop("REPO_AUTOMATION_AGENT_RUNNER", None)
+
+            result = subprocess.run(
+                [
+                    str(script_path),
+                    "--repo-root",
+                    str(repo_root),
+                    "--prompt-file",
+                    str(prompt_path),
+                    "--context-file",
+                    str(context_path),
+                    "--handoff-file",
+                    str(handoff_path),
+                    "--slice-id",
+                    "slice-a"
+                ],
+                cwd=self.repo_root,
+                env=env,
+                capture_output=True,
+                text=True
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            capture = capture_path.read_text(encoding="utf-8")
+            self.assertIn("arg:--print", capture)
+            self.assertIn("arg:--input-format", capture)
+            self.assertIn("arg:text", capture)
+            self.assertIn("arg:--no-session-persistence", capture)
+            self.assertIn("arg:--permission-mode", capture)
+            self.assertIn("arg:bypassPermissions", capture)
+            self.assertIn("arg:--add-dir", capture)
+            self.assertIn(f"arg:{repo_root}", capture)
+            self.assertIn(f"cwd:{repo_root}", capture)
+            self.assertIn(f"context:{context_path}", capture)
+            self.assertIn(f"handoff:{handoff_path}", capture)
+            self.assertIn("slice:slice-a", capture)
+            self.assertIn(f"legacy_context:{context_path}", capture)
+            self.assertIn("stdin:slice prompt", capture)
+
+    def test_agent_wrapper_can_still_launch_codex_when_requested(self) -> None:
+        script_path = self.repo_root / "automation/supervisor/run_agent.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repo_root = temp_path / "repo"
+            repo_root.mkdir()
+            (repo_root / ".git").mkdir()
+            prompt_path = temp_path / "prompt.md"
+            prompt_path.write_text("codex prompt", encoding="utf-8")
+            context_path = temp_path / "context.json"
+            context_path.write_text("{}", encoding="utf-8")
+            handoff_path = temp_path / "handoff.json"
+            capture_path = temp_path / "capture.txt"
+            bin_dir = temp_path / "bin"
+            bin_dir.mkdir()
+            self.write_fake_executable(
+                bin_dir / "codex",
+                """#!/usr/bin/env bash
+{
+  for arg in "$@"; do printf 'arg:%s\\n' "$arg"; done
+  printf 'cwd:%s\\n' "$PWD"
+  printf 'stdin:'
+  cat
+  printf '\\n'
+} > "$CAPTURE_FILE"
+"""
+            )
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+            env["CAPTURE_FILE"] = str(capture_path)
+            env["REPO_AUTOMATION_AGENT_RUNNER"] = "codex"
+
+            result = subprocess.run(
+                [
+                    str(script_path),
+                    "--repo-root",
+                    str(repo_root),
+                    "--prompt-file",
+                    str(prompt_path),
+                    "--context-file",
+                    str(context_path),
+                    "--handoff-file",
+                    str(handoff_path),
+                    "--slice-id",
+                    "slice-b"
+                ],
+                cwd=self.repo_root,
+                env=env,
+                capture_output=True,
+                text=True
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            capture = capture_path.read_text(encoding="utf-8")
+            self.assertIn("arg:--ask-for-approval", capture)
+            self.assertIn("arg:never", capture)
+            self.assertIn("arg:exec", capture)
+            self.assertIn("arg:--sandbox", capture)
+            self.assertIn("arg:workspace-write", capture)
+            self.assertIn("arg:-", capture)
+            self.assertIn(f"cwd:{repo_root}", capture)
+            self.assertIn("stdin:codex prompt", capture)
+
     def test_format_agent_command_shell_quotes_placeholder_values(self) -> None:
         formatted = format_agent_command(
             command_template=(
@@ -932,6 +1069,10 @@ class AutomationHarnessTests(unittest.TestCase):
             )
             for command in commands
         ]
+
+    def write_fake_executable(self, path: Path, body: str) -> None:
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
 
 
 if __name__ == "__main__":
