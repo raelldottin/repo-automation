@@ -3,5 +3,5 @@ mkdocs-material==9.7.6
 pip-audit==2.7.3
 pylint==4.0.5
 pytest==9.0.3
-pytest-codspeed==5.0.2
+pytest-codspeed==5.0.3
 pytest-cov==6.0.0
