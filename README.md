@@ -19,10 +19,10 @@ Reusable supervised automation for bounded agent work.
 
 - Repo-specific product rules, build commands, or release policy.
 - A live work queue for your project.
-- Automatic commits or remote pushes for consumer repositories.
+- Silent commits or remote pushes for consumer repositories.
 - Recursive self-spawning from inside an agent run.
 
-Each consuming repository owns its queue, validation commands, domain docs, handoff history, and local safety policy.
+Each consuming repository owns its queue, validation commands, domain docs, handoff history, and local safety policy. The reusable policy expects each task to finish with a clean GitHub stop: all touched repositories committed, pushed to their GitHub upstreams, locally clean, and even with upstream. Consumers may decide how to automate that requirement, but they should not claim a clean stop until `git status --short` is empty and `git rev-list --left-right --count HEAD...@{u}` returns `0 0`.
 
 ## Layout
 

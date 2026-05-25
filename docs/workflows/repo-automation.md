@@ -117,6 +117,17 @@ A future repository should consume `repo-automation` as a reusable package or te
 
 New repositories must start from examples or templates, not Owlory's live queue, handoffs, proofs, or SecondBrain history.
 
+## Clean GitHub Stop Contract
+
+Reusable automation assumes every task ends with a clean GitHub stop across all touched repositories. A clean stop requires:
+
+1. all changes committed in logical commits
+2. the current branch pushed to its GitHub upstream
+3. `git status --short` returning no output
+4. `git rev-list --left-right --count HEAD...@{u}` returning `0 0`
+
+This applies even in multi-agent workspaces. If another agent leaves dirt in a repo, inspect it, commit or deliberately preserve it, push the resulting branch, and report the exact state. If a branch has no upstream, credentials fail, or a push is rejected, record that blocker explicitly and do not call the stop clean.
+
 ## Agent Runner Selection
 
 `automation/supervisor/run_agent.sh` is the reusable launch wrapper for fresh slice agents. Its default `auto` mode supports both Codex and Claude Code without changing `policy.agent_command_template` in every consumer queue.
