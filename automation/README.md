@@ -341,7 +341,16 @@ Run the supervisor with the repo-owned default agent command:
 python3 automation/supervisor/run_next.py
 ```
 
-The live queue points `policy.agent_command_template` at `automation/supervisor/run_agent.sh`. That wrapper launches a fresh non-interactive Codex process with the rendered prompt on stdin, `workspace-write` sandboxing, and no approval prompts. The prompt still requires the run to write the JSON handoff at the supervisor-provided handoff path.
+The live queue points `policy.agent_command_template` at `automation/supervisor/run_agent.sh`. That wrapper launches a fresh non-interactive agent process with the rendered prompt on stdin. In `auto` mode it selects Claude Code when the supervisor is already running inside a Claude Code process tree, otherwise it prefers Codex when `codex` is available and falls back to Claude Code when only `claude` is available. The prompt still requires the run to write the JSON handoff at the supervisor-provided handoff path.
+
+Runner selection can be pinned with:
+
+```bash
+REPO_AUTOMATION_AGENT_RUNNER=claude python3 automation/supervisor/run_next.py
+REPO_AUTOMATION_AGENT_RUNNER=codex python3 automation/supervisor/run_next.py
+```
+
+Supported runner values are `auto`, `codex`, and `claude`. Codex runs with `--ask-for-approval never`, `workspace-write` sandboxing, and the prompt on stdin. Claude Code runs with `--print`, `--input-format text`, `--no-session-persistence`, `--permission-mode bypassPermissions`, `--add-dir <repo_root>`, and the prompt on stdin. Override executables with `REPO_AUTOMATION_CODEX_BIN` or `REPO_AUTOMATION_CLAUDE_BIN`; legacy `OWLORY_CODEX_BIN` is still accepted for Codex. Override the Claude permission mode with `REPO_AUTOMATION_CLAUDE_PERMISSION_MODE` when a consumer repository needs a stricter local policy.
 
 Run the supervisor with an explicit override only when testing another compatible agent runner:
 
@@ -360,7 +369,7 @@ Supported command-template placeholders:
 
 Placeholder values are shell-quoted by the supervisor before execution. Do not add extra quotes around placeholders in the template unless you have tested the rendered command.
 
-If the live queue file does not define `policy.agent_command_template`, pass `--agent-cmd`. The default wrapper can also use `OWLORY_CODEX_BIN` when the Codex binary is not named `codex`.
+If the live queue file does not define `policy.agent_command_template`, pass `--agent-cmd`.
 
 Smallest end-to-end manual proof with the example artifacts:
 
