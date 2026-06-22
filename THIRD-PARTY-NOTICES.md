@@ -11,13 +11,32 @@ required validations, proof ladder, handoff, clean stop).
 - License: MIT
 - Copyright (c) 2026 Matt Pocock
 
-The following `automation/prompts/` fragments adapt concepts from that project:
+Scope: the project's **engineering** and **productivity** skill sets. The
+following `automation/prompts/` fragments adapt concepts from those skills:
 
 | Fragment | Adapted from |
 |---|---|
-| `automation/prompts/intake.md` | `productivity/grilling`, `productivity/grill-me` |
-| `automation/prompts/triage.md` | `engineering/triage`, `engineering/to-issues` |
+| `automation/prompts/intake.md` | `productivity/grilling`, `productivity/grill-me`, `engineering/grill-with-docs` |
+| `automation/prompts/triage.md` | `engineering/triage`, `engineering/to-issues`, `engineering/to-prd` |
+| `automation/prompts/design.md` | `engineering/codebase-design`, `engineering/domain-modeling`, `engineering/improve-codebase-architecture`, `engineering/implement` |
+| `automation/prompts/tdd.md` | `engineering/tdd` |
 | `automation/prompts/diagnose.md` | `engineering/diagnosing-bugs` |
+| `automation/prompts/resolve-conflicts.md` | `engineering/resolving-merge-conflicts` |
+
+### Skills intentionally not adapted
+
+For completeness, the remaining engineering/productivity skills were considered
+and left out, because they do not map onto a bounded slice-supervisor harness:
+
+- `productivity/handoff` — the harness already has a native handoff model and
+  schema (`automation/schemas/handoff.schema.json`), which this concept would
+  duplicate.
+- `engineering/prototype` — throwaway prototyping sits outside the harness's
+  bounded, production-slice discipline.
+- `engineering/ask-matt`, `engineering/setup-matt-pocock-skills` — author-specific
+  Q&A and a skills installer, with no harness analogue.
+- `productivity/teach`, `productivity/writing-great-skills` — teaching and
+  skill-authoring guidance, unrelated to running supervised slices.
 
 ### MIT License (mattpocock/skills)
 

@@ -15,7 +15,10 @@ These tracked fragments are not injected into every run; consult the one that ma
 
 - `automation/prompts/intake.md` - grill an underspecified request into a queue-ready slice before it is queued.
 - `automation/prompts/triage.md` - classify and decompose raw incoming work into well-formed slices.
+- `automation/prompts/design.md` - when a slice reshapes structure, design deep modules and seams before implementing.
+- `automation/prompts/tdd.md` - when a slice builds behavior test-first, drive it one tracer bullet at a time.
 - `automation/prompts/diagnose.md` - when this slice fixes a bug, build a red-capable loop before hypothesizing.
+- `automation/prompts/resolve-conflicts.md` - when a fetch-then-rebase conflicts, preserve both intents and finish the integration.
 
 ## Narrow-Slice Discipline
 
