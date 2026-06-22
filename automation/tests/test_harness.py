@@ -136,6 +136,27 @@ class AutomationHarnessTests(unittest.TestCase):
         validation = policy.validate_document(handoff, handoff_schema)
         self.assertTrue(validation.is_valid, validation.errors)
 
+    def test_handoff_schema_accepts_open_questions(self) -> None:
+        handoff = policy.load_json(self.example_handoff_path)
+        handoff["open_questions"] = [
+            "Should the empty-state copy be localized in this slice?"
+        ]
+        handoff_schema = policy.load_schema(self.handoff_schema_path)
+
+        validation = policy.validate_document(handoff, handoff_schema)
+
+        self.assertTrue(validation.is_valid, validation.errors)
+
+    def test_phase_reference_fragments_exist_and_are_nonempty(self) -> None:
+        prompts_dir = self.repo_root / "automation/prompts"
+        for fragment in ("intake.md", "triage.md", "diagnose.md"):
+            path = prompts_dir / fragment
+            self.assertTrue(path.is_file(), f"missing fragment: {fragment}")
+            self.assertTrue(
+                path.read_text(encoding="utf-8").strip(),
+                f"empty fragment: {fragment}"
+            )
+
     def test_handoff_schema_accepts_valid_proof_level(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
         handoff["proof_level"] = "running-app-smoke"
