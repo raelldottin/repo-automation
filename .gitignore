@@ -10,6 +10,8 @@ pytest.xml
 .tox/
 .nox/
 .mypy_cache/
-.pyright/
+.ruff_cache/
+.ty_cache/
+.venv/
 site/
 .DS_Store
