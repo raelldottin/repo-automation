@@ -14,7 +14,7 @@ dev = [
     "pytest-codspeed==5.0.2",
     "coverage==7.14.0",
     "mkdocs-material==9.7.6",
-    "pip-audit==2.7.3",
+    "pip-audit==2.10.1",
 ]
 
 [tool.uv]
