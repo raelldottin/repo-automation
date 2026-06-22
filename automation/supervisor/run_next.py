@@ -20,34 +20,19 @@ from automation.supervisor import policy
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the next eligible queued slice under the automation supervisor.")
-    parser.add_argument(
-        "--queue",
-        default="automation/queue/slices.json",
-        help="Path to the live queue JSON file."
-    )
-    parser.add_argument(
-        "--handoff-dir",
-        default="automation/handoffs",
-        help="Directory where handoff artifacts are expected."
-    )
-    parser.add_argument(
-        "--agent-cmd",
-        help="Shell command template for the fresh agent run."
-    )
-    parser.add_argument(
-        "--autonomous-limit",
-        type=int,
-        help="Override the queue policy limit for consecutive autonomous slices."
-    )
+    parser.add_argument("--queue", default="automation/queue/slices.json", help="Path to the live queue JSON file.")
+    parser.add_argument("--handoff-dir", default="automation/handoffs", help="Directory where handoff artifacts are expected.")
+    parser.add_argument("--agent-cmd", help="Shell command template for the fresh agent run.")
+    parser.add_argument("--autonomous-limit", type=int, help="Override the queue policy limit for consecutive autonomous slices.")
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Select and package the next slice without launching the agent or mutating the queue."
+        help="Select and package the next slice without launching the agent or mutating the queue.",
     )
     parser.add_argument(
         "--include-blocked",
         action="store_true",
-        help="When no queued slice is eligible, report blocked/deferred slices and their recommended unblockers."
+        help="When no queued slice is eligible, report blocked/deferred slices and their recommended unblockers.",
     )
     return parser.parse_args()
 
@@ -65,18 +50,13 @@ def main() -> int:
     queue_data = policy.load_queue(queue_path, queue_schema_path)
     active = policy.active_slice(queue_data)
     if active is not None:
-        print(
-            f"stop: queue already has in_progress slice {active['slice_id']}",
-            file=sys.stderr
-        )
+        print(f"stop: queue already has in_progress slice {active['slice_id']}", file=sys.stderr)
         return 2
 
     agent_command_template = args.agent_cmd or queue_data["policy"]["agent_command_template"]
     if not args.dry_run and not agent_command_template.strip():
         print(
-            "stop: no agent command template configured. "
-            "Pass --agent-cmd or set policy.agent_command_template.",
-            file=sys.stderr
+            "stop: no agent command template configured. Pass --agent-cmd or set policy.agent_command_template.", file=sys.stderr
         )
         return 2
 
@@ -104,26 +84,17 @@ def main() -> int:
 
         dirty_paths_before_run = policy.git_dirty_paths(repo_root)
         unexpected_dirty = policy.out_of_scope_paths(
-            dirty_paths_before_run,
-            next_slice["allowed_paths"],
-            queue_data["policy"]["supervisor_owned_paths"]
+            dirty_paths_before_run, next_slice["allowed_paths"], queue_data["policy"]["supervisor_owned_paths"]
         )
         if unexpected_dirty:
-            print(
-                "stop: repo is dirty outside the next slice scope:\n- " +
-                "\n- ".join(unexpected_dirty),
-                file=sys.stderr
-            )
+            print("stop: repo is dirty outside the next slice scope:\n- " + "\n- ".join(unexpected_dirty), file=sys.stderr)
             return 2
 
         timestamp_token = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         handoff_filename = policy.make_handoff_filename(next_slice["slice_id"], timestamp_token)
         handoff_path = handoff_dir / handoff_filename
         context_bundle = build_context_bundle(
-            repo_root=repo_root,
-            queue_path=queue_path,
-            handoff_dir=handoff_dir,
-            slice_id=next_slice["slice_id"]
+            repo_root=repo_root, queue_path=queue_path, handoff_dir=handoff_dir, slice_id=next_slice["slice_id"]
         )
 
         if args.dry_run:
@@ -131,12 +102,10 @@ def main() -> int:
                 "selected_slice": next_slice["slice_id"],
                 "handoff_path": str(handoff_path),
                 "required_validations": next_slice["required_validations"],
-                "supervisor_replayable_validations": policy.supervisor_replayable_validations(
-                    next_slice["required_validations"]
-                ),
+                "supervisor_replayable_validations": policy.supervisor_replayable_validations(next_slice["required_validations"]),
                 "validation_ownership": context_bundle["validation_ownership"],
                 "allowed_paths": next_slice["allowed_paths"],
-                "context_documents": [doc["path"] for doc in context_bundle["documents"]]
+                "context_documents": [doc["path"] for doc in context_bundle["documents"]],
             }
             if args.include_blocked:
                 report["blocked_slices"] = [
@@ -144,7 +113,7 @@ def main() -> int:
                         "slice_id": blocked.slice_id,
                         "status": blocked.status,
                         "entry_condition": blocked.entry_condition,
-                        "recommended_unblocker": blocked.recommended_unblocker
+                        "recommended_unblocker": blocked.recommended_unblocker,
                     }
                     for blocked in policy.blocked_slice_reports(queue_data)
                 ]
@@ -161,57 +130,57 @@ def main() -> int:
                 slice_record=next_slice,
                 context_bundle=context_bundle,
                 handoff_path=handoff_path,
-                command_template=agent_command_template
+                command_template=agent_command_template,
             )
         except Exception as error:  # pragma: no cover - last-resort queue recovery
             queue_data = policy.load_queue(queue_path, queue_schema_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
-            print(json.dumps(
-                make_failure_report(
-                    slice_record=next_slice,
-                    reason=f"Supervisor error while running slice: {error}",
-                    completed_runs=completed_runs,
-                    autonomous_limit=autonomous_limit
-                ),
-                indent=2
-            ))
+            print(
+                json.dumps(
+                    make_failure_report(
+                        slice_record=next_slice,
+                        reason=f"Supervisor error while running slice: {error}",
+                        completed_runs=completed_runs,
+                        autonomous_limit=autonomous_limit,
+                    ),
+                    indent=2,
+                )
+            )
             return 2
 
         if exit_code != 0:
             queue_data = policy.load_queue(queue_path, queue_schema_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
-            print(json.dumps(
-                make_failure_report(
-                    slice_record=next_slice,
-                    reason=(
-                        f"Agent command exited with code {exit_code} "
-                        f"for slice {next_slice['slice_id']}."
+            print(
+                json.dumps(
+                    make_failure_report(
+                        slice_record=next_slice,
+                        reason=(f"Agent command exited with code {exit_code} for slice {next_slice['slice_id']}."),
+                        completed_runs=completed_runs,
+                        autonomous_limit=autonomous_limit,
                     ),
-                    completed_runs=completed_runs,
-                    autonomous_limit=autonomous_limit
-                ),
-                indent=2
-            ))
+                    indent=2,
+                )
+            )
             return exit_code
 
         if not handoff_path.exists():
             queue_data = policy.load_queue(queue_path, queue_schema_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
-            print(json.dumps(
-                make_failure_report(
-                    slice_record=next_slice,
-                    reason=(
-                        f"Missing handoff artifact for slice {next_slice['slice_id']} "
-                        f"at {handoff_path}"
+            print(
+                json.dumps(
+                    make_failure_report(
+                        slice_record=next_slice,
+                        reason=(f"Missing handoff artifact for slice {next_slice['slice_id']} at {handoff_path}"),
+                        completed_runs=completed_runs,
+                        autonomous_limit=autonomous_limit,
                     ),
-                    completed_runs=completed_runs,
-                    autonomous_limit=autonomous_limit
-                ),
-                indent=2
-            ))
+                    indent=2,
+                )
+            )
             return 2
 
         try:
@@ -220,30 +189,34 @@ def main() -> int:
             queue_data = policy.load_queue(queue_path, queue_schema_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
-            print(json.dumps(
-                make_failure_report(
-                    slice_record=next_slice,
-                    reason=f"Invalid handoff artifact: {error}",
-                    completed_runs=completed_runs,
-                    autonomous_limit=autonomous_limit
-                ),
-                indent=2
-            ))
+            print(
+                json.dumps(
+                    make_failure_report(
+                        slice_record=next_slice,
+                        reason=f"Invalid handoff artifact: {error}",
+                        completed_runs=completed_runs,
+                        autonomous_limit=autonomous_limit,
+                    ),
+                    indent=2,
+                )
+            )
             return 2
 
         if handoff["slice_id"] != next_slice["slice_id"]:
             queue_data = policy.load_queue(queue_path, queue_schema_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
-            print(json.dumps(
-                make_failure_report(
-                    slice_record=next_slice,
-                    reason="Handoff slice_id does not match the in-progress slice.",
-                    completed_runs=completed_runs,
-                    autonomous_limit=autonomous_limit
-                ),
-                indent=2
-            ))
+            print(
+                json.dumps(
+                    make_failure_report(
+                        slice_record=next_slice,
+                        reason="Handoff slice_id does not match the in-progress slice.",
+                        completed_runs=completed_runs,
+                        autonomous_limit=autonomous_limit,
+                    ),
+                    indent=2,
+                )
+            )
             return 2
 
         dirty_paths_after_run = policy.git_dirty_paths(repo_root)
@@ -252,7 +225,7 @@ def main() -> int:
             validation_replays = policy.replay_validation_commands(
                 repo_root=repo_root,
                 required_validations=next_slice["required_validations"],
-                validations_passed=handoff["validations_passed"]
+                validations_passed=handoff["validations_passed"],
             )
         completed_runs += 1
         decision = policy.evaluate_completion(
@@ -263,41 +236,32 @@ def main() -> int:
             dirty_paths_after_run=dirty_paths_after_run,
             completed_autonomous_runs=completed_runs,
             run_limit=autonomous_limit,
-            validation_replays=validation_replays
+            validation_replays=validation_replays,
         )
 
         queue_data = policy.load_queue(queue_path, queue_schema_path)
         queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], decision.queue_status)
         policy.write_json(queue_path, queue_data)
 
-        print(json.dumps(
-            make_decision_report(
-                slice_record=next_slice,
-                decision=decision,
-                completed_runs=completed_runs,
-                autonomous_limit=autonomous_limit
-            ),
-            indent=2
-        ))
+        print(
+            json.dumps(
+                make_decision_report(
+                    slice_record=next_slice, decision=decision, completed_runs=completed_runs, autonomous_limit=autonomous_limit
+                ),
+                indent=2,
+            )
+        )
 
         if not decision.should_continue:
             return 0
 
 
 def run_agent(
-    repo_root: Path,
-    queue_data: dict,
-    slice_record: dict,
-    context_bundle: dict,
-    handoff_path: Path,
-    command_template: str
+    repo_root: Path, queue_data: dict, slice_record: dict, context_bundle: dict, handoff_path: Path, command_template: str
 ) -> int:
     timeout_seconds = queue_data["policy"]["handoff_timeout_seconds"]
     prompt_text = render_prompt(
-        repo_root=repo_root,
-        slice_record=slice_record,
-        context_bundle=context_bundle,
-        handoff_path=handoff_path
+        repo_root=repo_root, slice_record=slice_record, context_bundle=context_bundle, handoff_path=handoff_path
     )
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as prompt_handle:
@@ -316,16 +280,11 @@ def run_agent(
         prompt_path=prompt_path,
         context_path=context_path,
         handoff_path=handoff_path,
-        slice_id=slice_record["slice_id"]
+        slice_id=slice_record["slice_id"],
     )
 
     try:
-        result = subprocess.run(
-            formatted_command,
-            cwd=repo_root,
-            shell=True,
-            timeout=timeout_seconds
-        )
+        result = subprocess.run(formatted_command, cwd=repo_root, shell=True, timeout=timeout_seconds)
         return result.returncode
     finally:
         prompt_path.unlink(missing_ok=True)
@@ -333,12 +292,7 @@ def run_agent(
 
 
 def format_agent_command(
-    command_template: str,
-    repo_root: Path,
-    prompt_path: Path,
-    context_path: Path,
-    handoff_path: Path,
-    slice_id: str
+    command_template: str, repo_root: Path, prompt_path: Path, context_path: Path, handoff_path: Path, slice_id: str
 ) -> str:
     """Render the shell command with quoted placeholder values."""
     return command_template.format(
@@ -346,16 +300,11 @@ def format_agent_command(
         prompt_file=shlex.quote(str(prompt_path)),
         context_file=shlex.quote(str(context_path)),
         handoff_file=shlex.quote(str(handoff_path)),
-        slice_id=shlex.quote(slice_id)
+        slice_id=shlex.quote(slice_id),
     )
 
 
-def render_prompt(
-    repo_root: Path,
-    slice_record: dict,
-    context_bundle: dict,
-    handoff_path: Path
-) -> str:
+def render_prompt(repo_root: Path, slice_record: dict, context_bundle: dict, handoff_path: Path) -> str:
     base_prompt = (repo_root / "automation/prompts/base.md").read_text(encoding="utf-8")
     slice_prompt = (repo_root / "automation/prompts/slice.md").read_text(encoding="utf-8")
     replacements = {
@@ -365,27 +314,19 @@ def render_prompt(
         "__SLICE_PRIORITY__": str(slice_record["priority"]),
         "__ALLOWED_PATHS__": format_value_list(slice_record["allowed_paths"]),
         "__REQUIRED_VALIDATIONS__": format_value_list(slice_record["required_validations"]),
-        "__VALIDATION_OWNERSHIP__": format_validation_ownership(
-            context_bundle["validation_ownership"]
-        ),
+        "__VALIDATION_OWNERSHIP__": format_validation_ownership(context_bundle["validation_ownership"]),
         "__DIFF_BUDGET__": str(slice_record["max_files_changed"]),
         "__DEPENDENCIES__": format_value_list(slice_record["depends_on"], empty_message="- none"),
         "__SLICE_NOTES__": slice_record["notes"] or "None.",
         "__POLICY_SENTENCE__": context_bundle["policy_sentence"],
-        "__ADJACENT_SLICE_CANDIDATES__": format_adjacent_slices(
-            context_bundle["queue"]["adjacent_queued_slices"]
-        ),
+        "__ADJACENT_SLICE_CANDIDATES__": format_adjacent_slices(context_bundle["queue"]["adjacent_queued_slices"]),
         "__PREVIOUS_HANDOFF_SUMMARY__": context_bundle["previous_handoff_summary"],
         "__QUEUE_METADATA_JSON__": json.dumps(context_bundle["queue"], indent=2, ensure_ascii=False),
         "__ACCEPTANCE_CHECKS__": format_plain_list(context_bundle["acceptance_checks"]),
         "__CONTEXT_DOCUMENT_INDEX__": format_documents(context_bundle["documents"]),
         "__CONTEXT_JSON__": json.dumps(context_bundle, indent=2, ensure_ascii=False),
         "__HANDOFF_PATH__": str(handoff_path),
-        "__HANDOFF_TEMPLATE_JSON__": json.dumps(
-            context_bundle["handoff_template"],
-            indent=2,
-            ensure_ascii=False
-        )
+        "__HANDOFF_TEMPLATE_JSON__": json.dumps(context_bundle["handoff_template"], indent=2, ensure_ascii=False),
     }
     rendered_slice_prompt = slice_prompt
     for token, value in replacements.items():
@@ -420,28 +361,17 @@ def format_adjacent_slices(adjacent_slices: list[dict]) -> str:
 def format_documents(documents: list[dict]) -> str:
     if not documents:
         return "- none"
-    return "\n".join(
-        f"- `{document['path']}`: {document['reason']}"
-        for document in documents
-    )
+    return "\n".join(f"- `{document['path']}`: {document['reason']}" for document in documents)
 
 
 def format_validation_ownership(validation_ownership: list[dict]) -> str:
     if not validation_ownership:
         return "- none"
-    return "\n".join(
-        (
-            f"- `{item['command']}` -> `{item['tier']}`: {item['reason']}"
-        )
-        for item in validation_ownership
-    )
+    return "\n".join((f"- `{item['command']}` -> `{item['tier']}`: {item['reason']}") for item in validation_ownership)
 
 
 def make_decision_report(
-    slice_record: dict,
-    decision: policy.CompletionDecision,
-    completed_runs: int,
-    autonomous_limit: int
+    slice_record: dict, decision: policy.CompletionDecision, completed_runs: int, autonomous_limit: int
 ) -> dict:
     return {
         "slice_id": slice_record["slice_id"],
@@ -452,22 +382,15 @@ def make_decision_report(
         "next_slice_id": decision.next_slice_id,
         "changed_file_count": decision.changed_file_count,
         "required_validation_failures": decision.required_validation_failures,
-        "supervisor_validation_replays": serialize_validation_replays(
-            decision.supervisor_validation_replays
-        ),
+        "supervisor_validation_replays": serialize_validation_replays(decision.supervisor_validation_replays),
         "dirty_paths_outside_scope": decision.dirty_paths_outside_scope,
         "files_touched_outside_scope": decision.files_touched_outside_scope,
         "completed_autonomous_runs": completed_runs,
-        "autonomous_run_limit": autonomous_limit
+        "autonomous_run_limit": autonomous_limit,
     }
 
 
-def make_failure_report(
-    slice_record: dict,
-    reason: str,
-    completed_runs: int,
-    autonomous_limit: int
-) -> dict:
+def make_failure_report(slice_record: dict, reason: str, completed_runs: int, autonomous_limit: int) -> dict:
     return {
         "slice_id": slice_record["slice_id"],
         "queue_status": "failed",
@@ -481,20 +404,13 @@ def make_failure_report(
         "dirty_paths_outside_scope": [],
         "files_touched_outside_scope": [],
         "completed_autonomous_runs": completed_runs,
-        "autonomous_run_limit": autonomous_limit
+        "autonomous_run_limit": autonomous_limit,
     }
 
 
-def serialize_validation_replays(
-    replay_results: list[policy.ValidationReplayResult]
-) -> list[dict]:
+def serialize_validation_replays(replay_results: list[policy.ValidationReplayResult]) -> list[dict]:
     return [
-        {
-            "command": replay.command,
-            "success": replay.success,
-            "exit_code": replay.exit_code,
-            "reason": replay.reason
-        }
+        {"command": replay.command, "success": replay.success, "exit_code": replay.exit_code, "reason": replay.reason}
         for replay in replay_results
     ]
 
