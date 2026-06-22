@@ -139,7 +139,14 @@ class AutomationHarnessTests(unittest.TestCase):
 
     def test_phase_reference_fragments_exist_and_are_nonempty(self) -> None:
         prompts_dir = self.repo_root / "automation/prompts"
-        for fragment in ("intake.md", "triage.md", "diagnose.md"):
+        for fragment in (
+            "intake.md",
+            "triage.md",
+            "design.md",
+            "tdd.md",
+            "diagnose.md",
+            "resolve-conflicts.md",
+        ):
             path = prompts_dir / fragment
             self.assertTrue(path.is_file(), f"missing fragment: {fragment}")
             self.assertTrue(path.read_text(encoding="utf-8").strip(), f"empty fragment: {fragment}")
