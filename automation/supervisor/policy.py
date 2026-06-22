@@ -55,25 +55,16 @@ class CompletionDecision:
 
 SUPERVISOR_VALIDATION_REPLAY_COMMANDS: dict[str, list[str]] = {
     "make architecture": ["make", "architecture"],
-    "git diff --check": ["git", "diff", "--check"]
+    "git diff --check": ["git", "diff", "--check"],
 }
 
 RUN_REPORT_ONLY_VALIDATION_PREFIX_REASONS: tuple[tuple[str, str], ...] = (
-    (
-        "make test-domain ",
-        "Domain-targeted tests are currently run-reported and not replayed by the supervisor."
-    ),
+    ("make test-domain ", "Domain-targeted tests are currently run-reported and not replayed by the supervisor."),
 )
 
 NEVER_SUPERVISOR_OWNED_VALIDATION_PREFIX_REASONS: tuple[tuple[str, str], ...] = (
-    (
-        "manual ",
-        "Manual validation steps are never supervisor-owned and should not be replayed."
-    ),
-    (
-        "open ",
-        "UI-launch steps are never supervisor-owned and should not be replayed."
-    ),
+    ("manual ", "Manual validation steps are never supervisor-owned and should not be replayed."),
+    ("open ", "UI-launch steps are never supervisor-owned and should not be replayed."),
 )
 
 
@@ -97,12 +88,7 @@ def load_json(path: Path) -> Any:
 
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        delete=False
-    ) as handle:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)
         handle.write("\n")
         temp_path = Path(handle.name)
@@ -252,22 +238,16 @@ def validate_queue_integrity(queue_data: dict[str, Any]) -> list[str]:
     for slice_record in slices:
         missing = [dep for dep in slice_record["depends_on"] if dep not in known_ids]
         if missing:
-            errors.append(
-                f"slice {slice_record['slice_id']!r} depends on unknown slice IDs: {missing}"
-            )
+            errors.append(f"slice {slice_record['slice_id']!r} depends on unknown slice IDs: {missing}")
         if slice_record["status"] in {"blocked", "deferred"}:
             entry_condition = slice_record.get("entry_condition", "").strip()
             if not entry_condition:
                 errors.append(
-                    f"slice {slice_record['slice_id']!r} is {slice_record['status']!r} "
-                    "but is missing an explicit entry_condition"
+                    f"slice {slice_record['slice_id']!r} is {slice_record['status']!r} but is missing an explicit entry_condition"
                 )
             recommended_unblocker = slice_record.get("recommended_unblocker", "").strip()
             if recommended_unblocker and recommended_unblocker not in known_ids:
-                errors.append(
-                    f"slice {slice_record['slice_id']!r} recommends unknown unblocker "
-                    f"{recommended_unblocker!r}"
-                )
+                errors.append(f"slice {slice_record['slice_id']!r} recommends unknown unblocker {recommended_unblocker!r}")
 
     return errors
 
@@ -315,13 +295,15 @@ def blocked_slice_reports(queue_data: dict[str, Any]) -> list[BlockedSliceReport
     for slice_record in queue_data["slices"]:
         if slice_record["status"] not in {"blocked", "deferred"}:
             continue
-        reports.append(BlockedSliceReport(
-            slice_id=slice_record["slice_id"],
-            status=slice_record["status"],
-            entry_condition=slice_record.get("entry_condition", "").strip(),
-            recommended_unblocker=slice_record.get("recommended_unblocker", "").strip(),
-            notes=slice_record.get("notes", "").strip()
-        ))
+        reports.append(
+            BlockedSliceReport(
+                slice_id=slice_record["slice_id"],
+                status=slice_record["status"],
+                entry_condition=slice_record.get("entry_condition", "").strip(),
+                recommended_unblocker=slice_record.get("recommended_unblocker", "").strip(),
+                notes=slice_record.get("notes", "").strip(),
+            )
+        )
     return reports
 
 
@@ -338,23 +320,16 @@ def git_dirty_paths(repo_root: Path) -> list[str]:
     commands = [
         ["git", "diff", "--name-only", "--relative"],
         ["git", "diff", "--name-only", "--relative", "--cached"],
-        ["git", "ls-files", "--others", "--exclude-standard"]
+        ["git", "ls-files", "--others", "--exclude-standard"],
     ]
     dirty_paths: list[str] = []
 
     for command in commands:
         try:
-            result = subprocess.run(
-                command,
-                cwd=repo_root,
-                check=True,
-                capture_output=True,
-                text=True
-            )
+            result = subprocess.run(command, cwd=repo_root, check=True, capture_output=True, text=True)
         except FileNotFoundError as error:
             raise ConfigError(
-                f"git executable not found on PATH: {error}\n"
-                "hint: install Git, or ensure git is on PATH for this process."
+                f"git executable not found on PATH: {error}\nhint: install Git, or ensure git is on PATH for this process."
             ) from error
         except subprocess.CalledProcessError as error:
             if not (repo_root / ".git").exists():
@@ -364,10 +339,7 @@ def git_dirty_paths(repo_root: Path) -> list[str]:
                     "commit the bootstrap, then re-run."
                 ) from error
             stderr_text = (error.stderr or "").strip() or "(empty)"
-            raise ConfigError(
-                f"git command failed in {repo_root}: {' '.join(command)}\n"
-                f"stderr: {stderr_text}"
-            ) from error
+            raise ConfigError(f"git command failed in {repo_root}: {' '.join(command)}\nstderr: {stderr_text}") from error
         for raw_line in result.stdout.splitlines():
             if not raw_line:
                 continue
@@ -385,17 +357,10 @@ def path_matches_prefix(path: str, prefix: str) -> bool:
     normalized_prefix = normalize_repo_path(prefix)
     if normalized_prefix == ".":
         return True
-    return (
-        normalized_path == normalized_prefix or
-        normalized_path.startswith(f"{normalized_prefix}/")
-    )
+    return normalized_path == normalized_prefix or normalized_path.startswith(f"{normalized_prefix}/")
 
 
-def out_of_scope_paths(
-    dirty_paths: list[str],
-    allowed_paths: list[str],
-    supervisor_owned_paths: list[str]
-) -> list[str]:
+def out_of_scope_paths(dirty_paths: list[str], allowed_paths: list[str], supervisor_owned_paths: list[str]) -> list[str]:
     unexpected: list[str] = []
     for path in dirty_paths:
         if any(path_matches_prefix(path, prefix) for prefix in supervisor_owned_paths):
@@ -412,11 +377,7 @@ def introduced_paths(before_paths: list[str], after_paths: list[str]) -> list[st
     return sorted(after - before)
 
 
-def count_paths_within_scope(
-    dirty_paths: list[str],
-    allowed_paths: list[str],
-    supervisor_owned_paths: list[str]
-) -> int:
+def count_paths_within_scope(dirty_paths: list[str], allowed_paths: list[str], supervisor_owned_paths: list[str]) -> int:
     count = 0
     for path in dirty_paths:
         if any(path_matches_prefix(path, prefix) for prefix in supervisor_owned_paths):
@@ -431,9 +392,7 @@ def normalize_paths(paths: list[str]) -> list[str]:
 
 
 def required_validation_failures(
-    required_validations: list[str],
-    validations_passed: list[str],
-    validations_failed: list[str]
+    required_validations: list[str], validations_passed: list[str], validations_failed: list[str]
 ) -> list[str]:
     passed = set(validations_passed)
     failed = set(validations_failed)
@@ -450,29 +409,21 @@ def classify_validation_ownership(command: str) -> ValidationOwnership:
         return ValidationOwnership(
             command=normalized,
             tier="supervisor_replayable",
-            reason="The supervisor replays this exact allowlisted command before continuation."
+            reason="The supervisor replays this exact allowlisted command before continuation.",
         )
 
     for prefix, reason in NEVER_SUPERVISOR_OWNED_VALIDATION_PREFIX_REASONS:
         if normalized.startswith(prefix):
-            return ValidationOwnership(
-                command=normalized,
-                tier="never_supervisor_owned",
-                reason=reason
-            )
+            return ValidationOwnership(command=normalized, tier="never_supervisor_owned", reason=reason)
 
     for prefix, reason in RUN_REPORT_ONLY_VALIDATION_PREFIX_REASONS:
         if normalized.startswith(prefix):
-            return ValidationOwnership(
-                command=normalized,
-                tier="run_report_only",
-                reason=reason
-            )
+            return ValidationOwnership(command=normalized, tier="run_report_only", reason=reason)
 
     return ValidationOwnership(
         command=normalized,
         tier="run_report_only",
-        reason="This command is currently run-reported only and not replayed by the supervisor."
+        reason="This command is currently run-reported only and not replayed by the supervisor.",
     )
 
 
@@ -499,24 +450,15 @@ def supervisor_replayable_validations(required_validations: list[str]) -> list[s
     return replayable
 
 
-def default_validation_replay_runner(
-    repo_root: Path,
-    argv: list[str]
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        argv,
-        cwd=repo_root,
-        check=False,
-        capture_output=True,
-        text=True
-    )
+def default_validation_replay_runner(repo_root: Path, argv: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(argv, cwd=repo_root, check=False, capture_output=True, text=True)
 
 
 def replay_validation_commands(
     repo_root: Path,
     required_validations: list[str],
     validations_passed: list[str],
-    runner: Optional[Callable[[Path, list[str]], subprocess.CompletedProcess[str]]] = None
+    runner: Optional[Callable[[Path, list[str]], subprocess.CompletedProcess[str]]] = None,
 ) -> list[ValidationReplayResult]:
     execute = runner or default_validation_replay_runner
     passed = set(validations_passed)
@@ -531,23 +473,13 @@ def replay_validation_commands(
         except OSError as error:
             results.append(
                 ValidationReplayResult(
-                    command=command,
-                    success=False,
-                    exit_code=None,
-                    reason=f"Supervisor replay could not execute: {error}"
+                    command=command, success=False, exit_code=None, reason=f"Supervisor replay could not execute: {error}"
                 )
             )
             continue
 
         if result.returncode == 0:
-            results.append(
-                ValidationReplayResult(
-                    command=command,
-                    success=True,
-                    exit_code=0,
-                    reason="Supervisor replay passed."
-                )
-            )
+            results.append(ValidationReplayResult(command=command, success=True, exit_code=0, reason="Supervisor replay passed."))
             continue
 
         results.append(
@@ -555,7 +487,7 @@ def replay_validation_commands(
                 command=command,
                 success=False,
                 exit_code=result.returncode,
-                reason=f"Supervisor replay exited with code {result.returncode}."
+                reason=f"Supervisor replay exited with code {result.returncode}.",
             )
         )
 
@@ -572,11 +504,7 @@ def validation_replay_failures(replay_results: list[ValidationReplayResult]) -> 
 
 
 def next_slice_eligibility(
-    queue_data: dict[str, Any],
-    current_slice_id: str,
-    recommended_next_slice: str,
-    completed_autonomous_runs: int,
-    run_limit: int
+    queue_data: dict[str, Any], current_slice_id: str, recommended_next_slice: str, completed_autonomous_runs: int, run_limit: int
 ) -> CompletionDecision:
     queue_if_current_done = set_slice_status(queue_data, current_slice_id, "done")
     highest_priority_next = select_next_slice(queue_if_current_done)
@@ -593,7 +521,7 @@ def next_slice_eligibility(
             required_validation_failures=[],
             dirty_paths_outside_scope=[],
             files_touched_outside_scope=[],
-            changed_file_count=0
+            changed_file_count=0,
         )
 
     if normalized_recommendation:
@@ -608,7 +536,7 @@ def next_slice_eligibility(
                 required_validation_failures=[],
                 dirty_paths_outside_scope=[],
                 files_touched_outside_scope=[],
-                changed_file_count=0
+                changed_file_count=0,
             )
 
         recommended_record = find_slice(queue_if_current_done, normalized_recommendation)
@@ -617,16 +545,13 @@ def next_slice_eligibility(
                 queue_status="done",
                 decision="stop_for_review",
                 should_continue=False,
-                stop_reason=(
-                    "The handoff recommended a next slice that is not present in "
-                    "automation/queue/slices.json."
-                ),
+                stop_reason=("The handoff recommended a next slice that is not present in automation/queue/slices.json."),
                 next_slice_id=None,
                 recommended_next_slice=normalized_recommendation,
                 required_validation_failures=[],
                 dirty_paths_outside_scope=[],
                 files_touched_outside_scope=[],
-                changed_file_count=0
+                changed_file_count=0,
             )
 
         if recommended_record["status"] != "queued":
@@ -643,7 +568,7 @@ def next_slice_eligibility(
                 required_validation_failures=[],
                 dirty_paths_outside_scope=[],
                 files_touched_outside_scope=[],
-                changed_file_count=0
+                changed_file_count=0,
             )
 
         if not dependencies_satisfied(recommended_record, queue_if_current_done):
@@ -652,15 +577,14 @@ def next_slice_eligibility(
                 decision="stop_for_review",
                 should_continue=False,
                 stop_reason=(
-                    f"The handoff recommended slice {normalized_recommendation!r}, "
-                    "but its dependencies are not yet satisfied."
+                    f"The handoff recommended slice {normalized_recommendation!r}, but its dependencies are not yet satisfied."
                 ),
                 next_slice_id=None,
                 recommended_next_slice=normalized_recommendation,
                 required_validation_failures=[],
                 dirty_paths_outside_scope=[],
                 files_touched_outside_scope=[],
-                changed_file_count=0
+                changed_file_count=0,
             )
 
         if highest_priority_next is None:
@@ -677,7 +601,7 @@ def next_slice_eligibility(
                 required_validation_failures=[],
                 dirty_paths_outside_scope=[],
                 files_touched_outside_scope=[],
-                changed_file_count=0
+                changed_file_count=0,
             )
 
         if highest_priority_next["slice_id"] != normalized_recommendation:
@@ -694,7 +618,7 @@ def next_slice_eligibility(
                 required_validation_failures=[],
                 dirty_paths_outside_scope=[],
                 files_touched_outside_scope=[],
-                changed_file_count=0
+                changed_file_count=0,
             )
 
         return CompletionDecision(
@@ -707,7 +631,7 @@ def next_slice_eligibility(
             required_validation_failures=[],
             dirty_paths_outside_scope=[],
             files_touched_outside_scope=[],
-            changed_file_count=0
+            changed_file_count=0,
         )
 
     if highest_priority_next is None:
@@ -721,7 +645,7 @@ def next_slice_eligibility(
             required_validation_failures=[],
             dirty_paths_outside_scope=[],
             files_touched_outside_scope=[],
-            changed_file_count=0
+            changed_file_count=0,
         )
 
     return CompletionDecision(
@@ -734,15 +658,11 @@ def next_slice_eligibility(
         required_validation_failures=[],
         dirty_paths_outside_scope=[],
         files_touched_outside_scope=[],
-        changed_file_count=0
+        changed_file_count=0,
     )
 
 
-def latest_handoff_for_slice(
-    handoff_dir: Path,
-    slice_id: str,
-    schema_path: Path
-) -> Optional[dict[str, Any]]:
+def latest_handoff_for_slice(handoff_dir: Path, slice_id: str, schema_path: Path) -> Optional[dict[str, Any]]:
     latest_match: Optional[dict[str, Any]] = None
     latest_key: Optional[str] = None
 
@@ -782,7 +702,7 @@ def load_legacy_handoff_for_context(handoff_path: Path) -> Optional[dict[str, An
         "validations_failed",
         "recommended_next_slice",
         "recommended_next_reason",
-        "timestamp"
+        "timestamp",
     }
     if not required_legacy_keys.issubset(payload):
         return None
@@ -793,10 +713,7 @@ def load_legacy_handoff_for_context(handoff_path: Path) -> Optional[dict[str, An
 
 
 def make_handoff_filename(slice_id: str, timestamp_token: str) -> str:
-    safe_slice_id = "".join(
-        character if character.isalnum() or character in {"-", "_"} else "-"
-        for character in slice_id
-    )
+    safe_slice_id = "".join(character if character.isalnum() or character in {"-", "_"} else "-" for character in slice_id)
     return f"{timestamp_token}-{safe_slice_id}.json"
 
 
@@ -808,38 +725,26 @@ def evaluate_completion(
     dirty_paths_after_run: list[str],
     completed_autonomous_runs: int,
     run_limit: int,
-    validation_replays: Optional[list[ValidationReplayResult]] = None
+    validation_replays: Optional[list[ValidationReplayResult]] = None,
 ) -> CompletionDecision:
     validation_replays = validation_replays or []
     supervisor_owned_paths = queue_data["policy"]["supervisor_owned_paths"]
     introduced_dirty_paths = introduced_paths(dirty_paths_before_run, dirty_paths_after_run)
-    validation_failures = sorted(set(
-        required_validation_failures(
-            slice_record["required_validations"],
-            handoff["validations_passed"],
-            handoff["validations_failed"]
-        ) +
-        validation_replay_failures(validation_replays)
-    ))
-    unexpected_dirty_paths = out_of_scope_paths(
-        introduced_dirty_paths,
-        slice_record["allowed_paths"],
-        supervisor_owned_paths
+    validation_failures = sorted(
+        set(
+            required_validation_failures(
+                slice_record["required_validations"], handoff["validations_passed"], handoff["validations_failed"]
+            )
+            + validation_replay_failures(validation_replays)
+        )
     )
+    unexpected_dirty_paths = out_of_scope_paths(introduced_dirty_paths, slice_record["allowed_paths"], supervisor_owned_paths)
     files_touched = normalize_paths(handoff["files_touched"])
-    files_touched_outside_scope = out_of_scope_paths(
-        files_touched,
-        slice_record["allowed_paths"],
-        supervisor_owned_paths
-    )
+    files_touched_outside_scope = out_of_scope_paths(files_touched, slice_record["allowed_paths"], supervisor_owned_paths)
     reported_out_of_scope = sorted(set(handoff["dirty_paths_outside_scope"]))
     changed_file_count = max(
-        count_paths_within_scope(
-            introduced_dirty_paths,
-            slice_record["allowed_paths"],
-            supervisor_owned_paths
-        ),
-        len(set(files_touched))
+        count_paths_within_scope(introduced_dirty_paths, slice_record["allowed_paths"], supervisor_owned_paths),
+        len(set(files_touched)),
     )
 
     if handoff["status"] == "blocked":
@@ -854,7 +759,7 @@ def evaluate_completion(
             dirty_paths_outside_scope=unexpected_dirty_paths or reported_out_of_scope,
             files_touched_outside_scope=files_touched_outside_scope,
             changed_file_count=changed_file_count,
-            supervisor_validation_replays=validation_replays
+            supervisor_validation_replays=validation_replays,
         )
 
     if handoff["status"] == "failed":
@@ -869,7 +774,7 @@ def evaluate_completion(
             dirty_paths_outside_scope=unexpected_dirty_paths or reported_out_of_scope,
             files_touched_outside_scope=files_touched_outside_scope,
             changed_file_count=changed_file_count,
-            supervisor_validation_replays=validation_replays
+            supervisor_validation_replays=validation_replays,
         )
 
     if validation_failures:
@@ -884,7 +789,7 @@ def evaluate_completion(
             dirty_paths_outside_scope=unexpected_dirty_paths or reported_out_of_scope,
             files_touched_outside_scope=files_touched_outside_scope,
             changed_file_count=changed_file_count,
-            supervisor_validation_replays=validation_replays
+            supervisor_validation_replays=validation_replays,
         )
 
     if unexpected_dirty_paths or reported_out_of_scope or files_touched_outside_scope:
@@ -899,7 +804,7 @@ def evaluate_completion(
             dirty_paths_outside_scope=sorted(set(unexpected_dirty_paths + reported_out_of_scope)),
             files_touched_outside_scope=files_touched_outside_scope,
             changed_file_count=changed_file_count,
-            supervisor_validation_replays=validation_replays
+            supervisor_validation_replays=validation_replays,
         )
 
     if changed_file_count > slice_record["max_files_changed"]:
@@ -907,17 +812,14 @@ def evaluate_completion(
             queue_status="failed",
             decision="stop_failed",
             should_continue=False,
-            stop_reason=(
-                f"Slice exceeded max_files_changed "
-                f"({changed_file_count} > {slice_record['max_files_changed']})."
-            ),
+            stop_reason=(f"Slice exceeded max_files_changed ({changed_file_count} > {slice_record['max_files_changed']})."),
             next_slice_id=None,
             recommended_next_slice=handoff["recommended_next_slice"].strip(),
             required_validation_failures=validation_failures,
             dirty_paths_outside_scope=[],
             files_touched_outside_scope=[],
             changed_file_count=changed_file_count,
-            supervisor_validation_replays=validation_replays
+            supervisor_validation_replays=validation_replays,
         )
 
     next_decision = next_slice_eligibility(
@@ -925,7 +827,7 @@ def evaluate_completion(
         current_slice_id=slice_record["slice_id"],
         recommended_next_slice=handoff["recommended_next_slice"],
         completed_autonomous_runs=completed_autonomous_runs,
-        run_limit=run_limit
+        run_limit=run_limit,
     )
     next_decision.required_validation_failures = []
     next_decision.dirty_paths_outside_scope = []
