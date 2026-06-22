@@ -9,6 +9,14 @@ You are running one fresh slice under the Owlory automation harness.
 - Do not recursively spawn, schedule, or launch another agent from inside this run.
 - Do not edit `automation/queue/slices.json` or manage queue state from inside this run. The supervisor owns queue transitions.
 
+## Phase Reference Fragments
+
+These tracked fragments are not injected into every run; consult the one that matches the phase you are in.
+
+- `automation/prompts/intake.md` - grill an underspecified request into a queue-ready slice before it is queued.
+- `automation/prompts/triage.md` - classify and decompose raw incoming work into well-formed slices.
+- `automation/prompts/diagnose.md` - when this slice fixes a bug, build a red-capable loop before hypothesizing.
+
 ## Narrow-Slice Discipline
 
 - Complete only the queued slice described in this prompt package.
@@ -63,6 +71,7 @@ List relevant higher proof that still has not been run in `missing_proof_levels`
 - Set `repo_clean_status` to `clean`, `dirty`, or `unknown` based on the final repo state.
 - Set `git_mirror_status` to `mirrored`, `not-mirrored`, `not-relevant`, or `not-checked`.
 - Include any out-of-scope dirt you observed in `dirty_paths_outside_scope`.
+- Use the optional `open_questions` list for decisions you could not resolve in this run; omit it or leave it empty when none remain.
 - Use UTC ISO-8601 in `timestamp`.
 
 ## Clean GitHub Stop
