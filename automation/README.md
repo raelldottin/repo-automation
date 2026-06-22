@@ -36,11 +36,16 @@ Each fresh run starts from a tracked three-part prompt package:
 
 The agent does not inherit previous conversational state. The prompt package and compact context bundle are the only intended carry-forward inputs for each slice run.
 
-Three additional tracked fragments cover the phases around a slice run. They are not injected into every run; use the one that matches the phase:
+Additional tracked fragments cover the phases around a slice run. They are not injected into every run; use the one that matches the phase:
 
 - `automation/prompts/intake.md`: grill an underspecified request into a queue-ready slice, one decision at a time, before it is queued.
 - `automation/prompts/triage.md`: classify and verify raw incoming work, then decompose it into well-formed vertical slices in dependency order.
+- `automation/prompts/design.md`: for a slice that reshapes structure, design deep modules and place seams in the project's vocabulary before implementing.
+- `automation/prompts/tdd.md`: for a slice that builds behavior test-first, drive a red-green loop one tracer bullet at a time, testing behavior over implementation.
 - `automation/prompts/diagnose.md`: for a bugfix slice, build a red-capable feedback loop before hypothesizing, then minimise, fix, regression-test, and strip instrumentation before a clean stop.
+- `automation/prompts/resolve-conflicts.md`: for an in-progress merge or rebase, preserve both sides' intent, re-run validations, and finish the integration to a clean stop.
+
+These fragments adapt concepts from the engineering and productivity skills of [mattpocock/skills](https://github.com/mattpocock/skills) (MIT); see `THIRD-PARTY-NOTICES.md`.
 
 ## Lifecycle
 
