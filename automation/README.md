@@ -36,6 +36,12 @@ Each fresh run starts from a tracked three-part prompt package:
 
 The agent does not inherit previous conversational state. The prompt package and compact context bundle are the only intended carry-forward inputs for each slice run.
 
+Three additional tracked fragments cover the phases around a slice run. They are not injected into every run; use the one that matches the phase:
+
+- `automation/prompts/intake.md`: grill an underspecified request into a queue-ready slice, one decision at a time, before it is queued.
+- `automation/prompts/triage.md`: classify and verify raw incoming work, then decompose it into well-formed vertical slices in dependency order.
+- `automation/prompts/diagnose.md`: for a bugfix slice, build a red-capable feedback loop before hypothesizing, then minimise, fix, regression-test, and strip instrumentation before a clean stop.
+
 ## Lifecycle
 
 1. A human or review run adds queued slices to `automation/queue/slices.json`.
@@ -150,6 +156,8 @@ Use `contract_status_changes` for durable contract movement, not for every small
 Use `residual_risks` for gaps that still matter after validation. Do not leave this empty; use `No known residual risk.` only when there is genuinely nothing useful to call out.
 
 Use `repo_clean_status` and `git_mirror_status` to separate local handoff truth from GitHub/Xcode/release mirroring. `mirrored` means the current local branch is even with its upstream after all changes have been committed and pushed to GitHub; otherwise use `not-mirrored`, `not-relevant`, or `not-checked`.
+
+Use the optional `open_questions` array for decisions the run could not resolve autonomously — questions surfaced during diagnosis, or that slice intake left open. It carries forward what a fresh run cannot infer, so the supervisor or a human can close it. Omit the field or leave it empty when nothing is open.
 
 ## Clean GitHub Stop
 

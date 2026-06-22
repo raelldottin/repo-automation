@@ -89,6 +89,14 @@
       "preserve_executable": true,
       "delete_stale": false,
       "template": false
+    },
+    {
+      "source": "THIRD-PARTY-NOTICES.md",
+      "destination": "THIRD-PARTY-NOTICES.md",
+      "kind": "file",
+      "preserve_executable": false,
+      "delete_stale": false,
+      "template": false
     }
   ]
 }
