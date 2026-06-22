@@ -75,14 +75,6 @@
       "template": false
     },
     {
-      "source": "pyrightconfig.json",
-      "destination": "pyrightconfig.json",
-      "kind": "file",
-      "preserve_executable": false,
-      "delete_stale": false,
-      "template": true
-    },
-    {
       "source": "Tools/repo-automation-sync.sh",
       "destination": "Tools/repo-automation-sync.sh",
       "kind": "file",

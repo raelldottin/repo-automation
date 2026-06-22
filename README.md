@@ -45,10 +45,11 @@ git clone https://github.com/raelldottin/repo-automation.git
 cd repo-automation
 ```
 
-Run the standalone type check:
+Run lint and the standalone type check:
 
 ```bash
-pyright
+uv run ruff check .
+uv run ty check automation/ Tools/
 ```
 
 Build context for the example queue:
@@ -76,9 +77,10 @@ The repository ships with seven GitHub Actions workflows in `.github/`:
 - **CodSpeed** (`.github/workflows/codspeed.yml`) — runs `pytest-codspeed`
   benchmarks defined in `automation/tests/test_benchmarks.py` on every push
   and pull request. Uses OIDC authentication with the CodSpeed GitHub App.
-- **Pylint** (`.github/workflows/pylint.yml`) — recursive lint across
-  `automation/` on Python 3.11 and 3.12. Pylint configuration lives in
-  `pyproject.toml`.
+- **Lint** (`.github/workflows/lint.yml`) — `uv`-driven `ruff check`,
+  `ruff format --check`, and `ty check` across `automation/` and `Tools/` on
+  Python 3.11 and 3.12. Ruff and ty configuration lives in `pyproject.toml`;
+  the toolchain is pinned in `uv.lock`.
 - **Coverage** (`.github/workflows/coverage.yml`) — runs `test_harness.py`
   under `pytest --cov`, deselects two Owlory-specific tests that depend on
   live queue state, and comments the report on pull requests via

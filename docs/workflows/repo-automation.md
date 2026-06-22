@@ -40,8 +40,8 @@ These assets are reusable or intended to become reusable with light parameteriza
 - `automation/tests/test_harness.py`: core supervisor and context-builder regression coverage.
 - `Tools/clean-stop-check.py`: reusable after repository name and queue path are configurable.
 - `Tools/agent-handoff.sh`: reusable after repository name, read order, and validation shortcuts are configurable.
-- `pyrightconfig.json`: reusable for Python automation type-checking after include paths are generated or documented per consumer repository.
-- Make targets for `handoff`, `clean-stop`, `automation-check`, and `pyright`: reusable after app-specific targets are excluded.
+- `pyproject.toml` `[tool.ruff]` and `[tool.ty]` sections: reusable lint and type-check configuration; a consumer copies the blocks into its own `pyproject.toml` and adjusts paths.
+- Make targets for `handoff`, `clean-stop`, `automation-check`, and the lint/type checks (`uv run ruff check .`, `uv run ty check`): reusable after app-specific targets are excluded.
 
 ## Owlory-Specific Exclusions
 
@@ -266,8 +266,8 @@ work:
 - Optional override of the prompt fragments under `automation/prompts/` if the
   consumer needs different policy language (see Customizing prompt fragments
   below).
-- Optional update of `pyrightconfig.json` includes if the consumer wants its
-  own Python paths type-checked.
+- Optional update of the `[tool.ty]` paths in `pyproject.toml` if the consumer
+  wants its own Python paths type-checked.
 - A consumer-specific remote (e.g., `git remote add origin <url>`) and an
   initial push. The smoke test does not exercise remote publication.
 
@@ -291,8 +291,8 @@ The consumer-side flow:
    `stop: repo is dirty outside the next slice scope` message.
 
 2. **Overrides survive re-sync.** The manifest entries marked
-   `template: true` (currently `automation/prompts/`, `automation/examples/`,
-   and `pyrightconfig.json`) are first-time-only: `Tools/repo-automation-sync.sh`
+   `template: true` (currently `automation/prompts/` and `automation/examples/`)
+   are first-time-only: `Tools/repo-automation-sync.sh`
    copies them when the destination file does not yet exist and otherwise
    leaves them alone. Consumer-added files in those directories also survive
    (those entries set `delete_stale: false`).
