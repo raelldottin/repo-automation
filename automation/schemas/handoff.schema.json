@@ -162,6 +162,13 @@
     "timestamp": {
       "type": "string",
       "minLength": 1
+    },
+    "open_questions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     }
   }
 }
