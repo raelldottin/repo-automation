@@ -1,0 +1,87 @@
+name: Effectiveness Benchmark
+
+# Measures how effective the harness is at producing working code by having it rebuild
+# ProgramBench programs and scoring them with ProgramBench's black-box test suites.
+#
+# This is heavyweight (Docker cleanroom images + LLM calls + long runtime), so it never
+# runs on push/PR. Trigger it manually, or let the nightly schedule run it. Requires the
+# repository secret NVIDIA_API_KEY (an OpenAI-compatible key for the agent).
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_all:
+        description: "Run the full ProgramBench instance set"
+        type: boolean
+        default: true
+      instances:
+        description: "Space-separated instance ids (used when run_all is false)"
+        type: string
+        default: ""
+  schedule:
+    # 07:17 UTC nightly — off the top of the hour on purpose.
+    - cron: "17 7 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: effectiveness-benchmark
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Rebuild + eval + score
+    runs-on: ubuntu-latest # native x86_64: ProgramBench cleanroom images run without emulation.
+    timeout-minutes: 360
+    env:
+      # The harness agent talks to NVIDIA's OpenAI-compatible endpoint.
+      REPO_AUTOMATION_AGENT_RUNNER: codex
+      OPENAI_BASE_URL: https://integrate.api.nvidia.com/v1
+      OPENAI_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Require NVIDIA_API_KEY
+        run: |
+          if [ -z "${OPENAI_API_KEY}" ]; then
+            echo "::error::Repository secret NVIDIA_API_KEY is not set; the agent cannot run." >&2
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies (harness + ProgramBench)
+        run: |
+          uv sync
+          uv pip install programbench
+
+      - name: Install agent CLI (codex)
+        run: npm install -g @openai/codex
+
+      - name: Run benchmark (rebuild -> eval -> score)
+        run: |
+          if [ "${{ inputs.run_all }}" = "false" ] && [ -n "${{ inputs.instances }}" ]; then
+            uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }}
+          else
+            uv run python -m automation.benchmark all --run-dir out --all
+          fi
+
+      - name: Upload effectiveness report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: effectiveness-report
+          path: |
+            out/effectiveness-report.json
+            out/**/*.eval.json
+          if-no-files-found: warn
