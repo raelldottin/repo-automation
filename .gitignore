@@ -15,3 +15,6 @@ pytest.xml
 .venv/
 site/
 .DS_Store
+
+# Serena MCP local project cache
+.serena/
