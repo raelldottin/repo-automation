@@ -220,6 +220,12 @@ def main() -> int:
             return 2
 
         dirty_paths_after_run = policy.git_dirty_paths(repo_root)
+        
+        post_run_commit_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], 
+            check=True, capture_output=True, text=True, cwd=repo_root
+        ).stdout.strip()
+        
         validation_replays: list[policy.ValidationReplayResult] = []
         if handoff["status"] == "done":
             validation_replays = policy.replay_validation_commands(
@@ -237,6 +243,7 @@ def main() -> int:
             completed_autonomous_runs=completed_runs,
             run_limit=autonomous_limit,
             validation_replays=validation_replays,
+            post_run_commit_sha=post_run_commit_sha,
         )
 
         queue_data = policy.load_queue(queue_path, queue_schema_path)
@@ -382,6 +389,8 @@ def make_decision_report(
         "next_slice_id": decision.next_slice_id,
         "changed_file_count": decision.changed_file_count,
         "required_validation_failures": decision.required_validation_failures,
+        "missing_manual_proofs": decision.missing_manual_proofs,
+        "missing_proof_level": decision.missing_proof_level,
         "supervisor_validation_replays": serialize_validation_replays(decision.supervisor_validation_replays),
         "dirty_paths_outside_scope": decision.dirty_paths_outside_scope,
         "files_touched_outside_scope": decision.files_touched_outside_scope,
@@ -400,6 +409,8 @@ def make_failure_report(slice_record: dict, reason: str, completed_runs: int, au
         "next_slice_id": None,
         "changed_file_count": 0,
         "required_validation_failures": [],
+        "missing_manual_proofs": [],
+        "missing_proof_level": False,
         "supervisor_validation_replays": [],
         "dirty_paths_outside_scope": [],
         "files_touched_outside_scope": [],
