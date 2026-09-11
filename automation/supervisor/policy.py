@@ -51,7 +51,97 @@ class CompletionDecision:
     files_touched_outside_scope: list[str]
     changed_file_count: int
     supervisor_validation_replays: list[ValidationReplayResult] = field(default_factory=list)
+    missing_manual_proofs: list[str] = field(default_factory=list)
+    missing_proof_level: bool = False
 
+
+
+PROOF_LADDER = {
+    "doc-only": 0,
+    "domain-tested": 1,
+    "build-tested": 2,
+    "running-app-smoke": 3,
+    "flow-verified": 4,
+    "screenshot-verified": 5,
+    "device-verified": 6,
+    "testflight-verified": 7
+}
+
+def meets_proof_level(achieved: str, required: str) -> bool:
+    if not required:
+        return True
+    if not achieved:
+        return False
+    return PROOF_LADDER.get(achieved, -1) >= PROOF_LADDER.get(required, 0)
+
+def verify_manual_proofs(slice_record: dict[str, Any], handoff: dict[str, Any], post_run_commit_sha: str) -> tuple[list[str], bool]:
+    import subprocess
+    import hashlib
+    from pathlib import Path
+
+    required_proofs = slice_record.get("manual_proof", [])
+    required_level = slice_record.get("required_proof_level", "")
+    
+    provided_proofs = handoff.get("provided_proofs", [])
+    verified_sha = handoff.get("verified_commit_sha", "")
+    
+    missing_proofs = []
+    
+    if verified_sha and verified_sha != post_run_commit_sha:
+        if required_proofs:
+            missing_proofs.append("Invalid verified_commit_sha (does not match supervisor-observed HEAD)")
+    
+    provided_by_type = {}
+    for p in provided_proofs:
+        if p.get("slice_id") != slice_record.get("slice_id"):
+            continue
+        if p.get("commit_sha") != post_run_commit_sha:
+            continue
+        provided_by_type[p.get("proof_type")] = p
+
+    repo_root = Path.cwd().resolve()
+    slice_id = slice_record.get("slice_id", "")
+
+    for req in required_proofs:
+        if req not in provided_by_type:
+            missing_proofs.append(req)
+        else:
+            p = provided_by_type[req]
+            path_str = p.get("path", "")
+            try:
+                proof_path = Path(path_str).resolve()
+            except Exception:
+                missing_proofs.append(f"{req} (invalid path)")
+                continue
+                
+            expected_dir = repo_root / "automation" / "proofs" / slice_id
+            try:
+                proof_path.relative_to(expected_dir)
+            except ValueError:
+                missing_proofs.append(f"{req} (outside approved proof root)")
+                continue
+
+            if not proof_path.exists():
+                missing_proofs.append(f"{req} (missing file)")
+                continue
+                
+            expected_sha256 = p.get("sha256", "")
+            if expected_sha256:
+                try:
+                    actual_sha256 = hashlib.sha256(proof_path.read_bytes()).hexdigest()
+                    if actual_sha256 != expected_sha256:
+                        missing_proofs.append(f"{req} (sha256 mismatch)")
+                except Exception:
+                    missing_proofs.append(f"{req} (could not read file for sha256)")
+            else:
+                missing_proofs.append(f"{req} (missing sha256 in metadata)")
+                
+    achieved_level = handoff.get("proof_level", "")
+    missing_level = False
+    if required_level and not meets_proof_level(achieved_level, required_level):
+        missing_level = True
+        
+    return missing_proofs, missing_level
 
 SUPERVISOR_VALIDATION_REPLAY_COMMANDS: dict[str, list[str]] = {
     "make architecture": ["make", "architecture"],
@@ -522,6 +612,8 @@ def next_slice_eligibility(
             dirty_paths_outside_scope=[],
             files_touched_outside_scope=[],
             changed_file_count=0,
+            missing_manual_proofs=[],
+            missing_proof_level=False,
         )
 
     if normalized_recommendation:
@@ -632,6 +724,8 @@ def next_slice_eligibility(
             dirty_paths_outside_scope=[],
             files_touched_outside_scope=[],
             changed_file_count=0,
+            missing_manual_proofs=[],
+            missing_proof_level=False,
         )
 
     if highest_priority_next is None:
@@ -646,6 +740,8 @@ def next_slice_eligibility(
             dirty_paths_outside_scope=[],
             files_touched_outside_scope=[],
             changed_file_count=0,
+            missing_manual_proofs=[],
+            missing_proof_level=False,
         )
 
     return CompletionDecision(
@@ -725,7 +821,8 @@ def evaluate_completion(
     dirty_paths_after_run: list[str],
     completed_autonomous_runs: int,
     run_limit: int,
-    validation_replays: Optional[list[ValidationReplayResult]] = None,
+    validation_replays: list[ValidationReplayResult] = [],
+    post_run_commit_sha: str = "",
 ) -> CompletionDecision:
     validation_replays = validation_replays or []
     supervisor_owned_paths = queue_data["policy"]["supervisor_owned_paths"]
@@ -760,6 +857,8 @@ def evaluate_completion(
             files_touched_outside_scope=files_touched_outside_scope,
             changed_file_count=changed_file_count,
             supervisor_validation_replays=validation_replays,
+            missing_manual_proofs=[],
+            missing_proof_level=False,
         )
 
     if handoff["status"] == "failed":
@@ -775,6 +874,8 @@ def evaluate_completion(
             files_touched_outside_scope=files_touched_outside_scope,
             changed_file_count=changed_file_count,
             supervisor_validation_replays=validation_replays,
+            missing_manual_proofs=[],
+            missing_proof_level=False,
         )
 
     if validation_failures:
@@ -790,6 +891,8 @@ def evaluate_completion(
             files_touched_outside_scope=files_touched_outside_scope,
             changed_file_count=changed_file_count,
             supervisor_validation_replays=validation_replays,
+            missing_manual_proofs=[],
+            missing_proof_level=False,
         )
 
     if unexpected_dirty_paths or reported_out_of_scope or files_touched_outside_scope:
@@ -805,6 +908,8 @@ def evaluate_completion(
             files_touched_outside_scope=files_touched_outside_scope,
             changed_file_count=changed_file_count,
             supervisor_validation_replays=validation_replays,
+            missing_manual_proofs=[],
+            missing_proof_level=False,
         )
 
     if changed_file_count > slice_record["max_files_changed"]:
@@ -820,7 +925,29 @@ def evaluate_completion(
             files_touched_outside_scope=[],
             changed_file_count=changed_file_count,
             supervisor_validation_replays=validation_replays,
+            missing_manual_proofs=[],
+            missing_proof_level=False,
         )
+
+
+    if handoff["status"] == "done":
+        missing_proofs, missing_level = verify_manual_proofs(slice_record, handoff, post_run_commit_sha)
+        if missing_proofs or missing_level:
+            return CompletionDecision(
+                queue_status="failed",
+                decision="stop_failed",
+                should_continue=False,
+                stop_reason="Slice reported done, but required manual proof or proof level was missing.",
+                next_slice_id=None,
+                recommended_next_slice=handoff["recommended_next_slice"].strip(),
+                required_validation_failures=validation_failures,
+                dirty_paths_outside_scope=sorted(set(unexpected_dirty_paths + reported_out_of_scope)),
+                files_touched_outside_scope=files_touched_outside_scope,
+                changed_file_count=changed_file_count,
+                supervisor_validation_replays=validation_replays,
+                missing_manual_proofs=missing_proofs,
+                missing_proof_level=missing_level,
+            )
 
     next_decision = next_slice_eligibility(
         queue_data=queue_data,
@@ -834,4 +961,6 @@ def evaluate_completion(
     next_decision.files_touched_outside_scope = []
     next_decision.changed_file_count = changed_file_count
     next_decision.supervisor_validation_replays = validation_replays
+    next_decision.missing_manual_proofs = []
+    next_decision.missing_proof_level = False
     return next_decision

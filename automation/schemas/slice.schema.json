@@ -122,6 +122,26 @@
           },
           "recommended_unblocker": {
             "type": "string"
+          },
+          "manual_proof": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required_proof_level": {
+            "type": "string",
+            "enum": [
+              "doc-only",
+              "domain-tested",
+              "build-tested",
+              "running-app-smoke",
+              "flow-verified",
+              "screenshot-verified",
+              "device-verified",
+              "testflight-verified"
+            ]
           }
         }
       }
