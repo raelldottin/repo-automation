@@ -169,6 +169,51 @@
         "type": "string",
         "minLength": 1
       }
+    },
+    "provided_proofs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "proof_type",
+          "path",
+          "commit_sha",
+          "created_at",
+          "slice_id",
+          "sha256"
+        ],
+        "properties": {
+          "proof_type": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "commit_sha": {
+            "type": "string",
+            "minLength": 1
+          },
+          "created_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "slice_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          }
+        }
+      }
+    },
+    "verified_commit_sha": {
+      "type": "string",
+      "minLength": 1
     }
   }
 }
