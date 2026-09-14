@@ -14,19 +14,18 @@ from pathlib import Path
 import pytest
 
 from automation.context.build_context import build_context_bundle
+from automation.schemas import models
 from automation.supervisor import policy
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_QUEUE = REPO_ROOT / "automation/examples/example-slices.json"
 EXAMPLE_HANDOFF = REPO_ROOT / "automation/examples/example-handoff.json"
-SLICE_SCHEMA = REPO_ROOT / "automation/schemas/slice.schema.json"
-HANDOFF_SCHEMA = REPO_ROOT / "automation/schemas/handoff.schema.json"
 
 
 @pytest.mark.benchmark
 def test_load_queue_benchmark(benchmark):
-    queue_data = benchmark(policy.load_queue, EXAMPLE_QUEUE, SLICE_SCHEMA)
+    queue_data = benchmark(policy.load_queue, EXAMPLE_QUEUE)
 
     assert queue_data["version"] == 1
     assert len(queue_data["slices"]) == 3
@@ -34,7 +33,7 @@ def test_load_queue_benchmark(benchmark):
 
 @pytest.mark.benchmark
 def test_select_next_slice_benchmark(benchmark):
-    queue_data = policy.load_queue(EXAMPLE_QUEUE, SLICE_SCHEMA)
+    queue_data = policy.load_queue(EXAMPLE_QUEUE)
     selected_slice = benchmark(policy.select_next_slice, queue_data)
 
     assert selected_slice is not None
@@ -44,7 +43,7 @@ def test_select_next_slice_benchmark(benchmark):
 @pytest.mark.benchmark
 def test_validate_handoff_benchmark(benchmark):
     handoff = policy.load_json(EXAMPLE_HANDOFF)
-    handoff_schema = policy.load_schema(HANDOFF_SCHEMA)
+    handoff_schema = models.Handoff
 
     validation = benchmark(policy.validate_document, handoff, handoff_schema)
 
@@ -54,7 +53,7 @@ def test_validate_handoff_benchmark(benchmark):
 
 @pytest.mark.benchmark
 def test_build_context_bundle_benchmark(benchmark, tmp_path):
-    queue_data = policy.load_queue(EXAMPLE_QUEUE, SLICE_SCHEMA)
+    queue_data = policy.load_queue(EXAMPLE_QUEUE)
     selected_slice = policy.select_next_slice(queue_data)
     assert selected_slice is not None
     slice_id = selected_slice["slice_id"]

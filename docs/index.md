@@ -13,7 +13,7 @@ way from Owlory into this repo via `Tools/repo-automation-sync.sh`.
   generation.
 - `automation/prompts/` — base, slice, and review prompt fragments
   (consumer-customizable).
-- `automation/schemas/` — JSON contracts for slices and handoffs.
+- `automation/schemas/` — Pydantic contract models plus the JSON Schemas generated from them.
 - `automation/examples/` — starter queue and handoff payloads for new
   repositories.
 - `automation/tests/test_harness.py` — core supervisor and context-builder

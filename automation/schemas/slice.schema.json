@@ -1,150 +1,184 @@
 {
-  "title": "Automation Slice Queue",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "version",
-    "policy",
-    "slices"
-  ],
-  "properties": {
-    "version": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "policy": {
-      "type": "object",
+  "$comment": "Generated from automation/schemas/models.py. Do not edit by hand.",
+  "$defs": {
+    "QueuePolicy": {
       "additionalProperties": false,
+      "properties": {
+        "consecutive_autonomous_limit": {
+          "minimum": 1,
+          "title": "Consecutive Autonomous Limit",
+          "type": "integer"
+        },
+        "handoff_timeout_seconds": {
+          "minimum": 1,
+          "title": "Handoff Timeout Seconds",
+          "type": "integer"
+        },
+        "agent_command_template": {
+          "title": "Agent Command Template",
+          "type": "string"
+        },
+        "supervisor_owned_paths": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Supervisor Owned Paths",
+          "type": "array"
+        }
+      },
       "required": [
         "consecutive_autonomous_limit",
         "handoff_timeout_seconds",
         "agent_command_template",
         "supervisor_owned_paths"
       ],
+      "title": "QueuePolicy",
+      "type": "object"
+    },
+    "SliceRecord": {
+      "additionalProperties": false,
       "properties": {
-        "consecutive_autonomous_limit": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "handoff_timeout_seconds": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "agent_command_template": {
+        "slice_id": {
+          "minLength": 1,
+          "title": "Slice Id",
           "type": "string"
         },
-        "supervisor_owned_paths": {
-          "type": "array",
-          "minItems": 1,
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "in_progress",
+            "blocked",
+            "deferred",
+            "done",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "priority": {
+          "minimum": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "domain": {
+          "minLength": 1,
+          "title": "Domain",
+          "type": "string"
+        },
+        "allowed_paths": {
           "items": {
-            "type": "string",
-            "minLength": 1
-          }
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Allowed Paths",
+          "type": "array"
+        },
+        "required_validations": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Required Validations",
+          "type": "array"
+        },
+        "depends_on": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "max_files_changed": {
+          "minimum": 1,
+          "title": "Max Files Changed",
+          "type": "integer"
+        },
+        "notes": {
+          "title": "Notes",
+          "type": "string"
+        },
+        "entry_condition": {
+          "default": "",
+          "title": "Entry Condition",
+          "type": "string"
+        },
+        "recommended_unblocker": {
+          "default": "",
+          "title": "Recommended Unblocker",
+          "type": "string"
+        },
+        "manual_proof": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Manual Proof",
+          "type": "array"
+        },
+        "required_proof_level": {
+          "default": null,
+          "enum": [
+            "doc-only",
+            "domain-tested",
+            "build-tested",
+            "running-app-smoke",
+            "flow-verified",
+            "screenshot-verified",
+            "device-verified",
+            "testflight-verified"
+          ],
+          "title": "Required Proof Level",
+          "type": "string"
         }
-      }
+      },
+      "required": [
+        "slice_id",
+        "title",
+        "status",
+        "priority",
+        "domain",
+        "allowed_paths",
+        "required_validations",
+        "depends_on",
+        "max_files_changed",
+        "notes"
+      ],
+      "title": "SliceRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "minimum": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "policy": {
+      "$ref": "#/$defs/QueuePolicy"
     },
     "slices": {
-      "type": "array",
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "slice_id",
-          "title",
-          "status",
-          "priority",
-          "domain",
-          "allowed_paths",
-          "required_validations",
-          "depends_on",
-          "max_files_changed",
-          "notes"
-        ],
-        "properties": {
-          "slice_id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "title": {
-            "type": "string",
-            "minLength": 1
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "queued",
-              "in_progress",
-              "blocked",
-              "deferred",
-              "done",
-              "failed"
-            ]
-          },
-          "priority": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "domain": {
-            "type": "string",
-            "minLength": 1
-          },
-          "allowed_paths": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "required_validations": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "depends_on": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "max_files_changed": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "notes": {
-            "type": "string"
-          },
-          "entry_condition": {
-            "type": "string"
-          },
-          "recommended_unblocker": {
-            "type": "string"
-          },
-          "manual_proof": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "required_proof_level": {
-            "type": "string",
-            "enum": [
-              "doc-only",
-              "domain-tested",
-              "build-tested",
-              "running-app-smoke",
-              "flow-verified",
-              "screenshot-verified",
-              "device-verified",
-              "testflight-verified"
-            ]
-          }
-        }
-      }
+        "$ref": "#/$defs/SliceRecord"
+      },
+      "title": "Slices",
+      "type": "array"
     }
-  }
+  },
+  "required": [
+    "version",
+    "policy",
+    "slices"
+  ],
+  "title": "Automation Slice Queue",
+  "type": "object"
 }
