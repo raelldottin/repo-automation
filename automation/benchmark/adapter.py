@@ -8,14 +8,18 @@ container; the agent rebuilds on the local filesystem and the workspace is archi
 the submission. ProgramBench's cleanroom is only used later, by the eval step.
 
 The agent invocation is a single injectable seam (``runner``) so tests drive the whole
-adapter without an LLM or any external process.
+adapter without an LLM or any external process. *How* the agent is driven is a second
+seam (``strategy``): the default is ``SliceContextStrategy`` - the shipped harness
+behaviour, and lane B of the effectiveness experiment - while other lanes vary context
+and workflow only. Workspace setup, archiving and budget stay here so they are identical
+across lanes.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -24,9 +28,9 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Protocol
 
 from automation.context import build_context
-from automation.supervisor import run_next
 
 from .instances import TaskSpec
+from .strategies import RPI_DIR, ExecutionContext, ExecutionStrategy, SliceContextStrategy, StrategyResult
 
 DEFAULT_TIMEOUT_SECONDS = 1800
 # Allow the agent to touch the whole rebuild workspace.
@@ -44,6 +48,7 @@ class SubmissionResult:
     tar_path: Path
     workspace: Path
     returncode: int
+    strategy: Optional[StrategyResult] = None
 
 
 class AgentAdapter(Protocol):
@@ -108,13 +113,27 @@ def _subprocess_runner(command: str, workspace: Path, env: Mapping[str, str], ti
     return result.returncode
 
 
+# Never graded: VCS metadata and the lane's own phase artifacts.
+EXCLUDED_FROM_SUBMISSION = frozenset({".git", RPI_DIR})
+
+
 def _archive_workspace(workspace: Path, out_tar: Path) -> None:
     out_tar.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(out_tar, "w:gz") as tar:
         for entry in sorted(workspace.iterdir()):
-            if entry.name == ".git":
+            if entry.name in EXCLUDED_FROM_SUBMISSION:
                 continue
             tar.add(entry, arcname=entry.name)
+
+
+def _save_phase_artifacts(workspace: Path, out_dir: Path) -> None:
+    """Keep phase artifacts next to the submission so a result can be reproduced."""
+    source = workspace / RPI_DIR
+    if not source.is_dir():
+        return
+    destination = Path(out_dir) / "rpi"
+    shutil.rmtree(destination, ignore_errors=True)
+    shutil.copytree(source, destination)
 
 
 class SupervisorAgentAdapter:
@@ -127,12 +146,18 @@ class SupervisorAgentAdapter:
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         env: Optional[Mapping[str, str]] = None,
         runner: Optional[CommandRunner] = None,
+        strategy: Optional[ExecutionStrategy] = None,
     ) -> None:
         self._repo_root = Path(repo_root)
         self._template = agent_command_template or _default_command_template(self._repo_root)
         self._timeout = timeout_seconds
         self._env = dict(env) if env is not None else None
         self._runner = runner or _subprocess_runner
+        self._strategy = strategy or SliceContextStrategy()
+
+    @property
+    def lane(self) -> str:
+        return self._strategy.name
 
     def _run_environment(self) -> dict[str, str]:
         environment = dict(os.environ)
@@ -142,42 +167,31 @@ class SupervisorAgentAdapter:
 
     def produce_submission(self, task: TaskSpec, out_tar: Path) -> SubmissionResult:
         out_tar = Path(out_tar)
-        slice_record = build_slice_record(task)
-        queue_data = build_queue_data(slice_record, self._template, self._timeout)
-        context_bundle = build_context_bundle(queue_data, slice_record)
 
         workspace = Path(tempfile.mkdtemp(prefix=f"pb-{task.instance_id}-"))
         # run_agent.sh refuses a non-git repo root; the workspace is the agent's repo.
         subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
-
         control_dir = Path(tempfile.mkdtemp(prefix=f"pb-control-{task.instance_id}-"))
-        handoff_path = control_dir / "handoff.json"  # must not pre-exist for run_agent.sh
-        prompt_path = control_dir / "prompt.md"
-        context_path = control_dir / "context.json"
 
-        prompt_text = run_next.render_prompt(
-            repo_root=self._repo_root,
-            slice_record=slice_record,
-            context_bundle=context_bundle,
-            handoff_path=handoff_path,
+        strategy_result = self._strategy.execute(
+            ExecutionContext(
+                repo_root=self._repo_root,
+                task=task,
+                workspace=workspace,
+                control_dir=control_dir,
+                command_template=self._template,
+                env=self._run_environment(),
+                timeout_seconds=self._timeout,
+                runner=self._runner,
+            )
         )
-        prompt_path.write_text(prompt_text, encoding="utf-8")
-        context_path.write_text(json.dumps(context_bundle, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-        command = run_next.format_agent_command(
-            command_template=self._template,
-            repo_root=workspace,
-            prompt_path=prompt_path,
-            context_path=context_path,
-            handoff_path=handoff_path,
-            slice_id=slice_record["slice_id"],
-        )
-        returncode = self._runner(command, workspace, self._run_environment(), self._timeout)
-
+        _save_phase_artifacts(workspace, out_tar.parent)
         _archive_workspace(workspace, out_tar)
         return SubmissionResult(
             instance_id=task.instance_id,
             tar_path=out_tar,
             workspace=workspace,
-            returncode=returncode,
+            returncode=strategy_result.returncode,
+            strategy=strategy_result,
         )

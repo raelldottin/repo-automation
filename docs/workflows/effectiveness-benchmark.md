@@ -75,3 +75,102 @@ Harness Effectiveness (ProgramBench)
   mean pass frac.  : 0.0%
   errors           : copy_executable_failed=1
 ```
+
+## The A–E lane experiment
+
+The benchmark above answers "how good is the harness?". The lane experiment answers the
+question that actually decides what we build next: **which context-engineering strategy
+makes the agent better?**
+
+Five lanes attempt the *same* instances. Lanes differ only in how context and workflow
+are treated — the model, tool authority, sandbox, workspace, agent command, total time
+budget, ProgramBench evaluator and scoring code are identical across all of them.
+
+| Lane | Treatment |
+|---|---|
+| **A** | One session, raw objective. No harness context, no phases. |
+| **B** | The shipped harness: one bounded slice, `base.md` + `slice.md`. **Control.** |
+| **C** | Fresh Research → Plan → Implement sessions, passing typed JSON artifacts. |
+| **D** | C, with each artifact intentionally compacted before the next phase. |
+| **E** | D, with the J-Space ledger active inside each phase. |
+
+Because each lane adds exactly one treatment to the one before it, the differences
+decompose:
+
+```text
+B - A  = value of the harness's bounded context
+C - B  = value of RPI
+D - C  = value of intentional compaction
+E - D  = value of J-Space
+```
+
+Only adjacent lanes are compared. `E - A` would measure four changes at once.
+
+### Running it
+
+```shell
+# Small first: the default smoke instance, every lane, twice. No Docker.
+uv run python -m automation.benchmark lanes --run-dir out --repeats 2
+
+# With authoritative scoring (Docker, amd64):
+uv run python -m automation.benchmark lanes --run-dir out --repeats 2 --eval
+
+# Score/compare a matrix that was produced elsewhere:
+uv run python -m automation.benchmark compare --run-dir out --repeats 2
+```
+
+Cost scales as `lanes × repeats × instances` agent runs, and C–E use three to five agent
+sessions each. Start with a few instances before spending money on the full matrix.
+
+### Layout
+
+```text
+out/<lane>/r<repeat>/<instance>/submission.tar.gz   graded artefact
+out/<lane>/r<repeat>/<instance>/run.json            provenance + process metrics
+out/<lane>/r<repeat>/<instance>/rpi/                phase artifacts (C–E)
+out/<lane>/r<repeat>/effectiveness-report.json      ProgramBench score for that cell
+out/lane-comparison.json | lane-comparison.md       the comparison
+```
+
+Each `<lane>/r<repeat>` directory is exactly the shape `programbench eval` already
+expects, so scoring is the same code the single-lane benchmark uses.
+
+### What is held fixed, and why it matters
+
+Lanes are interleaved per instance (rotated deterministically) rather than run
+lane-by-lane, so provider load or time of day cannot masquerade as a lane effect.
+
+The time budget is per *instance*, not per session: a three-session lane must not get
+three times the wall clock of lane A, or it wins on budget rather than on treatment.
+
+Phase artifacts live in `<workspace>/.rpi/` and are excluded from the submission archive,
+so what ProgramBench grades is the same kind of thing in every lane.
+
+### Reading the comparison
+
+`lane-comparison.md` reports four groups. **The primary metric is ProgramBench
+correctness.** A lane that saves context but loses resolve rate is worse.
+
+- **primary** — resolve rate, near-resolve rate, mean pass fraction
+- **efficiency** — wall clock, agent invocations
+- **process** — phase failures, non-zero exits, compression ratios
+- **stability** — standard deviation across repeats
+
+One repeat per cell is too noisy to interpret; use at least two while developing the
+instrumentation and at least three before believing a result.
+
+### Known limits
+
+- **ProgramBench is greenfield.** The workspace starts empty, so lane C's Research phase
+  studies the program's observable contract rather than an existing codebase. `C - B`
+  therefore measures RPI's value for requirements analysis, *not* for brownfield code
+  exploration, which is the case RPI was designed for. A brownfield fixture is needed
+  before generalising the result.
+- **Tokens are not observable.** The agent runner returns an exit code, so efficiency is
+  measured in wall clock and agent invocations only.
+- **The J-Space fragment in lane E is derived** from a description of the method, not
+  from a canonical source. Replace `JSPACE_FRAGMENT` in
+  `automation/benchmark/strategies.py` before treating `E - D` as a verdict on J-Space.
+- **No propose-only lane.** A pure-agent lane would change execution authority and Git
+  semantics, not just context treatment, so it would confound this experiment. Test it
+  against whichever of A–E wins.

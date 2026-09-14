@@ -1,0 +1,367 @@
+"""Run the A-E effectiveness experiment and compare the lanes.
+
+One instance is attempted once per (lane, repeat). Layout:
+
+    <run-dir>/<lane>/r<repeat>/<instance>/submission.tar.gz   graded artefact
+    <run-dir>/<lane>/r<repeat>/<instance>/run.json            provenance + process metrics
+    <run-dir>/<lane>/r<repeat>/<instance>/rpi/                phase artifacts (C-E)
+    <run-dir>/<lane>/r<repeat>/effectiveness-report.json      ProgramBench score for that cell
+    <run-dir>/lane-comparison.json|md                         the comparison
+
+Each ``<lane>/r<repeat>`` directory is exactly the shape ``programbench eval`` and
+``score_run_dir`` already expect, so scoring is reused unchanged and the primary metric
+stays ProgramBench correctness.
+
+Lanes are interleaved per instance rather than run lane-by-lane: running all of A then
+all of B would let provider load or time of day masquerade as a lane effect.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import statistics
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional, Sequence
+
+from .adapter import AgentAdapter, SupervisorAgentAdapter
+from .evalrunner import EvalRunner
+from .instances import task_spec
+from .run import REPORT_FILENAME, score_and_write
+from .scoring import EffectivenessReport
+from .strategies import ALL_LANES, build_strategy
+
+PROVENANCE_FILENAME = "run.json"
+COMPARISON_FILENAME = "lane-comparison.json"
+COMPARISON_MARKDOWN = "lane-comparison.md"
+
+# Recorded so a result can be reproduced. Anything key-like is redacted, never stored.
+PROVENANCE_ENV_KEYS = (
+    "REPO_AUTOMATION_AGENT_RUNNER",
+    "REPO_AUTOMATION_CLAUDE_PERMISSION_MODE",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_BASE_URL",
+)
+_SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+
+AdapterFactory = Callable[[str], AgentAdapter]
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One (lane, repeat, instance) attempt."""
+
+    lane: str
+    repeat: int
+    instance_id: str
+
+    def directory(self, run_dir: Path) -> Path:
+        return Path(run_dir) / self.lane / f"r{self.repeat}" / self.instance_id
+
+
+def interleave(instances: Sequence[str], lanes: Sequence[str], repeats: int) -> list[Cell]:
+    """Deterministically rotate lane order per instance and repeat.
+
+    Rotation rather than shuffling keeps the schedule reproducible from the arguments
+    alone, while still preventing any lane from systematically occupying the same slot.
+    """
+    cells: list[Cell] = []
+    for repeat in range(1, repeats + 1):
+        for index, instance_id in enumerate(instances):
+            offset = (index + repeat - 1) % len(lanes)
+            rotated = list(lanes[offset:]) + list(lanes[:offset])
+            cells.extend(Cell(lane, repeat, instance_id) for lane in rotated)
+    return cells
+
+
+def _repo_sha(repo_root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, OSError):  # pragma: no cover - non-git checkout.
+        return "unknown"
+
+
+def _environment_fingerprint() -> dict[str, str]:
+    fingerprint = {}
+    for key in PROVENANCE_ENV_KEYS:
+        value = os.environ.get(key)
+        if value is None:
+            continue
+        fingerprint[key] = "<redacted>" if any(marker in key.upper() for marker in _SECRET_MARKERS) else value
+    return fingerprint
+
+
+def default_adapter_factory(
+    repo_root: Path,
+    agent_command_template: Optional[str] = None,
+    timeout_seconds: int = 1800,
+) -> AdapterFactory:
+    """Build one adapter per lane; everything except the strategy is held fixed."""
+
+    def factory(lane: str) -> AgentAdapter:
+        return SupervisorAgentAdapter(
+            repo_root=repo_root,
+            agent_command_template=agent_command_template,
+            timeout_seconds=timeout_seconds,
+            strategy=build_strategy(lane),
+        )
+
+    return factory
+
+
+def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) -> dict[str, Any]:
+    """Attempt one cell and write its provenance record."""
+    instance_dir = cell.directory(run_dir)
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    result = adapter.produce_submission(task_spec(cell.instance_id), instance_dir / "submission.tar.gz")
+
+    provenance: dict[str, Any] = {
+        "lane": cell.lane,
+        "instance_id": cell.instance_id,
+        "repeat": cell.repeat,
+        "repo_automation_sha": _repo_sha(repo_root),
+        "environment": _environment_fingerprint(),
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "returncode": result.returncode,
+        "strategy": result.strategy.to_dict() if result.strategy is not None else None,
+    }
+    (instance_dir / PROVENANCE_FILENAME).write_text(json.dumps(provenance, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return provenance
+
+
+def cell_dirs(run_dir: Path, lanes: Sequence[str], repeats: int) -> list[Path]:
+    """Every ``<lane>/r<repeat>`` directory that exists under ``run_dir``."""
+    dirs = []
+    for lane in lanes:
+        for repeat in range(1, repeats + 1):
+            candidate = Path(run_dir) / lane / f"r{repeat}"
+            if candidate.is_dir():
+                dirs.append(candidate)
+    return dirs
+
+
+def _mean(values: Iterable[float]) -> float:
+    values = list(values)
+    return sum(values) / len(values) if values else 0.0
+
+
+def _stdev(values: Sequence[float]) -> float:
+    return statistics.stdev(values) if len(values) > 1 else 0.0
+
+
+def _load_provenance(cell_dir: Path) -> list[dict[str, Any]]:
+    records = []
+    for instance_dir in sorted(p for p in cell_dir.iterdir() if p.is_dir()):
+        record = instance_dir / PROVENANCE_FILENAME
+        if record.is_file():
+            records.append(json.loads(record.read_text(encoding="utf-8")))
+    return records
+
+
+def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[EffectivenessReport]) -> dict[str, Any]:
+    """Aggregate a lane's repeats: primary outcome, efficiency, process, stability."""
+    resolve_rates = [report.resolve_rate for report in reports]
+    near_rates = [report.near_resolve_rate for report in reports]
+    pass_fractions = [report.mean_pass_fraction for report in reports]
+
+    provenance: list[dict[str, Any]] = []
+    for repeat in range(1, repeats + 1):
+        cell_dir = Path(run_dir) / lane / f"r{repeat}"
+        if cell_dir.is_dir():
+            provenance.extend(_load_provenance(cell_dir))
+
+    strategies = [record["strategy"] for record in provenance if record.get("strategy")]
+    compaction_ratios = [
+        value
+        for strategy in strategies
+        for key, value in (strategy.get("compaction") or {}).items()
+        if key.endswith("_compression_ratio") and value is not None
+    ]
+
+    return {
+        "lane": lane,
+        "repeats": len(reports),
+        "attempts": len(provenance),
+        "primary": {
+            "resolve_rate": round(_mean(resolve_rates), 4),
+            "near_resolve_rate": round(_mean(near_rates), 4),
+            "mean_pass_fraction": round(_mean(pass_fractions), 4),
+        },
+        "efficiency": {
+            "wall_clock_seconds": round(sum(strategy["seconds"] for strategy in strategies), 3),
+            "agent_invocations": sum(strategy["agent_invocations"] for strategy in strategies),
+            "mean_seconds_per_attempt": round(_mean(strategy["seconds"] for strategy in strategies), 3),
+        },
+        "process": {
+            "phase_failures": sum(strategy["phase_failures"] for strategy in strategies),
+            "nonzero_returncodes": sum(1 for record in provenance if record.get("returncode")),
+            "mean_compression_ratio": round(_mean(compaction_ratios), 4) if compaction_ratios else None,
+        },
+        "stability": {
+            "resolve_rate_stdev": round(_stdev(resolve_rates), 4),
+            "mean_pass_fraction_stdev": round(_stdev(pass_fractions), 4),
+        },
+    }
+
+
+def lane_deltas(summaries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Marginal contribution of each treatment: B-A, C-B, D-C, E-D.
+
+    Only adjacent lanes are compared, because that adjacency is what isolates a single
+    treatment. Comparing E to A would measure four changes at once.
+    """
+    by_lane = {summary["lane"]: summary for summary in summaries}
+    ordered = [lane for lane in ALL_LANES if lane in by_lane]
+    deltas = []
+    for previous, current in zip(ordered, ordered[1:]):
+        before, after = by_lane[previous], by_lane[current]
+        deltas.append(
+            {
+                "comparison": f"{current} - {previous}",
+                "treatment": LANE_TREATMENTS.get(current, ""),
+                "resolve_rate": round(after["primary"]["resolve_rate"] - before["primary"]["resolve_rate"], 4),
+                "near_resolve_rate": round(after["primary"]["near_resolve_rate"] - before["primary"]["near_resolve_rate"], 4),
+                "mean_pass_fraction": round(after["primary"]["mean_pass_fraction"] - before["primary"]["mean_pass_fraction"], 4),
+                "agent_invocations": after["efficiency"]["agent_invocations"] - before["efficiency"]["agent_invocations"],
+                "wall_clock_seconds": round(
+                    after["efficiency"]["wall_clock_seconds"] - before["efficiency"]["wall_clock_seconds"], 3
+                ),
+            }
+        )
+    return deltas
+
+
+LANE_TREATMENTS = {
+    "A": "one session, raw objective",
+    "B": "bounded slice context (shipped harness)",
+    "C": "Research -> Plan -> Implement",
+    "D": "RPI + intentional compaction",
+    "E": "RPI + compaction + J-Space",
+}
+
+
+def build_comparison(run_dir: Path, lanes: Sequence[str], repeats: int) -> dict[str, Any]:
+    """Score every cell that has eval output and reduce it to one comparison."""
+    run_dir = Path(run_dir)
+    summaries = []
+    for lane in lanes:
+        reports = []
+        for repeat in range(1, repeats + 1):
+            cell_dir = run_dir / lane / f"r{repeat}"
+            if not cell_dir.is_dir():
+                continue
+            reports.append(score_and_write(cell_dir))
+        if reports or (run_dir / lane).is_dir():
+            summaries.append(summarize_lane(run_dir, lane, repeats, reports))
+    return {
+        "lanes": summaries,
+        "deltas": lane_deltas(summaries),
+        "note": ("Primary metric is ProgramBench correctness. A lane that saves context but loses resolve rate is worse."),
+    }
+
+
+def render_comparison_markdown(comparison: dict[str, Any]) -> str:
+    lines = ["# Lane comparison", "", "## Primary outcome (ProgramBench)", ""]
+    lines.append("| lane | treatment | resolve | near | mean pass | stdev(resolve) | agent calls | wall s |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
+    for summary in comparison["lanes"]:
+        primary, efficiency, stability = summary["primary"], summary["efficiency"], summary["stability"]
+        lines.append(
+            f"| {summary['lane']} | {LANE_TREATMENTS.get(summary['lane'], '')} "
+            f"| {primary['resolve_rate']:.1%} | {primary['near_resolve_rate']:.1%} "
+            f"| {primary['mean_pass_fraction']:.1%} | {stability['resolve_rate_stdev']:.3f} "
+            f"| {efficiency['agent_invocations']} | {efficiency['wall_clock_seconds']:.0f} |"
+        )
+
+    lines += ["", "## Marginal contribution of each treatment", ""]
+    lines.append("| comparison | treatment added | resolve | near | mean pass | agent calls | wall s |")
+    lines.append("|---|---|---:|---:|---:|---:|---:|")
+    for delta in comparison["deltas"]:
+        lines.append(
+            f"| {delta['comparison']} | {delta['treatment']} | {delta['resolve_rate']:+.1%} "
+            f"| {delta['near_resolve_rate']:+.1%} | {delta['mean_pass_fraction']:+.1%} "
+            f"| {delta['agent_invocations']:+d} | {delta['wall_clock_seconds']:+.0f} |"
+        )
+
+    failures = [
+        (summary["lane"], summary["process"]["phase_failures"], summary["process"]["nonzero_returncodes"])
+        for summary in comparison["lanes"]
+    ]
+    if any(phase or rc for _, phase, rc in failures):
+        lines += ["", "## Process failures", "", "| lane | phase failures | nonzero exits |", "|---|---:|---:|"]
+        lines += [f"| {lane} | {phase} | {rc} |" for lane, phase, rc in failures]
+
+    lines += ["", comparison["note"], ""]
+    return "\n".join(lines)
+
+
+def write_comparison(comparison: dict[str, Any], run_dir: Path) -> Path:
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / COMPARISON_FILENAME).write_text(json.dumps(comparison, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path = run_dir / COMPARISON_MARKDOWN
+    path.write_text(render_comparison_markdown(comparison), encoding="utf-8")
+    return path
+
+
+def run_experiment(
+    run_dir: Path,
+    instances: Sequence[str],
+    adapter_factory: AdapterFactory,
+    repo_root: Path,
+    lanes: Sequence[str] = ALL_LANES,
+    repeats: int = 1,
+    eval_runner: Optional[EvalRunner] = None,
+    score: bool = True,
+) -> Optional[dict[str, Any]]:
+    """Run the full matrix, optionally evaluate and score it."""
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    for cell in interleave(instances, lanes, repeats):
+        run_cell(cell, run_dir, adapter_factory(cell.lane), repo_root)
+
+    if eval_runner is not None:
+        for cell_dir in cell_dirs(run_dir, lanes, repeats):
+            eval_runner.evaluate(cell_dir)
+
+    if not score:
+        return None
+    comparison = build_comparison(run_dir, lanes, repeats)
+    write_comparison(comparison, run_dir)
+    return comparison
+
+
+__all__ = [
+    "COMPARISON_FILENAME",
+    "COMPARISON_MARKDOWN",
+    "Cell",
+    "LANE_TREATMENTS",
+    "PROVENANCE_FILENAME",
+    "REPORT_FILENAME",
+    "build_comparison",
+    "cell_dirs",
+    "default_adapter_factory",
+    "interleave",
+    "lane_deltas",
+    "render_comparison_markdown",
+    "run_cell",
+    "run_experiment",
+    "summarize_lane",
+    "write_comparison",
+]
