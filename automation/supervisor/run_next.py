@@ -44,10 +44,7 @@ def main() -> int:
     handoff_dir = repo_root / args.handoff_dir
     handoff_dir.mkdir(parents=True, exist_ok=True)
 
-    queue_schema_path = repo_root / "automation/schemas/slice.schema.json"
-    handoff_schema_path = repo_root / "automation/schemas/handoff.schema.json"
-
-    queue_data = policy.load_queue(queue_path, queue_schema_path)
+    queue_data = policy.load_queue(queue_path)
     active = policy.active_slice(queue_data)
     if active is not None:
         print(f"stop: queue already has in_progress slice {active['slice_id']}", file=sys.stderr)
@@ -64,7 +61,7 @@ def main() -> int:
     completed_runs = 0
 
     while True:
-        queue_data = policy.load_queue(queue_path, queue_schema_path)
+        queue_data = policy.load_queue(queue_path)
         next_slice = policy.select_next_slice(queue_data)
         if next_slice is None:
             print("stop: no eligible queued slice found.")
@@ -133,7 +130,7 @@ def main() -> int:
                 command_template=agent_command_template,
             )
         except Exception as error:  # pragma: no cover - last-resort queue recovery
-            queue_data = policy.load_queue(queue_path, queue_schema_path)
+            queue_data = policy.load_queue(queue_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
             print(
@@ -150,7 +147,7 @@ def main() -> int:
             return 2
 
         if exit_code != 0:
-            queue_data = policy.load_queue(queue_path, queue_schema_path)
+            queue_data = policy.load_queue(queue_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
             print(
@@ -167,7 +164,7 @@ def main() -> int:
             return exit_code
 
         if not handoff_path.exists():
-            queue_data = policy.load_queue(queue_path, queue_schema_path)
+            queue_data = policy.load_queue(queue_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
             print(
@@ -184,9 +181,9 @@ def main() -> int:
             return 2
 
         try:
-            handoff = policy.load_handoff(handoff_path, handoff_schema_path)
+            handoff = policy.load_handoff(handoff_path)
         except ValueError as error:
-            queue_data = policy.load_queue(queue_path, queue_schema_path)
+            queue_data = policy.load_queue(queue_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
             print(
@@ -203,7 +200,7 @@ def main() -> int:
             return 2
 
         if handoff["slice_id"] != next_slice["slice_id"]:
-            queue_data = policy.load_queue(queue_path, queue_schema_path)
+            queue_data = policy.load_queue(queue_path)
             queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
             policy.write_json(queue_path, queue_data)
             print(
@@ -245,7 +242,7 @@ def main() -> int:
             post_run_commit_sha=post_run_commit_sha,
         )
 
-        queue_data = policy.load_queue(queue_path, queue_schema_path)
+        queue_data = policy.load_queue(queue_path)
         queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], decision.queue_status)
         policy.write_json(queue_path, queue_data)
 

@@ -176,8 +176,6 @@ def replay_validations_in_worktree(
 def evaluate(
     repo_root: Path,
     queue_path: Path,
-    queue_schema_path: Path,
-    handoff_schema_path: Path,
     handoff_path: Path,
     slice_id: str,
     base_sha: str,
@@ -188,8 +186,8 @@ def evaluate(
 
     # --- Load and validate inputs -------------------------------------------
 
-    queue_data = policy.load_queue(queue_path, queue_schema_path)
-    handoff = policy.load_handoff(handoff_path, handoff_schema_path)
+    queue_data = policy.load_queue(queue_path)
+    handoff = policy.load_handoff(handoff_path)
 
     slice_record = policy.find_slice(queue_data, slice_id)
     if slice_record is None:
@@ -395,7 +393,7 @@ def evaluate(
     replay_dicts = [{"command": r.command, "success": r.success, "exit_code": r.exit_code, "reason": r.reason} for r in replays]
 
     if not dry_run:
-        queue_data = policy.load_queue(queue_path, queue_schema_path)
+        queue_data = policy.load_queue(queue_path)
         queue_data = policy.set_slice_status(queue_data, slice_id, "done")
         policy.write_json(queue_path, queue_data)
 
@@ -497,8 +495,6 @@ def main() -> int:
     report = evaluate(
         repo_root=repo_root,
         queue_path=repo_root / args.queue,
-        queue_schema_path=repo_root / "automation/schemas/slice.schema.json",
-        handoff_schema_path=repo_root / "automation/schemas/handoff.schema.json",
         handoff_path=Path(args.handoff),
         slice_id=args.slice_id,
         base_sha=args.base_sha,

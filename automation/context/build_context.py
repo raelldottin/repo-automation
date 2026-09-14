@@ -52,16 +52,12 @@ def parse_args() -> argparse.Namespace:
 def build_context_bundle(
     repo_root: Path, queue_path: Path, handoff_dir: Path, slice_id: str, max_doc_chars: int = 2500
 ) -> dict[str, Any]:
-    queue_schema_path = repo_root / "automation/schemas/slice.schema.json"
-    handoff_schema_path = repo_root / "automation/schemas/handoff.schema.json"
-    queue_data = policy.load_queue(queue_path, queue_schema_path)
+    queue_data = policy.load_queue(queue_path)
     slice_record = policy.find_slice(queue_data, slice_id)
     if slice_record is None:
         raise KeyError(f"Unknown slice_id: {slice_id}")
 
-    previous_handoff = find_previous_handoff(
-        queue_data=queue_data, slice_record=slice_record, handoff_dir=handoff_dir, handoff_schema_path=handoff_schema_path
-    )
+    previous_handoff = find_previous_handoff(queue_data=queue_data, slice_record=slice_record, handoff_dir=handoff_dir)
     compact_previous_handoff = compact_handoff(previous_handoff)
 
     document_specs = resolve_document_specs(slice_record=slice_record, repo_root=repo_root)
@@ -261,11 +257,11 @@ def render_contract_status_change(change: dict[str, Any]) -> str:
 
 
 def find_previous_handoff(
-    queue_data: dict[str, Any], slice_record: dict[str, Any], handoff_dir: Path, handoff_schema_path: Path
+    queue_data: dict[str, Any], slice_record: dict[str, Any], handoff_dir: Path
 ) -> Optional[dict[str, Any]]:
     dependency_ids = list(reversed(slice_record["depends_on"]))
     for dependency_id in dependency_ids:
-        handoff = policy.latest_handoff_for_slice(handoff_dir, dependency_id, handoff_schema_path)
+        handoff = policy.latest_handoff_for_slice(handoff_dir, dependency_id)
         if handoff is not None:
             return handoff
 
@@ -273,7 +269,7 @@ def find_previous_handoff(
     current_index = next(index for index, record in enumerate(slices) if record["slice_id"] == slice_record["slice_id"])
     for index in range(current_index - 1, -1, -1):
         previous_id = slices[index]["slice_id"]
-        handoff = policy.latest_handoff_for_slice(handoff_dir, previous_id, handoff_schema_path)
+        handoff = policy.latest_handoff_for_slice(handoff_dir, previous_id)
         if handoff is not None:
             return handoff
     return None

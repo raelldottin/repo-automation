@@ -34,7 +34,7 @@ These assets are reusable or intended to become reusable with light parameteriza
 - `automation/supervisor/`: queue selection, policy checks, validation ownership, diff-budget checks, and fresh-run launching.
 - `automation/context/build_context.py`: compact slice context bundle generation.
 - `automation/prompts/`: base, slice, and review prompt fragments.
-- `automation/schemas/`: JSON contracts for slices and handoffs.
+- `automation/schemas/`: the Pydantic contract models (`models.py`) and the JSON Schemas generated from them.
 - `automation/examples/`: starter queue and handoff payloads for new repositories.
 - `automation/README.md`: harness behavior and operator model.
 - `automation/tests/test_harness.py`: core supervisor and context-builder regression coverage.

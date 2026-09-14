@@ -6,7 +6,11 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Mapping, Optional, Sequence
+
+from pydantic import BaseModel, ValidationError
+
+from automation.schemas.models import Handoff, SliceQueue
 
 
 @dataclass
@@ -186,105 +190,46 @@ def write_json(path: Path, payload: Any) -> None:
     temp_path.replace(path)
 
 
-def load_schema(path: Path) -> dict[str, Any]:
-    schema = load_json(path)
-    if not isinstance(schema, dict):
-        raise ValueError(f"Schema at {path} must be a JSON object.")
-    return schema
+def validate_document(document: Any, model: type[BaseModel]) -> ValidationResult:
+    """Validate a raw document against its canonical contract model.
+
+    The document itself is never rewritten: the harness stays dict-based, so validation
+    is a gate at the door rather than a parsing layer the rest of the code depends on.
+    """
+    try:
+        model.model_validate(document)
+    except ValidationError as error:
+        return ValidationResult(is_valid=False, errors=[_format_error(item) for item in error.errors()])
+    return ValidationResult(is_valid=True, errors=[])
 
 
-def validate_document(document: Any, schema: dict[str, Any]) -> ValidationResult:
-    errors: list[str] = []
-    _validate_node(document, schema, "$", errors)
-    return ValidationResult(is_valid=not errors, errors=errors)
+def _location(location: Sequence[Any]) -> str:
+    parts = ["$"]
+    for item in location:
+        parts.append(f"[{item}]" if isinstance(item, int) else f".{item}")
+    return "".join(parts)
 
 
-def _validate_node(node: Any, schema: dict[str, Any], path: str, errors: list[str]) -> None:
-    expected_type = schema.get("type")
-    if expected_type is not None and not _matches_type(node, expected_type):
-        errors.append(f"{path}: expected {expected_type}, found {type(node).__name__}")
-        return
+def _format_error(error: Mapping[str, Any]) -> str:
+    """Render a Pydantic error the way the supervisor and its agents already read them."""
+    location = tuple(error["loc"])
+    kind = error["type"]
+    context = error.get("ctx", {})
 
-    if "enum" in schema and node not in schema["enum"]:
-        errors.append(f"{path}: expected one of {schema['enum']}, found {node!r}")
+    if kind == "missing":
+        return f"{_location(location[:-1])}: missing required property {str(location[-1])!r}"
 
-    if expected_type == "object":
-        _validate_object(node, schema, path, errors)
-    elif expected_type == "array":
-        _validate_array(node, schema, path, errors)
-    elif expected_type == "string":
-        _validate_string(node, schema, path, errors)
-    elif expected_type in {"integer", "number"}:
-        _validate_number(node, schema, path, errors)
-
-
-def _validate_object(node: dict[str, Any], schema: dict[str, Any], path: str, errors: list[str]) -> None:
-    required = schema.get("required", [])
-    for key in required:
-        if key not in node:
-            errors.append(f"{path}: missing required property {key!r}")
-
-    properties = schema.get("properties", {})
-    additional = schema.get("additionalProperties", True)
-
-    for key, value in node.items():
-        child_path = f"{path}.{key}"
-        if key in properties:
-            _validate_node(value, properties[key], child_path, errors)
-            continue
-
-        if additional is False:
-            errors.append(f"{child_path}: additional property not allowed")
-            continue
-
-        if isinstance(additional, dict):
-            _validate_node(value, additional, child_path, errors)
+    path = _location(location)
+    if kind == "extra_forbidden":
+        return f"{path}: additional property not allowed"
+    if kind == "too_short":
+        return f"{path}: expected at least {context.get('min_length')} items, found {context.get('actual_length')}"
+    if kind == "string_too_short":
+        return f"{path}: expected string length >= {context.get('min_length')}, found {len(error['input'])}"
+    return f"{path}: {error['msg']}, found {error['input']!r}"
 
 
-def _validate_array(node: list[Any], schema: dict[str, Any], path: str, errors: list[str]) -> None:
-    min_items = schema.get("minItems")
-    if min_items is not None and len(node) < min_items:
-        errors.append(f"{path}: expected at least {min_items} items, found {len(node)}")
-
-    item_schema = schema.get("items")
-    if item_schema is None:
-        return
-
-    for index, item in enumerate(node):
-        _validate_node(item, item_schema, f"{path}[{index}]", errors)
-
-
-def _validate_string(node: str, schema: dict[str, Any], path: str, errors: list[str]) -> None:
-    min_length = schema.get("minLength")
-    if min_length is not None and len(node) < min_length:
-        errors.append(f"{path}: expected string length >= {min_length}, found {len(node)}")
-
-
-def _validate_number(node: Union[int, float], schema: dict[str, Any], path: str, errors: list[str]) -> None:
-    minimum = schema.get("minimum")
-    if minimum is not None and node < minimum:
-        errors.append(f"{path}: expected >= {minimum}, found {node}")
-
-
-def _matches_type(node: Any, expected_type: str) -> bool:
-    if expected_type == "object":
-        return isinstance(node, dict)
-    if expected_type == "array":
-        return isinstance(node, list)
-    if expected_type == "string":
-        return isinstance(node, str)
-    if expected_type == "integer":
-        return isinstance(node, int) and not isinstance(node, bool)
-    if expected_type == "number":
-        return isinstance(node, (int, float)) and not isinstance(node, bool)
-    if expected_type == "boolean":
-        return isinstance(node, bool)
-    if expected_type == "null":
-        return node is None
-    raise ValueError(f"Unsupported schema type: {expected_type}")
-
-
-def load_queue(queue_path: Path, schema_path: Path) -> dict[str, Any]:
+def load_queue(queue_path: Path) -> dict[str, Any]:
     if not queue_path.exists():
         raise ConfigError(
             f"queue file not found: {queue_path}\n"
@@ -292,8 +237,7 @@ def load_queue(queue_path: Path, schema_path: Path) -> dict[str, Any]:
             "and edit it for this repository's slices."
         )
     queue_data = load_json(queue_path)
-    schema = load_schema(schema_path)
-    validation = validate_document(queue_data, schema)
+    validation = validate_document(queue_data, SliceQueue)
     if not validation.is_valid:
         raise ValueError("Invalid queue file:\n- " + "\n- ".join(validation.errors))
 
@@ -304,10 +248,9 @@ def load_queue(queue_path: Path, schema_path: Path) -> dict[str, Any]:
     return queue_data
 
 
-def load_handoff(handoff_path: Path, schema_path: Path) -> dict[str, Any]:
+def load_handoff(handoff_path: Path) -> dict[str, Any]:
     handoff = load_json(handoff_path)
-    schema = load_schema(schema_path)
-    validation = validate_document(handoff, schema)
+    validation = validate_document(handoff, Handoff)
     if not validation.is_valid:
         raise ValueError("Invalid handoff file:\n- " + "\n- ".join(validation.errors))
     return handoff
@@ -759,13 +702,13 @@ def next_slice_eligibility(
     )
 
 
-def latest_handoff_for_slice(handoff_dir: Path, slice_id: str, schema_path: Path) -> Optional[dict[str, Any]]:
+def latest_handoff_for_slice(handoff_dir: Path, slice_id: str) -> Optional[dict[str, Any]]:
     latest_match: Optional[dict[str, Any]] = None
     latest_key: Optional[str] = None
 
     for candidate in sorted(handoff_dir.glob("*.json")):
         try:
-            payload = load_handoff(candidate, schema_path)
+            payload = load_handoff(candidate)
         except (ValueError, json.JSONDecodeError):
             payload = load_legacy_handoff_for_context(candidate)
             if payload is None:

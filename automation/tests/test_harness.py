@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from automation.context.build_context import build_context_bundle
+from automation.schemas import models
 from automation.supervisor import policy
 from automation.supervisor.run_next import format_agent_command, make_decision_report, render_prompt
 
@@ -17,8 +18,6 @@ from automation.supervisor.run_next import format_agent_command, make_decision_r
 class AutomationHarnessTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[2]
-        self.queue_schema_path = self.repo_root / "automation/schemas/slice.schema.json"
-        self.handoff_schema_path = self.repo_root / "automation/schemas/handoff.schema.json"
         self.example_queue_path = self.repo_root / "automation/examples/example-slices.json"
         self.example_handoff_path = self.repo_root / "automation/examples/example-handoff.json"
 
@@ -35,7 +34,7 @@ class AutomationHarnessTests(unittest.TestCase):
         return slice_record
 
     def example_queue_data(self) -> dict[str, Any]:
-        return policy.load_queue(self.example_queue_path, self.queue_schema_path)
+        return policy.load_queue(self.example_queue_path)
 
     def example_slice_at(self, index: int) -> dict[str, Any]:
         return self.example_queue_data()["slices"][index]
@@ -60,7 +59,7 @@ class AutomationHarnessTests(unittest.TestCase):
 
     def test_example_queue_matches_schema(self) -> None:
         queue_data = policy.load_json(self.example_queue_path)
-        queue_schema = policy.load_schema(self.queue_schema_path)
+        queue_schema = models.SliceQueue
         validation = policy.validate_document(queue_data, queue_schema)
         self.assertTrue(validation.is_valid, validation.errors)
         self.assertEqual([], policy.validate_queue_integrity(queue_data))
@@ -69,7 +68,7 @@ class AutomationHarnessTests(unittest.TestCase):
         queue_data = policy.load_json(self.example_queue_path)
         queue_data["slices"][0]["status"] = "deferred"
         queue_data["slices"][0]["entry_condition"] = "External reviewer input exists."
-        queue_schema = policy.load_schema(self.queue_schema_path)
+        queue_schema = models.SliceQueue
 
         validation = policy.validate_document(queue_data, queue_schema)
 
@@ -124,14 +123,14 @@ class AutomationHarnessTests(unittest.TestCase):
 
     def test_example_handoff_matches_schema(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
         validation = policy.validate_document(handoff, handoff_schema)
         self.assertTrue(validation.is_valid, validation.errors)
 
     def test_handoff_schema_accepts_open_questions(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
         handoff["open_questions"] = ["Should the empty-state copy be localized in this slice?"]
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
 
         validation = policy.validate_document(handoff, handoff_schema)
 
@@ -155,7 +154,7 @@ class AutomationHarnessTests(unittest.TestCase):
         handoff = policy.load_json(self.example_handoff_path)
         handoff["proof_level"] = "running-app-smoke"
         handoff["missing_proof_levels"] = ["flow-verified", "screenshot-verified"]
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
 
         validation = policy.validate_document(handoff, handoff_schema)
 
@@ -164,7 +163,7 @@ class AutomationHarnessTests(unittest.TestCase):
     def test_handoff_schema_rejects_missing_proof_level(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
         handoff.pop("proof_level")
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
 
         validation = policy.validate_document(handoff, handoff_schema)
 
@@ -174,7 +173,7 @@ class AutomationHarnessTests(unittest.TestCase):
     def test_handoff_schema_rejects_invalid_proof_level(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
         handoff["proof_level"] = "verified-in-simulator"
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
 
         validation = policy.validate_document(handoff, handoff_schema)
 
@@ -186,7 +185,7 @@ class AutomationHarnessTests(unittest.TestCase):
     def test_handoff_schema_rejects_invalid_missing_proof_level(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
         handoff["missing_proof_levels"] = ["manual-vibes"]
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
 
         validation = policy.validate_document(handoff, handoff_schema)
 
@@ -199,7 +198,7 @@ class AutomationHarnessTests(unittest.TestCase):
     def test_handoff_schema_rejects_missing_residual_risks(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
         handoff.pop("residual_risks")
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
 
         validation = policy.validate_document(handoff, handoff_schema)
 
@@ -211,7 +210,7 @@ class AutomationHarnessTests(unittest.TestCase):
     def test_handoff_schema_rejects_empty_residual_risks(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
         handoff["residual_risks"] = []
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
 
         validation = policy.validate_document(handoff, handoff_schema)
 
@@ -224,7 +223,7 @@ class AutomationHarnessTests(unittest.TestCase):
     def test_handoff_schema_rejects_missing_contract_status_changes(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
         handoff.pop("contract_status_changes")
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
 
         validation = policy.validate_document(handoff, handoff_schema)
 
@@ -236,7 +235,7 @@ class AutomationHarnessTests(unittest.TestCase):
     def test_handoff_schema_rejects_invalid_repo_clean_status(self) -> None:
         handoff = policy.load_json(self.example_handoff_path)
         handoff["repo_clean_status"] = "probably-clean"
-        handoff_schema = policy.load_schema(self.handoff_schema_path)
+        handoff_schema = models.Handoff
 
         validation = policy.validate_document(handoff, handoff_schema)
 
@@ -249,7 +248,7 @@ class AutomationHarnessTests(unittest.TestCase):
         queue_path = self.repo_root / "automation/queue/slices.json"
         if not queue_path.exists():
             self.skipTest("consumer live queue is not present in this checkout")
-        queue_data = policy.load_queue(queue_path, self.queue_schema_path)
+        queue_data = policy.load_queue(queue_path)
         command_template = queue_data["policy"]["agent_command_template"]
 
         self.assertIn("automation/supervisor/run_agent.sh", command_template)
@@ -903,7 +902,7 @@ class AutomationHarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             handoff_dir = Path(temp_dir)
             shutil.copy(self.example_handoff_path, handoff_dir / self.example_handoff_filename())
-            queue_data = policy.load_queue(self.example_queue_path, self.queue_schema_path)
+            queue_data = policy.load_queue(self.example_queue_path)
             slice_record = self.require_slice_record(queue_data, second_slice_id)
             context_bundle = build_context_bundle(
                 repo_root=self.repo_root,
@@ -966,7 +965,7 @@ class AutomationHarnessTests(unittest.TestCase):
         )
 
     def example_queue_with_slice_status(self, slice_id: str, status: str) -> dict[str, Any]:
-        queue_data = policy.load_queue(self.example_queue_path, self.queue_schema_path)
+        queue_data = policy.load_queue(self.example_queue_path)
         cloned = json.loads(json.dumps(queue_data))
         for slice_record in cloned["slices"]:
             if slice_record["slice_id"] == slice_id:

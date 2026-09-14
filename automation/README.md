@@ -23,7 +23,7 @@ Policy in one sentence:
 - `automation/prompts/` stores the tracked prompt fragments for slice runs and manual review runs.
 - `automation/context/build_context.py` builds the bounded context bundle for one slice.
 - `automation/supervisor/` owns queue selection, schema validation, stop policy, and fresh-run launching.
-- `automation/schemas/` owns the JSON contracts for queue and handoff files.
+- `automation/schemas/` owns the queue and handoff contracts: `models.py` is canonical, the `*.schema.json` files are generated from it.
 - `automation/examples/` provides reference payloads without mutating the live queue.
 
 ## Prompt Package
@@ -61,6 +61,24 @@ These fragments adapt concepts from the engineering and productivity skills of [
 10. The supervisor stops as soon as a stop condition is hit.
 
 When adjacent approved slices are already queued, a human does not need to press continue between them. The handoff may recommend the next queued slice, and the supervisor decides whether that continuation is allowed.
+
+## Contract Models
+
+`automation/schemas/models.py` is the single source of truth for the queue and handoff
+contracts. The supervisor validates every queue and handoff through those Pydantic
+models before the rest of the harness — which stays dict-based — sees the document.
+
+The `*.schema.json` files next to the models are **generated artifacts**, kept in the
+repository only so non-Python consumers can read the contract:
+
+```shell
+uv run python -m automation.schemas.generate          # regenerate after editing models.py
+uv run python -m automation.schemas.generate --check  # CI gate: fails on drift
+```
+
+Editing a `.schema.json` by hand is a mistake `--check` exists to catch. The harness
+therefore requires `pydantic>=2` at runtime; a repository that syncs the harness must
+add it to its own dependencies.
 
 ## Queue Model
 
