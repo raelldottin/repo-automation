@@ -30,7 +30,7 @@ Each consuming repository owns its queue, validation commands, domain docs, hand
 - `automation/context/` - bounded context bundle generation.
 - `automation/examples/` - example queue and handoff payloads.
 - `automation/prompts/` - base, slice, and review prompt fragments.
-- `automation/schemas/` - JSON schemas for queues and handoffs.
+- `automation/schemas/` - Pydantic contract models for queues and handoffs, plus the JSON Schemas generated from them.
 - `automation/supervisor/` - queue selection, stop policy, validation replay, and agent launch orchestration.
 - `automation/tests/` - harness regression tests.
 - `docs/workflows/repo-automation.md` - extraction, sync, and consumer-adoption contract.

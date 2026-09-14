@@ -35,6 +35,9 @@ jobs:
       - name: Sync dev dependencies
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
+      - name: JSON Schemas match their Pydantic models
+        run: uv run python -m automation.schemas.generate --check
+
       - name: Ruff lint
         run: uv run ruff check .
 

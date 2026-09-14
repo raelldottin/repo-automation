@@ -18,6 +18,7 @@ from automation.benchmark.scoring import (
     score_eval_file,
     score_run_dir,
 )
+from automation.schemas import models
 from automation.supervisor import policy
 from automation.supervisor.run_next import render_prompt
 
@@ -94,7 +95,7 @@ class ScoringTests(unittest.TestCase):
 class AdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[2]
-        self.queue_schema = policy.load_schema(self.repo_root / "automation/schemas/slice.schema.json")
+        self.queue_schema = models.SliceQueue
         self.task = TaskSpec("owner__proj.abc1234", "owner/proj", "abc1234", "c", "easy")
 
     def test_generated_queue_matches_slice_schema(self) -> None:
