@@ -220,12 +220,11 @@ def main() -> int:
             return 2
 
         dirty_paths_after_run = policy.git_dirty_paths(repo_root)
-        
+
         post_run_commit_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"], 
-            check=True, capture_output=True, text=True, cwd=repo_root
+            ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True, cwd=repo_root
         ).stdout.strip()
-        
+
         validation_replays: list[policy.ValidationReplayResult] = []
         if handoff["status"] == "done":
             validation_replays = policy.replay_validation_commands(

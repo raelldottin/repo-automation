@@ -35,6 +35,7 @@ from automation.supervisor import policy
 # Data structures
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class EvaluationReport:
     slice_id: str
@@ -58,6 +59,7 @@ class EvaluationReport:
 # Git helpers
 # ---------------------------------------------------------------------------
 
+
 def sha_exists(repo_root: Path, sha: str) -> bool:
     """Return True if *sha* names a valid object in the repository."""
     result = subprocess.run(
@@ -78,11 +80,7 @@ def changed_files_between(repo_root: Path, base_sha: str, head_sha: str) -> list
         capture_output=True,
         text=True,
     )
-    return sorted(
-        policy.normalize_repo_path(line)
-        for line in result.stdout.splitlines()
-        if line.strip()
-    )
+    return sorted(policy.normalize_repo_path(line) for line in result.stdout.splitlines() if line.strip())
 
 
 # Every slice field that decides whether a candidate passes. The contract is
@@ -99,9 +97,7 @@ FROZEN_CONTRACT_FIELDS = (
 )
 
 
-def slice_at_sha(
-    repo_root: Path, sha: str, queue_rel_path: str, slice_id: str
-) -> Optional[dict[str, Any]]:
+def slice_at_sha(repo_root: Path, sha: str, queue_rel_path: str, slice_id: str) -> Optional[dict[str, Any]]:
     """Return the *slice_id* record as it stood in the queue at *sha*."""
     result = subprocess.run(
         ["git", "show", f"{sha}:{queue_rel_path}"],
@@ -120,16 +116,13 @@ def slice_at_sha(
 
 def contract_drift(base_slice: dict[str, Any], head_slice: dict[str, Any]) -> list[str]:
     """Return the frozen contract fields the candidate changed at head."""
-    return [
-        field
-        for field in FROZEN_CONTRACT_FIELDS
-        if base_slice.get(field) != head_slice.get(field)
-    ]
+    return [field for field in FROZEN_CONTRACT_FIELDS if base_slice.get(field) != head_slice.get(field)]
 
 
 # ---------------------------------------------------------------------------
 # Worktree-based validation replay
 # ---------------------------------------------------------------------------
+
 
 def replay_validations_in_worktree(
     repo_root: Path,
@@ -157,12 +150,8 @@ def replay_validations_in_worktree(
             text=True,
         )
 
-        def worktree_runner(
-            _repo_root: Path, argv: list[str]
-        ) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                argv, cwd=worktree_path, check=False, capture_output=True, text=True
-            )
+        def worktree_runner(_repo_root: Path, argv: list[str]) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(argv, cwd=worktree_path, check=False, capture_output=True, text=True)
 
         return policy.replay_validation_commands(
             repo_root=worktree_path,
@@ -182,6 +171,7 @@ def replay_validations_in_worktree(
 # ---------------------------------------------------------------------------
 # Core evaluation
 # ---------------------------------------------------------------------------
+
 
 def evaluate(
     repo_root: Path,
@@ -203,46 +193,60 @@ def evaluate(
 
     slice_record = policy.find_slice(queue_data, slice_id)
     if slice_record is None:
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     f"Slice '{slice_id}' not found in queue.")
+        return _fail(slice_id, base_sha, head_sha, dry_run, f"Slice '{slice_id}' not found in queue.")
 
     if slice_record["status"] != "queued":
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     f"Slice status is '{slice_record['status']}', expected 'queued'.")
+        return _fail(slice_id, base_sha, head_sha, dry_run, f"Slice status is '{slice_record['status']}', expected 'queued'.")
 
     if handoff["slice_id"] != slice_id:
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     f"Handoff slice_id '{handoff['slice_id']}' does not match --slice-id '{slice_id}'.")
+        return _fail(
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
+            f"Handoff slice_id '{handoff['slice_id']}' does not match --slice-id '{slice_id}'.",
+        )
 
     # The handoff must name the commit it was verified against, and it must be
     # the commit under evaluation. An absent value used to short-circuit here,
     # which let one handoff validate against any --head-sha.
     verified_sha = handoff.get("verified_commit_sha", "")
     if not verified_sha:
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     "Handoff does not declare verified_commit_sha.")
+        return _fail(slice_id, base_sha, head_sha, dry_run, "Handoff does not declare verified_commit_sha.")
     if verified_sha != head_sha:
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     f"Handoff verified_commit_sha '{verified_sha}' does not match --head-sha '{head_sha}'.")
+        return _fail(
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
+            f"Handoff verified_commit_sha '{verified_sha}' does not match --head-sha '{head_sha}'.",
+        )
 
     if handoff["repo_clean_status"] != "clean":
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     f"Handoff repo_clean_status is '{handoff['repo_clean_status']}', expected 'clean'.")
+        return _fail(
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
+            f"Handoff repo_clean_status is '{handoff['repo_clean_status']}', expected 'clean'.",
+        )
 
     if handoff["dirty_paths_outside_scope"]:
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     "Handoff declares dirty paths outside slice scope: "
-                     f"{', '.join(handoff['dirty_paths_outside_scope'])}.")
+        return _fail(
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
+            f"Handoff declares dirty paths outside slice scope: {', '.join(handoff['dirty_paths_outside_scope'])}.",
+        )
 
     # --- SHA verification ---------------------------------------------------
 
     if not sha_exists(repo_root, base_sha):
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     f"Base SHA '{base_sha}' does not exist in the repository.")
+        return _fail(slice_id, base_sha, head_sha, dry_run, f"Base SHA '{base_sha}' does not exist in the repository.")
 
     if not sha_exists(repo_root, head_sha):
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     f"Head SHA '{head_sha}' does not exist in the repository.")
+        return _fail(slice_id, base_sha, head_sha, dry_run, f"Head SHA '{head_sha}' does not exist in the repository.")
 
     # --- Contract freeze at base SHA -----------------------------------------
     # Enforce the contract the slice carried *before* the work, never the one
@@ -251,20 +255,29 @@ def evaluate(
     queue_rel_path = policy.normalize_repo_path(str(queue_path.relative_to(repo_root)))
     base_slice = slice_at_sha(repo_root, base_sha, queue_rel_path, slice_id)
     if base_slice is None:
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     f"Slice '{slice_id}' has no contract at base SHA '{base_sha}'; "
-                     "there is nothing to evaluate the work against.")
+        return _fail(
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
+            f"Slice '{slice_id}' has no contract at base SHA '{base_sha}'; there is nothing to evaluate the work against.",
+        )
 
     head_slice = slice_at_sha(repo_root, head_sha, queue_rel_path, slice_id)
     if head_slice is None:
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     f"Slice '{slice_id}' is absent from the queue at head SHA '{head_sha}'.")
+        return _fail(
+            slice_id, base_sha, head_sha, dry_run, f"Slice '{slice_id}' is absent from the queue at head SHA '{head_sha}'."
+        )
 
     drift = contract_drift(base_slice, head_slice)
     if drift:
-        return _fail(slice_id, base_sha, head_sha, dry_run,
-                     "Candidate changed its own enforcement contract between base and head: "
-                     f"{', '.join(drift)}.")
+        return _fail(
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
+            f"Candidate changed its own enforcement contract between base and head: {', '.join(drift)}.",
+        )
 
     slice_record = base_slice
 
@@ -275,13 +288,14 @@ def evaluate(
     # --- Scope enforcement ---------------------------------------------------
 
     supervisor_owned = queue_data["policy"]["supervisor_owned_paths"]
-    out_of_scope = policy.out_of_scope_paths(
-        changed, slice_record["allowed_paths"], supervisor_owned
-    )
+    out_of_scope = policy.out_of_scope_paths(changed, slice_record["allowed_paths"], supervisor_owned)
 
     if out_of_scope:
         return _fail(
-            slice_id, base_sha, head_sha, dry_run,
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
             "Historical diff contains files outside allowed_paths.",
             changed_files=changed,
             out_of_scope_files=out_of_scope,
@@ -289,15 +303,16 @@ def evaluate(
 
     # --- File budget check ---------------------------------------------------
 
-    changed_in_scope = policy.count_paths_within_scope(
-        changed, slice_record["allowed_paths"], supervisor_owned
-    )
+    changed_in_scope = policy.count_paths_within_scope(changed, slice_record["allowed_paths"], supervisor_owned)
     budget = slice_record["max_files_changed"]
     file_count = max(changed_in_scope, len(set(handoff["files_touched"])))
 
     if file_count > budget:
         return _fail(
-            slice_id, base_sha, head_sha, dry_run,
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
             f"Changed file count ({file_count}) exceeds max_files_changed ({budget}).",
             changed_files=changed,
         )
@@ -305,12 +320,13 @@ def evaluate(
     # --- Files-touched scope check -------------------------------------------
 
     files_touched = policy.normalize_paths(handoff["files_touched"])
-    files_touched_outside = policy.out_of_scope_paths(
-        files_touched, slice_record["allowed_paths"], supervisor_owned
-    )
+    files_touched_outside = policy.out_of_scope_paths(files_touched, slice_record["allowed_paths"], supervisor_owned)
     if files_touched_outside:
         return _fail(
-            slice_id, base_sha, head_sha, dry_run,
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
             "Handoff files_touched contains paths outside allowed_paths.",
             changed_files=changed,
             files_touched_outside_scope=files_touched_outside,
@@ -326,7 +342,10 @@ def evaluate(
 
     if validation_failures:
         return _fail(
-            slice_id, base_sha, head_sha, dry_run,
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
             "Required validations were missing or failed.",
             changed_files=changed,
             required_validation_failures=validation_failures,
@@ -344,7 +363,10 @@ def evaluate(
     replay_failures = policy.validation_replay_failures(replays)
     if replay_failures:
         return _fail(
-            slice_id, base_sha, head_sha, dry_run,
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
             "Supervisor validation replay failed at verified SHA.",
             changed_files=changed,
             required_validation_failures=replay_failures,
@@ -353,13 +375,14 @@ def evaluate(
 
     # --- Proof level / manual proof checks -----------------------------------
 
-    missing_proofs, missing_level = policy.verify_manual_proofs(
-        slice_record, handoff, head_sha
-    )
+    missing_proofs, missing_level = policy.verify_manual_proofs(slice_record, handoff, head_sha)
 
     if missing_proofs or missing_level:
         return _fail(
-            slice_id, base_sha, head_sha, dry_run,
+            slice_id,
+            base_sha,
+            head_sha,
+            dry_run,
             "Required manual proof or proof level was missing.",
             changed_files=changed,
             missing_manual_proofs=missing_proofs,
@@ -369,11 +392,7 @@ def evaluate(
 
     # --- Success: apply queue transition if not dry-run ----------------------
 
-    replay_dicts = [
-        {"command": r.command, "success": r.success,
-         "exit_code": r.exit_code, "reason": r.reason}
-        for r in replays
-    ]
+    replay_dicts = [{"command": r.command, "success": r.success, "exit_code": r.exit_code, "reason": r.reason} for r in replays]
 
     if not dry_run:
         queue_data = policy.load_queue(queue_path, queue_schema_path)
@@ -414,9 +433,7 @@ def _fail(
     missing_proof_level: bool = False,
 ) -> EvaluationReport:
     replay_dicts = [
-        {"command": r.command, "success": r.success,
-         "exit_code": r.exit_code, "reason": r.reason}
-        for r in (replays or [])
+        {"command": r.command, "success": r.success, "exit_code": r.exit_code, "reason": r.reason} for r in (replays or [])
     ]
     return EvaluationReport(
         slice_id=slice_id,
@@ -441,17 +458,15 @@ def _fail(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Evaluate a pre-existing handoff artifact against a named slice."
-    )
+    parser = argparse.ArgumentParser(description="Evaluate a pre-existing handoff artifact against a named slice.")
     parser.add_argument("--slice-id", required=True, help="The slice to evaluate.")
     parser.add_argument("--handoff", required=True, help="Path to the handoff JSON artifact.")
     parser.add_argument("--base-sha", required=True, help="Git SHA before the implementation.")
     parser.add_argument("--head-sha", required=True, help="Git SHA of the verified implementation.")
     parser.add_argument("--queue", default="automation/queue/slices.json", help="Path to the queue JSON.")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Emit the decision without mutating the queue.")
+    parser.add_argument("--dry-run", action="store_true", help="Emit the decision without mutating the queue.")
     return parser.parse_args()
 
 

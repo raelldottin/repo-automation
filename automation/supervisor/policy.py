@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -55,7 +56,6 @@ class CompletionDecision:
     missing_proof_level: bool = False
 
 
-
 PROOF_LADDER = {
     "doc-only": 0,
     "domain-tested": 1,
@@ -64,8 +64,9 @@ PROOF_LADDER = {
     "flow-verified": 4,
     "screenshot-verified": 5,
     "device-verified": 6,
-    "testflight-verified": 7
+    "testflight-verified": 7,
 }
+
 
 def meets_proof_level(achieved: str, required: str) -> bool:
     if not required:
@@ -74,23 +75,22 @@ def meets_proof_level(achieved: str, required: str) -> bool:
         return False
     return PROOF_LADDER.get(achieved, -1) >= PROOF_LADDER.get(required, 0)
 
-def verify_manual_proofs(slice_record: dict[str, Any], handoff: dict[str, Any], post_run_commit_sha: str) -> tuple[list[str], bool]:
-    import subprocess
-    import hashlib
-    from pathlib import Path
 
+def verify_manual_proofs(
+    slice_record: dict[str, Any], handoff: dict[str, Any], post_run_commit_sha: str
+) -> tuple[list[str], bool]:
     required_proofs = slice_record.get("manual_proof", [])
     required_level = slice_record.get("required_proof_level", "")
-    
+
     provided_proofs = handoff.get("provided_proofs", [])
     verified_sha = handoff.get("verified_commit_sha", "")
-    
+
     missing_proofs = []
-    
+
     if verified_sha and verified_sha != post_run_commit_sha:
         if required_proofs:
             missing_proofs.append("Invalid verified_commit_sha (does not match supervisor-observed HEAD)")
-    
+
     provided_by_type = {}
     for p in provided_proofs:
         if p.get("slice_id") != slice_record.get("slice_id"):
@@ -113,7 +113,7 @@ def verify_manual_proofs(slice_record: dict[str, Any], handoff: dict[str, Any], 
             except Exception:
                 missing_proofs.append(f"{req} (invalid path)")
                 continue
-                
+
             expected_dir = repo_root / "automation" / "proofs" / slice_id
             try:
                 proof_path.relative_to(expected_dir)
@@ -124,7 +124,7 @@ def verify_manual_proofs(slice_record: dict[str, Any], handoff: dict[str, Any], 
             if not proof_path.exists():
                 missing_proofs.append(f"{req} (missing file)")
                 continue
-                
+
             expected_sha256 = p.get("sha256", "")
             if expected_sha256:
                 try:
@@ -135,13 +135,14 @@ def verify_manual_proofs(slice_record: dict[str, Any], handoff: dict[str, Any], 
                     missing_proofs.append(f"{req} (could not read file for sha256)")
             else:
                 missing_proofs.append(f"{req} (missing sha256 in metadata)")
-                
+
     achieved_level = handoff.get("proof_level", "")
     missing_level = False
     if required_level and not meets_proof_level(achieved_level, required_level):
         missing_level = True
-        
+
     return missing_proofs, missing_level
+
 
 SUPERVISOR_VALIDATION_REPLAY_COMMANDS: dict[str, list[str]] = {
     "make architecture": ["make", "architecture"],
@@ -928,7 +929,6 @@ def evaluate_completion(
             missing_manual_proofs=[],
             missing_proof_level=False,
         )
-
 
     if handoff["status"] == "done":
         missing_proofs, missing_level = verify_manual_proofs(slice_record, handoff, post_run_commit_sha)
