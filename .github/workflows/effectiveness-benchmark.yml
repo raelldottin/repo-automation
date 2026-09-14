@@ -18,6 +18,18 @@ on:
         description: "Space-separated instance ids (used when run_all is false)"
         type: string
         default: ""
+      experiment:
+        description: "Run the A-E lane experiment instead of a single benchmark run"
+        type: boolean
+        default: false
+      lanes:
+        description: "Lanes to run (experiment only)"
+        type: string
+        default: "A B C D E"
+      repeats:
+        description: "Attempts per lane/instance (experiment only; >=2 recommended)"
+        type: string
+        default: "2"
   schedule:
     # 07:17 UTC nightly — off the top of the hour on purpose.
     - cron: "17 7 * * *"
@@ -69,12 +81,26 @@ jobs:
         run: npm install -g @openai/codex
 
       - name: Run benchmark (rebuild -> eval -> score)
+        if: inputs.experiment != true
         run: |
           if [ "${{ inputs.run_all }}" = "false" ] && [ -n "${{ inputs.instances }}" ]; then
             uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }}
           else
             uv run python -m automation.benchmark all --run-dir out --all
           fi
+
+      # The experiment costs lanes x repeats x instances agent runs, so it is manual only
+      # and defaults to the smoke set. Never add it to the nightly schedule unattended.
+      - name: Run lane experiment (A-E)
+        if: inputs.experiment == true
+        run: |
+          if [ -n "${{ inputs.instances }}" ]; then
+            SELECTION="--instances ${{ inputs.instances }}"
+          else
+            SELECTION=""
+          fi
+          uv run python -m automation.benchmark lanes --run-dir out --eval \
+            --lanes ${{ inputs.lanes }} --repeats ${{ inputs.repeats }} $SELECTION
 
       - name: Upload effectiveness report
         if: always()
@@ -83,5 +109,9 @@ jobs:
           name: effectiveness-report
           path: |
             out/effectiveness-report.json
+            out/lane-comparison.json
+            out/lane-comparison.md
+            out/**/effectiveness-report.json
+            out/**/run.json
             out/**/*.eval.json
           if-no-files-found: warn
