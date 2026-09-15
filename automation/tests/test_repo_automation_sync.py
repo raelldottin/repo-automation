@@ -346,9 +346,7 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         self.write_target("vendored/harness/gone.py", "upstream deleted this\n")
         self.write_target("automation/handoffs/closed.json", "{}\n")
         self.commit_consumer()
-        self.write_manifest(
-            [self.entry("harness", "vendored/harness", kind="directory", delete_stale=True)]
-        )
+        self.write_manifest([self.entry("harness", "vendored/harness", kind="directory", delete_stale=True)])
 
         result = self.run_tool("--sync", pin=pin)
 
@@ -366,9 +364,7 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         self.write_target("vendored/harness/tool.py", "canonical\n")
         self.commit_consumer()
         self.write_target("vendored/harness/tool.py", "local customization in progress\n")
-        self.write_manifest(
-            [self.entry("harness", "vendored/harness", kind="directory", delete_stale=True)]
-        )
+        self.write_manifest([self.entry("harness", "vendored/harness", kind="directory", delete_stale=True)])
 
         result = self.run_tool("--sync", pin=pin)
 
@@ -384,9 +380,7 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         self.init_consumer()
         self.write_target("automation/prompts/slice.md", "consumer prompt\n")
         self.commit_consumer()
-        self.write_manifest(
-            [self.entry("prompts", "automation/prompts", kind="directory", template=True)]
-        )
+        self.write_manifest([self.entry("prompts", "automation/prompts", kind="directory", template=True)])
 
         result = self.run_tool("--sync", pin=pin)
 
