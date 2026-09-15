@@ -1,4 +1,4 @@
-name: Lint
+name: Quality gate
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   lint:
-    name: Ruff + ty
+    name: make reusable-check
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -35,14 +35,9 @@ jobs:
       - name: Sync dev dependencies
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
-      - name: JSON Schemas match their Pydantic models
-        run: uv run python -m automation.schemas.generate --check
-
-      - name: Ruff lint
-        run: uv run ruff check .
-
-      - name: Ruff format check
-        run: uv run ruff format --check .
-
-      - name: Type check (ty)
-        run: uv run ty check automation/ Tools/
+      # One step on purpose: `make reusable-check` is the gate a consumer's sync
+      # preflight runs, so CI and the import contract cannot drift apart.
+      - name: Canonical quality gate
+        run: make reusable-check
+        env:
+          UV_PYTHON: ${{ matrix.python-version }}

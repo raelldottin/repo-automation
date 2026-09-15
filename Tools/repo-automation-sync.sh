@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -517,6 +518,40 @@ def verify_source_provenance(source_root: Path, pin: str | None, expect_remote: 
         )
 
 
+DEFAULT_QUALITY_COMMAND = "make reusable-check"
+
+
+def verify_source_quality(source_root: Path, command: str) -> None:
+    """Protection 8: provenance is identity, not quality.
+
+    A source can sit at the pinned commit, on the right remote, with a clean worktree, and
+    still be lint-red or schema-drifted - canonical main was exactly that for two commits
+    on 2026-09-15. Pinning says which snapshot; this says the snapshot is one the canonical
+    repository considers releasable.
+
+    The gate is named, not enumerated: the tool asks the source to run its own contract
+    (`make reusable-check`) rather than learning which linters exist this month.
+    """
+    argv = shlex.split(command)
+    if not argv:
+        raise SyncError("empty --quality-command: the canonical quality gate must be a runnable command")
+
+    try:
+        result = subprocess.run(argv, cwd=source_root, capture_output=True, text=True, check=False)
+    except OSError as error:
+        raise SyncError(
+            f"could not run the canonical quality gate {command!r} in {source_root}: {error}"
+        ) from error
+
+    if result.returncode != 0:
+        tail = (result.stdout + result.stderr).strip().splitlines()[-20:]
+        raise SyncError(
+            f"canonical source failed its own quality gate ({command}), so the import would "
+            f"vendor content the canonical repository does not consider releasable:\n"
+            + "\n".join(tail)
+        )
+
+
 def main(argv: list[str]) -> int:
     repo_root = Path(argv[0]).resolve()
 
@@ -530,9 +565,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--pin", help="Full commit SHA the canonical source must be checked out at.")
     parser.add_argument("--expect-remote", help="Remote URL the canonical source's 'origin' must match.")
     parser.add_argument(
+        "--quality-command",
+        default=DEFAULT_QUALITY_COMMAND,
+        help=f"Canonical quality gate the source must pass before its content is imported. Default: {DEFAULT_QUALITY_COMMAND!r}."
+    )
+    parser.add_argument(
         "--allow-unverified-source",
         action="store_true",
-        help="Development only. Skip the pin, identity and cleanliness checks on the source."
+        help="Development only. Skip the pin, identity, cleanliness and quality checks on the source."
     )
     parser.add_argument(
         "--force-templates",
@@ -556,11 +596,13 @@ def main(argv: list[str]) -> int:
         if args.allow_unverified_source:
             print(
                 "repo-automation-sync: warning: reading from an unverified source "
-                "(--allow-unverified-source); the result is not traceable to a published commit.",
+                "(--allow-unverified-source); the result is neither traceable to a published "
+                "commit nor known to pass the canonical quality gate.",
                 file=sys.stderr,
             )
         else:
             verify_source_provenance(source_root, args.pin, args.expect_remote)
+            verify_source_quality(source_root, args.quality_command)
 
     if args.sync:
         target_root.mkdir(parents=True, exist_ok=True)
