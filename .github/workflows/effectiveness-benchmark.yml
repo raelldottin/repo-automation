@@ -89,6 +89,25 @@ jobs:
             uv run python -m automation.benchmark all --run-dir out --all
           fi
 
+      # Lane E administers the canonical J-Space skill from a pinned external checkout.
+      # Without it every E cell is skipped, which would quietly turn an A-E experiment
+      # into an A-D one, so provision it from the lock file and prove it resolves before
+      # any agent budget is spent. The lock is the single source of the pin.
+      - name: Provision the pinned J-Space checkout
+        if: inputs.experiment == true && contains(inputs.lanes, 'E')
+        run: |
+          lock=automation/benchmark/jspace.lock.json
+          url=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['url'])" "$lock")
+          revision=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['revision'])" "$lock")
+          git clone --quiet "$url" "$RUNNER_TEMP/j-space"
+          git -C "$RUNNER_TEMP/j-space" checkout --quiet "$revision"
+          echo "JSPACE_ROOT=$RUNNER_TEMP/j-space" >> "$GITHUB_ENV"
+
+      - name: Verify lane E can administer the canonical artifact
+        if: inputs.experiment == true && contains(inputs.lanes, 'E')
+        run: |
+          uv run python -c "from automation.benchmark import jspace; print(jspace.resolve().provenance())"
+
       # The experiment costs lanes x repeats x instances agent runs, so it is manual only
       # and defaults to the smoke set. Never add it to the nightly schedule unattended.
       - name: Run lane experiment (A-E)
@@ -114,4 +133,5 @@ jobs:
             out/**/effectiveness-report.json
             out/**/run.json
             out/**/*.eval.json
+            out/**/rpi/*.json
           if-no-files-found: warn

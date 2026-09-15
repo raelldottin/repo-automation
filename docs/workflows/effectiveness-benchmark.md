@@ -130,6 +130,17 @@ Resolution is fail-closed. A missing `JSPACE_ROOT`, a wrong revision, a moved ar
 a hash mismatch skips every lane-E cell with the reason recorded in `run.json`; lane E
 never silently degrades into lane D under E's name. Lanes A–D are unaffected and still run.
 
+Verify a checkout before spending a run on it:
+
+```shell
+uv run python -c "from automation.benchmark import jspace; print(jspace.resolve().provenance())"
+```
+
+The benchmark workflow does this for itself: when a dispatch includes lane E it clones the
+pin out of the lock file, exports `JSPACE_ROOT`, and fails the job if the artifact does not
+resolve — so a misconfigured run stops before any agent budget is spent rather than
+producing an A–D experiment labelled A–E.
+
 Updating the pin is a deliberate act: change the revision and hash together in the lock
 file, in a commit that says why. Results produced under different pins are not comparable.
 
