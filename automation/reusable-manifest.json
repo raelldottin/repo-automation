@@ -1,6 +1,5 @@
 {
   "version": 1,
-  "default_target": "/Users/raelldottin/Documents/Personal/repo-automation",
   "entries": [
     {
       "source": "automation/README.md",

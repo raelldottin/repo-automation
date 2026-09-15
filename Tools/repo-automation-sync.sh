@@ -45,8 +45,18 @@ FORBIDDEN_SOURCE_FILES = {
 # list and this tool, so without a destination check an upstream entry could aim reusable
 # content at the consumer's hook, Makefile or live queue - and delete_stale could remove
 # them. Unlike the source check there is no manifest opt-out: these are never importable.
+#
+# The lock file is here because the consumer's Makefile reads it and passes the values to
+# this tool: whoever writes the lock chooses what a consumer's `make` executes. It is a
+# statement about the canonical repo, written by the consumer at import time, never
+# imported.
 FORBIDDEN_DESTINATION_PREFIXES = FORBIDDEN_SOURCE_PREFIXES
-FORBIDDEN_DESTINATION_FILES = FORBIDDEN_SOURCE_FILES
+FORBIDDEN_DESTINATION_FILES = FORBIDDEN_SOURCE_FILES | {"automation/repo-automation.lock"}
+
+# Compared casefolded: on APFS and NTFS a destination of "makefile" or ".GitHooks/pre-push"
+# is the same file as the one being protected, and an exact-match check would wave it past.
+FOLDED_DESTINATION_FILES = {path.casefold() for path in FORBIDDEN_DESTINATION_FILES}
+FOLDED_DESTINATION_PREFIXES = tuple(prefix.casefold() for prefix in FORBIDDEN_DESTINATION_PREFIXES)
 
 SKIP_NAMES = {"__pycache__", ".DS_Store"}
 
@@ -112,18 +122,19 @@ def parse_entry(raw: object) -> Entry:
             if source == prefix.rstrip("/") or source.startswith(prefix):
                 raise SyncError(f"forbidden Owlory-specific source requires explicit approval: {source}")
 
-    if destination in FORBIDDEN_DESTINATION_FILES:
+    folded_destination = destination.casefold()
+    if folded_destination in FOLDED_DESTINATION_FILES:
         raise SyncError(f"forbidden import destination is owned by the consumer: {destination}")
-    for prefix in FORBIDDEN_DESTINATION_PREFIXES:
-        if destination == prefix.rstrip("/") or destination.startswith(prefix):
+    for prefix in FOLDED_DESTINATION_PREFIXES:
+        if folded_destination == prefix.rstrip("/") or folded_destination.startswith(prefix):
             raise SyncError(f"forbidden import destination is owned by the consumer: {destination}")
 
     # An ancestor is just as dangerous: a directory entry rooted at "automation" with
     # delete_stale set would sweep automation/queue, automation/handoffs and automation/proofs
     # without ever naming them.
-    owned = sorted(FORBIDDEN_DESTINATION_FILES) + [prefix.rstrip("/") for prefix in FORBIDDEN_DESTINATION_PREFIXES]
+    owned = sorted(FOLDED_DESTINATION_FILES) + [prefix.rstrip("/") for prefix in FOLDED_DESTINATION_PREFIXES]
     for consumer_path in owned:
-        if consumer_path.startswith(destination + "/"):
+        if consumer_path.startswith(folded_destination + "/"):
             raise SyncError(
                 f"forbidden import destination {destination!r} contains consumer-owned {consumer_path!r}"
             )
@@ -139,7 +150,7 @@ def parse_entry(raw: object) -> Entry:
     )
 
 
-def load_manifest(path: Path) -> tuple[Path, list[Entry]]:
+def load_manifest(path: Path) -> list[Entry]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
@@ -152,16 +163,21 @@ def load_manifest(path: Path) -> tuple[Path, list[Entry]]:
     if data.get("version") != 1:
         raise SyncError("manifest version must be 1")
 
-    default_target_raw = data.get("default_target")
-    if not isinstance(default_target_raw, str) or not default_target_raw:
-        raise SyncError("manifest default_target must be a non-empty string")
-    default_target = Path(default_target_raw).expanduser()
+    # A tool whose whole job is writing files has no safe default destination. The field
+    # this replaces named the canonical repository itself - correct before the ownership
+    # flip, and afterwards a --sync away from writing outward. Rejecting it rather than
+    # ignoring it keeps it from drifting back in from an upstream manifest.
+    if "default_target" in data:
+        raise SyncError(
+            "manifest must not carry default_target: the destination is the caller's to name. "
+            "Pass --target explicitly."
+        )
 
     raw_entries = data.get("entries")
     if not isinstance(raw_entries, list) or not raw_entries:
         raise SyncError("manifest entries must be a non-empty list")
 
-    return default_target, [parse_entry(raw) for raw in raw_entries]
+    return [parse_entry(raw) for raw in raw_entries]
 
 
 def resolve_under(base: Path, relative: str, *, must_exist: bool) -> Path:
@@ -271,24 +287,40 @@ def locally_modified_targets(target_root: Path) -> set[Path]:
     history and not upstream. Untracked files are excluded: a brand new file in a vendored
     directory is stale, which is a different decision handled by delete_stale.
     """
-    status = subprocess.run(
-        ["git", "-C", str(target_root), "status", "--porcelain", "--untracked-files=no"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if status.returncode != 0:
-        return set()
+    toplevel_result = git_result(target_root, "rev-parse", "--show-toplevel")
+    if toplevel_result.returncode != 0:
+        # A consumer that is not under version control has no uncommitted work to lose, so
+        # there is nothing for this protection to do. Every other failure - dubious
+        # ownership, a missing git, an unreadable index - must not silently switch it off.
+        if "not a git repository" in toplevel_result.stderr.lower():
+            return set()
+        raise SyncError(
+            f"could not determine whether {target_root} has uncommitted changes, so the import "
+            f"cannot promise not to overwrite them: {toplevel_result.stderr.strip() or 'git failed'}"
+        )
 
+    # Status paths are relative to the repository root, not to -C, so a consumer vendored in
+    # a subdirectory needs the toplevel to rebuild them.
+    toplevel = Path(toplevel_result.stdout.strip())
+
+    status = git_result(target_root, "status", "--porcelain", "-z", "--untracked-files=no")
+    if status.returncode != 0:
+        raise SyncError(f"could not read consumer status: {status.stderr.strip() or 'git failed'}")
+
+    # -z emits "XY <path>\0", and for a rename or copy a second "\0<source path>" follows.
+    # It is the one format that does not quote or escape unusual bytes in a filename.
+    fields = status.stdout.split("\0")
     modified: set[Path] = set()
-    for line in status.stdout.splitlines():
-        if not line.strip():
+    index = 0
+    while index < len(fields):
+        field = fields[index]
+        index += 1
+        if not field:
             continue
-        entry_path = line[3:]
-        # Renames report "old -> new"; the new path is the one on disk.
-        if " -> " in entry_path:
-            entry_path = entry_path.split(" -> ", 1)[1]
-        modified.add((target_root / entry_path.strip().strip('"')).resolve(strict=False))
+        states, entry_path = field[:2], field[3:]
+        if "R" in states or "C" in states:
+            index += 1
+        modified.add((toplevel / entry_path).resolve(strict=False))
     return modified
 
 
@@ -375,22 +407,32 @@ def sync_entries(
     return 0
 
 
-def git_output(repo: Path, *args: str) -> tuple[int, str]:
-    result = subprocess.run(
+def git_result(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run git without raising. Callers that must tell one failure from another read stderr."""
+    return subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def git_output(repo: Path, *args: str) -> tuple[int, str]:
+    result = git_result(repo, *args)
     return result.returncode, result.stdout.strip()
 
 
-def ensure_target_is_not_the_source(source_root: Path, target_root: Path) -> None:
+def ensure_target_is_not_canonical(source_root: Path, target_root: Path, expect_remote: str | None) -> None:
     """Protection 1: an import has no write path back into the canonical repository.
 
     The old --auto-update mode wrote outward and once resolved to deleting 1937 lines of
     committed canonical work. There is no flag to re-enable that: files move canonical ->
-    consumer only, so writing into the source, or into anything containing it, is refused.
+    consumer only.
+
+    Path containment alone does not establish that. Two checkouts of the canonical
+    repository sitting side by side contain neither the other, so the destructive case
+    looks like an ordinary import right up until delete_stale runs. What makes a
+    destination unsafe is its identity, not its location.
     """
     source = source_root.resolve(strict=False)
     target = target_root.resolve(strict=False)
@@ -401,6 +443,30 @@ def ensure_target_is_not_the_source(source_root: Path, target_root: Path) -> Non
         raise SyncError(f"refusing to import into {target}, which lives inside the canonical source {source}")
     if target in source.parents:
         raise SyncError(f"refusing to import into {target}, which contains the canonical source {source}")
+
+    # Worktrees of one repository share a common git dir, and that holds even when neither
+    # has a remote configured. This is the sibling-checkout case.
+    source_code, source_common = git_output(source, "rev-parse", "--git-common-dir")
+    target_code, target_common = git_output(target, "rev-parse", "--git-common-dir")
+    if source_code == 0 and target_code == 0:
+        if (source / source_common).resolve(strict=False) == (target / target_common).resolve(strict=False):
+            raise SyncError(
+                f"refusing to import into {target}: it is a checkout of the canonical source {source}"
+            )
+
+    # Independent clones do not share a git dir, so fall back to what the repository says it
+    # is. Protection 3 already applies this to the source; the destination needs it more,
+    # because that is the side that gets written to.
+    target_remote_code, target_remote = git_output(target, "remote", "get-url", "origin")
+    if target_remote_code != 0 or not target_remote:
+        return
+
+    source_remote_code, source_remote = git_output(source, "remote", "get-url", "origin")
+    canonical_remotes = {remote for remote in (expect_remote, source_remote if source_remote_code == 0 else None) if remote}
+    if target_remote in canonical_remotes:
+        raise SyncError(
+            f"refusing to import into {target}: its 'origin' is the canonical repository {target_remote}"
+        )
 
 
 def verify_source_provenance(source_root: Path, pin: str | None, expect_remote: str | None) -> None:
@@ -458,7 +524,7 @@ def main(argv: list[str]) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="Report drift without changing files.")
     mode.add_argument("--sync", action="store_true", help="Update the target to match the reusable manifest.")
-    parser.add_argument("--target", help="Destination consumer folder. Defaults to manifest default_target.")
+    parser.add_argument("--target", required=True, help="Destination consumer folder. There is no default.")
     parser.add_argument("--source", default=str(repo_root), help="Canonical source repository root. Defaults to this checkout.")
     parser.add_argument("--manifest", help="Manifest path. Defaults to <source>/automation/reusable-manifest.json.")
     parser.add_argument("--pin", help="Full commit SHA the canonical source must be checked out at.")
@@ -478,10 +544,10 @@ def main(argv: list[str]) -> int:
 
     source_root = Path(args.source).expanduser().resolve(strict=True)
     manifest = Path(args.manifest).expanduser() if args.manifest else source_root / "automation/reusable-manifest.json"
-    default_target, entries = load_manifest(manifest)
-    target_root = Path(args.target).expanduser() if args.target else default_target
+    entries = load_manifest(manifest)
+    target_root = Path(args.target).expanduser()
 
-    ensure_target_is_not_the_source(source_root, target_root)
+    ensure_target_is_not_canonical(source_root, target_root, args.expect_remote)
 
     # --check answers "does the snapshot match the commit it is pinned to", so it needs the
     # same provenance as --sync whenever a pin is supplied. Without a pin it stays a plain

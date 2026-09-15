@@ -9,6 +9,7 @@ their own equivalents against their vendored checkout.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -65,12 +66,9 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         path.write_text(contents, encoding="utf-8")
         return path
 
-    def write_manifest(self, entries: list[dict[str, Any]]) -> None:
+    def write_manifest(self, entries: list[dict[str, Any]], **extra: Any) -> None:
         self.manifest.write_text(
-            json.dumps(
-                {"version": 1, "default_target": str(self.target), "entries": entries},
-                indent=2,
-            ),
+            json.dumps({"version": 1, **extra, "entries": entries}, indent=2),
             encoding="utf-8",
         )
 
@@ -119,8 +117,13 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         self.git(self.target, "add", "-A")
         self.git(self.target, "commit", "-m", "consumer state")
 
-    def run_tool(self, *args: str, pin: str | None = None) -> subprocess.CompletedProcess[str]:
+    def run_tool(self, *args: str, pin: str | None = None, env_path: str | None = None) -> subprocess.CompletedProcess[str]:
         provenance: list[str] = ["--pin", pin, "--expect-remote", self.remote] if pin else []
+        env = None
+        if env_path is not None:
+            # Used to take git away from the tool mid-run, which is one of the ways a guard
+            # that reads returncode alone quietly stops guarding.
+            env = {**os.environ, "PATH": env_path}
         return subprocess.run(
             [
                 str(SYNC_TOOL),
@@ -136,6 +139,7 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
+            env=env,
         )
 
     # --- protection 1 ----------------------------------------------------
@@ -184,6 +188,106 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("unrecognized arguments: --auto-update", result.stderr)
         self.assertNotIn("--auto-update", self.run_tool("--help").stdout)
+
+    def test_1c_a_sibling_checkout_of_the_canonical_repo_is_refused(self) -> None:
+        """Containment does not establish identity.
+
+        Two checkouts side by side contain neither the other, so the destructive case looked
+        like an ordinary import. This is the one the default target used to point at.
+        """
+        self.canonical_source_with(("harness/keep.py", "CANONICAL\n"))
+
+        sibling = self.tmpdir / "canonical-sibling"
+        self.git(self.tmpdir, "clone", "--quiet", str(self.source), str(sibling))
+        self.git(sibling, "remote", "set-url", "origin", self.remote)
+        (sibling / "harness/only-upstream.py").write_text("upstream only\n", encoding="utf-8")
+        self.git(sibling, "add", "-A")
+        self.git(sibling, "-c", "user.email=s@example.com", "-c", "user.name=S", "commit", "-m", "sibling")
+        before = (sibling / "harness/keep.py").read_text(encoding="utf-8")
+
+        self.write_source("harness/keep.py", "PAYLOAD\n")
+        pin = self.publish_source("payload")
+        self.write_manifest([self.entry("harness", "harness", kind="directory", delete_stale=True)])
+
+        result = subprocess.run(
+            [
+                str(SYNC_TOOL),
+                "--sync",
+                "--pin",
+                pin,
+                "--expect-remote",
+                self.remote,
+                "--source",
+                str(self.source),
+                "--manifest",
+                str(self.manifest),
+                "--target",
+                str(sibling),
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("canonical", result.stderr)
+        self.assertEqual(before, (sibling / "harness/keep.py").read_text(encoding="utf-8"))
+        self.assertTrue(
+            (sibling / "harness/only-upstream.py").exists(),
+            msg="delete_stale must never reach a checkout of the canonical repository",
+        )
+
+    def test_1d_a_target_whose_origin_is_the_canonical_repo_is_refused(self) -> None:
+        """An independent clone shares no git dir, so identity falls back to the remote."""
+        pin = self.canonical_source_with()
+        self.init_consumer()
+        self.git(self.target, "remote", "add", "origin", self.remote)
+        self.write_manifest([self.entry("seed.txt", "seed.txt")])
+
+        result = self.run_tool("--sync", pin=pin)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("origin", result.stderr)
+        self.assertFalse((self.target / "seed.txt").exists())
+
+    def test_1e_there_is_no_default_destination(self) -> None:
+        """A manifest cannot name where the import lands - the caller must say.
+
+        default_target named the canonical repository, which was correct before the
+        ownership flip and a --sync away from writing outward after it.
+        """
+        pin = self.canonical_source_with()
+        self.write_manifest([self.entry("seed.txt", "seed.txt")])
+
+        no_target = subprocess.run(
+            [
+                str(SYNC_TOOL),
+                "--sync",
+                "--pin",
+                pin,
+                "--expect-remote",
+                self.remote,
+                "--source",
+                str(self.source),
+                "--manifest",
+                str(self.manifest),
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(0, no_target.returncode)
+        self.assertIn("--target", no_target.stderr)
+
+        self.write_manifest([self.entry("seed.txt", "seed.txt")], default_target=str(self.target))
+        reintroduced = self.run_tool("--sync", pin=pin)
+        self.assertNotEqual(0, reintroduced.returncode)
+        self.assertIn("default_target", reintroduced.stderr)
+
+    def test_1f_the_shipped_manifest_names_no_destination(self) -> None:
+        """The real manifest, not a fixture: the field must be gone from the repository."""
+        manifest = json.loads((REPO_ROOT / "automation/reusable-manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("default_target", manifest)
 
     # --- protection 2 ----------------------------------------------------
 
@@ -307,6 +411,43 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
                     msg=f"{destination} is consumer-owned and must never be written by an import",
                 )
 
+    def test_5b_the_destination_guard_is_case_insensitive(self) -> None:
+        """On APFS and NTFS 'makefile' is the file the guard is protecting."""
+        self.init_canonical_source()
+        self.write_source("payload.txt", "payload\n")
+        pin = self.publish_source()
+        self.init_consumer()
+
+        for destination in ("makefile", "MAKEFILE", ".GitHooks/pre-push", "Automation/Queue/slices.json"):
+            with self.subTest(destination=destination):
+                self.write_manifest([self.entry("payload.txt", destination)])
+
+                result = self.run_tool("--sync", pin=pin)
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("destination", result.stderr)
+
+    def test_5c_the_lock_file_is_consumer_owned(self) -> None:
+        """The consumer's Makefile reads the lock and passes it to this tool.
+
+        Whoever writes the lock chooses what `make` executes in the consumer, so an import
+        must never be able to write it - the manifest comes from the same place an attacker
+        would be.
+        """
+        self.init_canonical_source()
+        self.write_source("payload.txt", "payload\n")
+        pin = self.publish_source()
+        self.init_consumer()
+        self.write_target("automation/repo-automation.lock", '{"commit": "real"}\n')
+        self.commit_consumer()
+        self.write_manifest([self.entry("payload.txt", "automation/repo-automation.lock")])
+
+        result = self.run_tool("--sync", pin=pin)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("destination", result.stderr)
+        self.assertIn("real", (self.target / "automation/repo-automation.lock").read_text(encoding="utf-8"))
+
     # --- protection 6 ----------------------------------------------------
 
     def test_6_stale_deletion_never_reaches_outside_canonical_owned_paths(self) -> None:
@@ -389,6 +530,82 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
             "consumer prompt\n",
             (self.target / "automation/prompts/slice.md").read_text(encoding="utf-8"),
         )
+
+    def test_7c_a_git_failure_stops_the_import_rather_than_disabling_the_guard(self) -> None:
+        """Protection 7 must fail closed.
+
+        Returning "nothing is modified" whenever git exits non-zero means dubious ownership
+        or a missing git silently removes the guard, and the import proceeds to overwrite
+        the very work the guard exists to protect.
+        """
+        self.canonical_source_with(("harness/tool.py", "canonical v2\n"))
+        self.init_consumer()
+        self.write_target("vendored/harness/tool.py", "local work\n")
+        self.write_manifest([self.entry("harness", "vendored/harness", kind="directory")])
+
+        # git is present but refuses, which is what dubious ownership looks like. Exit 128 is
+        # also what "not a git repository" returns, so returncode alone cannot tell them apart.
+        shim = self.tmpdir / "shim"
+        shim.mkdir()
+        fake_git = shim / "git"
+        fake_git.write_text(
+            '#!/bin/sh\necho "fatal: detected dubious ownership in repository" >&2\nexit 128\n',
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+
+        result = self.run_tool("--sync", "--allow-unverified-source", env_path=f"{shim}:{os.environ['PATH']}")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("uncommitted", result.stderr)
+        self.assertEqual("local work\n", (self.target / "vendored/harness/tool.py").read_text(encoding="utf-8"))
+
+    def test_7d_an_untracked_consumer_is_still_importable(self) -> None:
+        """Fail-closed must not mean refusing a consumer that simply is not a Git checkout."""
+        pin = self.canonical_source_with(("harness/tool.py", "canonical\n"))
+        self.write_manifest([self.entry("harness", "vendored/harness", kind="directory")])
+
+        result = self.run_tool("--sync", pin=pin)
+
+        self.assertEqual(0, result.returncode, msg=result.stderr)
+        self.assertEqual("canonical\n", (self.target / "vendored/harness/tool.py").read_text(encoding="utf-8"))
+
+    def test_7e_modified_paths_are_resolved_against_the_repository_root(self) -> None:
+        """Status paths are relative to the toplevel, so a consumer in a subdirectory needs it."""
+        pin = self.canonical_source_with(("harness/tool.py", "canonical v2\n"))
+        self.init_consumer()
+
+        nested = self.target / "nested/consumer"
+        nested.mkdir(parents=True)
+        (nested / "vendored").mkdir()
+        (nested / "vendored/tool.py").write_text("canonical\n", encoding="utf-8")
+        self.commit_consumer()
+        (nested / "vendored/tool.py").write_text("local work\n", encoding="utf-8")
+        self.write_manifest([self.entry("harness", "vendored", kind="directory")])
+
+        result = subprocess.run(
+            [
+                str(SYNC_TOOL),
+                "--sync",
+                "--pin",
+                pin,
+                "--expect-remote",
+                self.remote,
+                "--source",
+                str(self.source),
+                "--manifest",
+                str(self.manifest),
+                "--target",
+                str(nested),
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("locally modified", result.stderr)
+        self.assertEqual("local work\n", (nested / "vendored/tool.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

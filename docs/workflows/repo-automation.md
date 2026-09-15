@@ -83,6 +83,8 @@ The manifest is explicit rather than glob-heavy. Each entry identifies:
 
 The sync tool rejects paths outside the repository root and outside the target root. It does not follow symlinks into untracked locations.
 
+The manifest does not name a destination. It says what is reusable, never where it lands — that is the caller's to state with `--target`, and a manifest carrying `default_target` is rejected. The field used to hold the canonical repository's own path, which was right while Owlory was the source and became a `--sync` away from writing outward the moment the direction flipped.
+
 ## Sync Contract
 
 Use `Tools/repo-automation-sync.sh` for manifest-owned sync:
@@ -90,7 +92,7 @@ Use `Tools/repo-automation-sync.sh` for manifest-owned sync:
 - `--check`: report drift between the canonical source and a consumer's vendored snapshot without changing files.
 - `--sync`: update a consumer's vendored snapshot to match the manifest at the pinned canonical commit.
 - `--import`: the explicit mutating path; require the canonical source to be clean and published at the pinned commit, import canonical-owned files inward, then verify `--check` passes. There is no outward `--auto-update`; it was the destructive direction and is removed.
-- `--target <path>`: override the target path for tests and future consumers.
+- `--target <path>`: **required.** The consumer to write into. There is no default, and it may not be the canonical repository or another checkout of it.
 - `--source <path>` and `--manifest <path>`: test hooks for temp repositories and alternate manifests.
 
 The tool must be idempotent. Running `--sync` twice against the same source should produce no second change. Running `--check` after a successful sync should pass.
@@ -120,13 +122,13 @@ No automatic external mutation, and no hidden cross-repository commits.
 
 These are enforced in `Tools/repo-automation-sync.sh` itself, not in a consumer's Makefile, so they hold however the tool is invoked. Each one refuses with a non-zero exit and changes nothing — the import is planned in full before a single file is written, so a refusal leaves the consumer byte-for-byte unchanged rather than half-imported.
 
-1. **No outward mutation.** Importing into the canonical source, into anything inside it, or into anything containing it, is refused. `--auto-update` — the mode that once resolved to deleting 1937 lines of committed canonical work — has been removed, and no flag re-enables it.
+1. **No outward mutation.** Importing into the canonical source, into anything inside it, or into anything containing it, is refused — and so is importing into any *other* checkout of the canonical repository, identified by a shared git directory or by an `origin` that matches the canonical remote. Path containment alone does not establish identity: two checkouts sitting side by side contain neither the other, so the destructive case looks like an ordinary import right up until `delete_stale` runs. `--auto-update` — the mode that once resolved to deleting 1937 lines of committed canonical work — has been removed, and no flag re-enables it. There is also no default destination: `--target` is required, and a manifest carrying `default_target` is rejected rather than ignored.
 2. **The canonical commit is explicit.** `--sync` requires `--pin <full-sha>`.
 3. **Repository identity is verified.** The source's `origin` must equal `--expect-remote`. A source with no `origin` fails; it cannot state what repository it is, which is the case the check exists for.
 4. **The source must be published and clean.** Uncommitted content is unpublished by definition, and the source must be at the pinned commit, not merely near it.
-5. **Consumer-owned destinations are never importable.** A manifest entry may not target `.githooks/`, `Makefile`, `automation/queue/`, `automation/handoffs/`, `automation/proofs/`, app code or release tooling — nor any *ancestor* of them, since a `delete_stale` directory entry rooted at `automation` would sweep the queue without ever naming it. Unlike the source-side check there is no manifest opt-out.
+5. **Consumer-owned destinations are never importable.** A manifest entry may not target `.githooks/`, `Makefile`, `automation/queue/`, `automation/handoffs/`, `automation/proofs/`, `automation/repo-automation.lock`, app code or release tooling — nor any *ancestor* of them, since a `delete_stale` directory entry rooted at `automation` would sweep the queue without ever naming it. Comparison is casefolded, because on APFS and NTFS a destination of `makefile` is the file being protected. Unlike the source-side check there is no manifest opt-out. The lock file is on this list because the consumer's Makefile reads it and passes the values to this tool: whoever writes the lock chooses what the consumer's `make` executes.
 6. **Stale deletion stays inside what the canonical side owns.** Because (5) is enforced when the manifest is parsed, `delete_stale` can only ever reach canonical-owned destinations.
-7. **Locally modified files are never clobbered.** A tracked destination file with uncommitted consumer edits stops the import; that work exists in neither history. Template entries are additionally not overwritten by an ordinary import.
+7. **Locally modified files are never clobbered.** A tracked destination file with uncommitted consumer edits stops the import; that work exists in neither history. Template entries are additionally not overwritten by an ordinary import. This check fails closed: a consumer that is not under version control has nothing to protect and imports normally, but any *other* Git failure — dubious ownership, a missing `git` — refuses the import rather than silently proceeding without the guard.
 
 Protections 2, 3 and 4 can be waived together with `--allow-unverified-source` for local development. It prints a warning, the consumer's `make` targets never pass it, and it cannot waive 1, 5, 6 or 7.
 
