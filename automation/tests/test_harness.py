@@ -941,6 +941,59 @@ class AutomationHarnessTests(unittest.TestCase):
         # literally rather than fail, so assert none survives substitution.
         self.assertNotRegex(prompt_text, r"__[A-Z_]+__")
 
+    def test_render_prompt_rejects_unknown_placeholder_in_template(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_root = Path(temp_dir)
+            prompts_dir = fake_root / "automation/prompts"
+            prompts_dir.mkdir(parents=True)
+            shutil.copy(self.repo_root / "automation/prompts/base.md", prompts_dir / "base.md")
+            stale_template = (self.repo_root / "automation/prompts/slice.md").read_text(encoding="utf-8")
+            stale_template = stale_template.replace("__EXECUTION_CONSTRAINTS__", "__ACCEPTANCE_CHECKS__")
+            (prompts_dir / "slice.md").write_text(stale_template, encoding="utf-8")
+
+            handoff_dir = fake_root / "handoffs"
+            handoff_dir.mkdir()
+            slice_id = self.example_slice_id_at(1)
+            queue_data = policy.load_queue(self.example_queue_path)
+            slice_record = self.require_slice_record(queue_data, slice_id)
+            context_bundle = build_context_bundle(
+                repo_root=self.repo_root,
+                queue_path=self.example_queue_path,
+                handoff_dir=handoff_dir,
+                slice_id=slice_id,
+                max_doc_chars=1200,
+            )
+            with self.assertRaises(policy.ConfigError) as raised:
+                render_prompt(
+                    repo_root=fake_root,
+                    slice_record=slice_record,
+                    context_bundle=context_bundle,
+                    handoff_path=Path("/tmp/handoff.json"),
+                )
+        self.assertEqual("unknown_prompt_placeholder: __ACCEPTANCE_CHECKS__", str(raised.exception))
+
+    def test_render_prompt_allows_placeholder_shaped_text_in_injected_values(self) -> None:
+        slice_id = self.example_slice_id_at(1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            handoff_dir = Path(temp_dir)
+            queue_data = policy.load_queue(self.example_queue_path)
+            slice_record = dict(self.require_slice_record(queue_data, slice_id))
+            slice_record["notes"] = "Leave the __LEGACY_TOKEN__ marker in the fixture alone."
+            context_bundle = build_context_bundle(
+                repo_root=self.repo_root,
+                queue_path=self.example_queue_path,
+                handoff_dir=handoff_dir,
+                slice_id=slice_id,
+                max_doc_chars=1200,
+            )
+            prompt_text = render_prompt(
+                repo_root=self.repo_root,
+                slice_record=slice_record,
+                context_bundle=context_bundle,
+                handoff_path=Path("/tmp/handoff.json"),
+            )
+        self.assertIn("__LEGACY_TOKEN__", prompt_text)
+
     def test_decision_report_includes_supervisor_validation_replays(self) -> None:
         decision = policy.CompletionDecision(
             queue_status="done",
