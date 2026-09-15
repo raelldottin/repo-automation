@@ -8,7 +8,7 @@ and workflow are treated:
 * ``B`` slice-context    - the shipped harness behaviour (``base.md`` + ``slice.md``).
 * ``C`` rpi              - fresh Research -> Plan -> Implement sessions, typed artifacts.
 * ``D`` rpi+compaction   - C, with each artifact intentionally compacted before the next phase.
-* ``E`` rpi+compaction+j - D, with the J-Space ledger active inside each phase.
+* ``E`` rpi+compaction+j - D, with the canonical J-Space skill administered each phase.
 
 That containment is the whole point: ``E - D`` is the marginal value of J-Space, ``D - C``
 of compaction, ``C - B`` of RPI, ``B - A`` of the harness's bounded context. Anything that
@@ -30,7 +30,9 @@ from typing import Any, Mapping, Optional, Protocol
 
 from automation.supervisor import run_next
 
+from . import jspace as jspace_module
 from .instances import TaskSpec
+from .jspace import JSpaceArtifact, JSpaceUnavailable
 
 # Phase artifacts live here, inside the workspace so the agent sandbox can write them,
 # and are stripped from the graded submission.
@@ -78,6 +80,7 @@ class StrategyResult:
     returncode: int
     phases: tuple[PhaseResult, ...] = ()
     compaction: dict[str, Any] = field(default_factory=dict)
+    jspace: Optional[dict[str, Any]] = None
 
     @property
     def agent_invocations(self) -> int:
@@ -100,6 +103,7 @@ class StrategyResult:
             "phase_failures": self.phase_failures,
             "phases": [phase.to_dict() for phase in self.phases],
             "compaction": self.compaction,
+            "jspace": self.jspace,
         }
 
 
@@ -186,23 +190,6 @@ def read_artifact(workspace: Path, filename: str) -> tuple[Optional[Any], str]:
 # --------------------------------------------------------------------------------------
 # Prompt construction
 # --------------------------------------------------------------------------------------
-
-JSPACE_FRAGMENT = """## J-Space Ledger (active this phase)
-
-Keep a small working ledger in your head and restate it whenever it changes. Load only
-what this phase needs; do not carry the whole problem at once.
-
-- **Goal** - the one outcome this phase must reach.
-- **Core** - at most two load-bearing facts held live. Evict before adding a third.
-- **Verified** - what you have actually confirmed, with how you confirmed it.
-- **Open** - what remains genuinely unresolved.
-- **Next** - the single next action.
-
-Before acting, settle the problem: what is already **Commit**ted (fixed constraints), what
-**Move**s are permitted, what is **Hidden** (unknown), what the **World** imposes, and what
-**Success** looks like. The ledger is disposable working state; the phase artifact is what
-survives.
-"""
 
 _ENVELOPE = """## Objective (immutable)
 
@@ -312,10 +299,11 @@ def artifact_instruction(spec: ArtifactSpec, filename: Optional[str] = None) -> 
     )
 
 
-def compose_prompt(*sections: str, jspace: bool = False) -> str:
+def compose_prompt(*sections: str, jspace: Optional[JSpaceArtifact] = None) -> str:
+    """Assemble one phase prompt; ``jspace`` is the canonical skill, never a paraphrase."""
     blocks = [section.strip() for section in sections if section and section.strip()]
-    if jspace:
-        blocks.insert(1, JSPACE_FRAGMENT.strip())
+    if jspace is not None:
+        blocks.insert(1, jspace.prompt_block())
     return "\n\n".join(blocks) + "\n"
 
 
@@ -442,10 +430,15 @@ class RpiStrategy:
     makes this a test of RPI rather than one long session with section headings.
     """
 
-    def __init__(self, compaction: bool = False, jspace: bool = False, name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        compaction: bool = False,
+        jspace: Optional[JSpaceArtifact] = None,
+        name: Optional[str] = None,
+    ) -> None:
         self.compaction = compaction
         self.jspace = jspace
-        self.name = name or ("E" if jspace else ("D" if compaction else "C"))
+        self.name = name or ("E" if jspace is not None else ("D" if compaction else "C"))
 
     def _validate(self, result: PhaseResult, spec: ArtifactSpec, workspace: Path, filename: str) -> Any:
         data, raw = read_artifact(workspace, filename)
@@ -540,15 +533,18 @@ class RpiStrategy:
             returncode=implement_result.returncode,
             phases=tuple(run.phases),
             compaction=compaction_stats,
+            jspace=self.jspace.provenance() if self.jspace is not None else None,
         )
 
 
 LANE_FACTORIES = {
     "A": OneSessionStrategy,
     "B": SliceContextStrategy,
-    "C": lambda: RpiStrategy(compaction=False, jspace=False),
-    "D": lambda: RpiStrategy(compaction=True, jspace=False),
-    "E": lambda: RpiStrategy(compaction=True, jspace=True),
+    "C": lambda: RpiStrategy(compaction=False, jspace=None),
+    "D": lambda: RpiStrategy(compaction=True, jspace=None),
+    # Resolution happens here so an unresolvable J-Space stops lane E at construction,
+    # before any budget is spent, and never degrades into running lane D under E's name.
+    "E": lambda: RpiStrategy(compaction=True, jspace=jspace_module.resolve()),
 }
 
 ALL_LANES: tuple[str, ...] = ("A", "B", "C", "D", "E")
@@ -566,7 +562,8 @@ __all__ = [
     "ArtifactSpec",
     "ExecutionContext",
     "ExecutionStrategy",
-    "JSPACE_FRAGMENT",
+    "JSpaceArtifact",
+    "JSpaceUnavailable",
     "OneSessionStrategy",
     "PLAN_SPEC",
     "PhaseResult",
