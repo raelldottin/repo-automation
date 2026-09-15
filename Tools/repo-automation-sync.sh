@@ -483,15 +483,20 @@ def main(argv: list[str]) -> int:
 
     ensure_target_is_not_the_source(source_root, target_root)
 
-    if args.sync:
+    # --check answers "does the snapshot match the commit it is pinned to", so it needs the
+    # same provenance as --sync whenever a pin is supplied. Without a pin it stays a plain
+    # drift report, which is what the development fixtures use.
+    if args.sync or args.pin:
         if args.allow_unverified_source:
             print(
-                "repo-automation-sync: warning: importing from an unverified source "
+                "repo-automation-sync: warning: reading from an unverified source "
                 "(--allow-unverified-source); the result is not traceable to a published commit.",
                 file=sys.stderr,
             )
         else:
             verify_source_provenance(source_root, args.pin, args.expect_remote)
+
+    if args.sync:
         target_root.mkdir(parents=True, exist_ok=True)
     elif not target_root.exists():
         print(f"missing target: {target_root}")

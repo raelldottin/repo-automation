@@ -257,6 +257,25 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         self.assertIn("pinned commit", result.stderr)
         self.assertFalse((self.target / "seed.txt").exists())
 
+    def test_4c_check_mode_verifies_the_pin_too(self) -> None:
+        """A drift report against the wrong commit answers the wrong question.
+
+        This is the path the consumer's pre-push hook runs, so it has to notice that the
+        source has moved rather than reporting the snapshot as current.
+        """
+        pin = self.canonical_source_with()
+        self.write_manifest([self.entry("seed.txt", "seed.txt")])
+        self.assertEqual(0, self.run_tool("--sync", pin=pin).returncode)
+
+        self.write_source("seed.txt", "moved on\n")
+        moved = self.publish_source("second")
+
+        result = self.run_tool("--check", pin=pin)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("pinned commit", result.stderr)
+        self.assertIn(moved[:12], result.stderr)
+
     # --- protection 5 ----------------------------------------------------
 
     def test_5_import_cannot_write_to_a_consumer_owned_destination(self) -> None:
