@@ -1,7 +1,7 @@
 """Guards on the canonical -> consumer import path.
 
 repo-automation is the canonical source of reusable automation. Consumers vendor a pinned
-snapshot of it and never write back. These tests pin the eight protections that make that
+snapshot of it and never write back. These tests pin the nine protections that make that
 direction unbreakable; they are the canonical copy, and consumers are expected to keep
 their own equivalents against their vendored checkout.
 """
@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,7 +24,7 @@ SYNC_TOOL = REPO_ROOT / "Tools" / "repo-automation-sync.sh"
 
 
 class RepoAutomationImportGuardTests(unittest.TestCase):
-    """The eight protections that make the canonical -> consumer direction unbreakable.
+    """The nine protections that make the canonical -> consumer direction unbreakable.
 
     repo-automation is canonical and Owlory vendors a pinned snapshot of it. Every test
     here drives the real tool the way `make repo-automation-import` drives it: a pinned,
@@ -123,6 +124,7 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         pin: str | None = None,
         env_path: str | None = None,
         quality_command: str = "true",
+        runtime_python: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         # Fixture sources are bare git repos with no build system, so the canonical quality
         # gate is stubbed out here. Protection 8 exercises the real gate directly.
@@ -134,11 +136,13 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
             # Used to take git away from the tool mid-run, which is one of the ways a guard
             # that reads returncode alone quietly stops guarding.
             env = {**os.environ, "PATH": env_path}
+        runtime = ["--runtime-python", runtime_python] if runtime_python else []
         return subprocess.run(
             [
                 str(SYNC_TOOL),
                 *args,
                 *provenance,
+                *runtime,
                 "--source",
                 str(self.source),
                 "--manifest",
@@ -680,6 +684,108 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         self.assertIn("reusable-check:", (REPO_ROOT / "Makefile").read_text(encoding="utf-8"))
         help_text = subprocess.run([str(SYNC_TOOL), "--help"], cwd=REPO_ROOT, capture_output=True, text=True).stdout
         self.assertIn("make reusable-check", help_text)
+
+    # --- protection 9 ----------------------------------------------------
+
+    @staticmethod
+    def runtime_block(distribution: str, minimum_major: int, maximum_major_exclusive: int) -> dict[str, Any]:
+        return {
+            "python": {
+                "dependencies": [
+                    {
+                        "distribution": distribution,
+                        "import_name": distribution,
+                        "minimum_major": minimum_major,
+                        "maximum_major_exclusive": maximum_major_exclusive,
+                    }
+                ]
+            }
+        }
+
+    def stage_runtime_case(self, runtime: dict[str, Any] | None) -> str:
+        pin = self.canonical_source_with(("tool.py", "canonical\n"))
+        extra = {"runtime": runtime} if runtime is not None else {}
+        self.write_manifest([self.entry("tool.py", "vendored/tool.py")], **extra)
+        return pin
+
+    def test_9_satisfied_runtime_dependency_lets_the_import_proceed(self) -> None:
+        pin = self.stage_runtime_case(self.runtime_block("pydantic", 2, 3))
+
+        result = self.run_tool("--sync", pin=pin, runtime_python=sys.executable)
+
+        self.assertEqual(0, result.returncode, msg=result.stderr)
+        self.assertEqual("canonical\n", (self.target / "vendored/tool.py").read_text(encoding="utf-8"))
+
+    def test_9_absent_runtime_dependency_is_refused_before_any_write(self) -> None:
+        pin = self.stage_runtime_case(self.runtime_block("repo-automation-not-a-real-distribution", 1, 2))
+
+        result = self.run_tool("--sync", pin=pin, runtime_python=sys.executable)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("missing_runtime_dependency: repo-automation-not-a-real-distribution>=1,<2", result.stderr)
+        self.assertFalse((self.target / "vendored/tool.py").exists())
+
+    def test_9_runtime_dependency_below_the_supported_major_is_refused(self) -> None:
+        pin = self.stage_runtime_case(self.runtime_block("pydantic", 3, 4))
+
+        result = self.run_tool("--sync", pin=pin, runtime_python=sys.executable)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("missing_runtime_dependency: pydantic>=3,<4 (found ", result.stderr)
+        self.assertFalse((self.target / "vendored/tool.py").exists())
+
+    def test_9_runtime_dependency_past_the_supported_major_is_refused(self) -> None:
+        """A future major is as unsupported as an old one; the range is closed on both ends."""
+        pin = self.stage_runtime_case(self.runtime_block("pydantic", 1, 2))
+
+        result = self.run_tool("--sync", pin=pin, runtime_python=sys.executable)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("missing_runtime_dependency: pydantic>=1,<2 (found ", result.stderr)
+
+    def test_9_unusable_consumer_interpreter_is_a_refusal(self) -> None:
+        pin = self.stage_runtime_case(self.runtime_block("pydantic", 2, 3))
+
+        result = self.run_tool("--sync", pin=pin, runtime_python=str(self.tmpdir / "no-such-python"))
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("consumer interpreter", result.stderr)
+        self.assertFalse((self.target / "vendored/tool.py").exists())
+
+    def test_9_manifest_without_runtime_metadata_is_unchanged(self) -> None:
+        """Older manifests declare nothing, so nothing is enforced."""
+        pin = self.stage_runtime_case(None)
+
+        result = self.run_tool("--sync", pin=pin, runtime_python=str(self.tmpdir / "no-such-python"))
+
+        self.assertEqual(0, result.returncode, msg=result.stderr)
+        self.assertEqual("canonical\n", (self.target / "vendored/tool.py").read_text(encoding="utf-8"))
+
+    def test_9_pinned_check_verifies_the_consumer_runtime_too(self) -> None:
+        pin = self.stage_runtime_case(self.runtime_block("repo-automation-not-a-real-distribution", 1, 2))
+
+        result = self.run_tool("--check", pin=pin, runtime_python=sys.executable)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("missing_runtime_dependency", result.stderr)
+
+    def test_9_allow_unverified_source_does_not_waive_the_runtime_check(self) -> None:
+        """That flag says the source is trusted, not that the consumer can run the code."""
+        self.stage_runtime_case(self.runtime_block("repo-automation-not-a-real-distribution", 1, 2))
+
+        result = self.run_tool("--sync", "--allow-unverified-source", runtime_python=sys.executable)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("missing_runtime_dependency", result.stderr)
+        self.assertFalse((self.target / "vendored/tool.py").exists())
+
+    def test_9_canonical_manifest_declares_its_pydantic_requirement(self) -> None:
+        manifest = json.loads((REPO_ROOT / "automation/reusable-manifest.json").read_text(encoding="utf-8"))
+        declared = manifest["runtime"]["python"]["dependencies"]
+        self.assertEqual(
+            [{"distribution": "pydantic", "import_name": "pydantic", "minimum_major": 2, "maximum_major_exclusive": 3}],
+            declared,
+        )
 
 
 if __name__ == "__main__":
