@@ -91,8 +91,10 @@ def verify_manual_proofs(
 
     missing_proofs = []
 
-    if verified_sha and verified_sha != post_run_commit_sha:
-        if required_proofs:
+    if required_proofs:
+        if not verified_sha:
+            missing_proofs.append("Missing verified_commit_sha (required when the slice requires manual proof)")
+        elif verified_sha != post_run_commit_sha:
             missing_proofs.append("Invalid verified_commit_sha (does not match supervisor-observed HEAD)")
 
     provided_by_type = {}
