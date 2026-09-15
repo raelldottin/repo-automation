@@ -105,6 +105,40 @@ make reusable-check
 
 The sync tool invokes it as the import preflight (protection 8). Adding or replacing a check here changes nothing on the consumer side.
 
+### Declared runtime dependencies
+
+Source provenance is identity, the quality gate is source quality, and this is consumer compatibility — three separate facts, checked in that order:
+
+```text
+canonical source: provenance ✓ + reusable-check ✓
+consumer:         runtime dependency ✓
+                        ↓
+                  plan and write the import
+```
+
+```json
+{
+  "version": 1,
+  "runtime": {
+    "python": {
+      "dependencies": [
+        {
+          "distribution": "pydantic",
+          "import_name": "pydantic",
+          "minimum_major": 2,
+          "maximum_major_exclusive": 3
+        }
+      ]
+    }
+  },
+  "entries": []
+}
+```
+
+Majors only, on purpose: the check is `2 <= major < 3` read from `importlib.metadata.version()`, not a PEP 508 implementation, so no package-manager dependency appears inside the dependency checker.
+
+The manifest stays at `version: 1`. A sync tool predating this block ignores it and enforces nothing, so runtime enforcement begins with a tool that understands it. Negotiating manifest/tool compatibility is a separate problem, worth solving only if heterogeneous consumer tool versions ever need to coexist.
+
 The tool must be idempotent. Running `--sync` twice against the same source should produce no second change. Running `--check` after a successful sync should pass.
 
 Stale-file deletion is allowed only under manifest-owned destination paths in the consumer, and only for files the canonical source does not track. The tool must not clean arbitrary files, and it must never delete anything in `repo-automation`.
@@ -142,7 +176,9 @@ These are enforced in `Tools/repo-automation-sync.sh` itself, not in a consumer'
 
 8. **The canonical snapshot must pass the canonical quality gate.** Provenance establishes identity, not quality: a source can sit at the pinned commit, on the right remote, with a clean worktree, and still be lint-red or schema-drifted — canonical `main` was exactly that for two commits on 2026-09-15. Before any file is read for import, the tool runs `--quality-command` (default `make reusable-check`) in the *source* checkout and refuses the import if it exits non-zero, quoting the tail of its output. The gate is named rather than enumerated: the tool never learns which linters exist this month, and adding a check to `reusable-check` needs no change on the consumer side. A gate that cannot be run at all is a refusal, not a pass.
 
-Protections 2, 3, 4 and 8 can be waived together with `--allow-unverified-source` for local development. It prints a warning, the consumer's `make` targets never pass it, and it cannot waive 1, 5, 6 or 7.
+9. **The consumer must be able to run what it vendors.** A manifest may declare the Python distributions the imported code needs in `runtime.python.dependencies`, each as a distribution name plus a supported major range. Before anything is planned or written, the tool asks the *consumer's* interpreter — `--runtime-python`, defaulting to the interpreter running the tool — what it has installed, via `importlib.metadata` only, so the dependency checker needs no dependency of its own. A missing or out-of-range distribution refuses the import with `missing_runtime_dependency: pydantic>=2,<3`, and `(found 1.10.15)` when a version is present but unsupported. A manifest that declares nothing enforces nothing.
+
+Protections 2, 3, 4 and 8 can be waived together with `--allow-unverified-source` for local development. It prints a warning, the consumer's `make` targets never pass it, and it cannot waive 1, 5, 6, 7 or 9. Protection 9 is deliberately outside that waiver: trusting an unpublished source is a different claim from being able to execute the code it carries.
 
 Cleanliness is not provenance: the destructive 2026-09-14 run was against a clean worktree on the correct branch. What it lacked was any statement of which commit it was meant to be.
 

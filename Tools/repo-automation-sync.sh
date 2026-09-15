@@ -73,6 +73,24 @@ class Entry:
     allow_owlory_specific: bool
 
 
+@dataclass(frozen=True)
+class RuntimeRequirement:
+    """A Python distribution the imported code needs in the *consumer's* interpreter.
+
+    Deliberately not PEP 508: majors only. Enough to say "pydantic 2, not 1 and not 3",
+    without making the dependency checker depend on a dependency parser.
+    """
+
+    distribution: str
+    import_name: str
+    minimum_major: int
+    maximum_major_exclusive: int
+
+    @property
+    def spec(self) -> str:
+        return f"{self.distribution}>={self.minimum_major},<{self.maximum_major_exclusive}"
+
+
 class SyncError(Exception):
     pass
 
@@ -151,7 +169,70 @@ def parse_entry(raw: object) -> Entry:
     )
 
 
-def load_manifest(path: Path) -> list[Entry]:
+RUNTIME_DEPENDENCY_FIELDS = {"distribution", "import_name", "minimum_major", "maximum_major_exclusive"}
+
+
+def parse_runtime_requirements(data: dict[str, Any]) -> list[RuntimeRequirement]:
+    """Read the optional manifest `runtime.python.dependencies` block.
+
+    Absent block means no declared requirements, which is the behaviour every manifest had
+    before this existed.
+    """
+    runtime = data.get("runtime")
+    if runtime is None:
+        return []
+    if not isinstance(runtime, dict):
+        raise SyncError("manifest runtime must be an object")
+
+    python = runtime.get("python")
+    if python is None:
+        return []
+    if not isinstance(python, dict):
+        raise SyncError("manifest runtime.python must be an object")
+
+    raw_dependencies = python.get("dependencies", [])
+    if not isinstance(raw_dependencies, list):
+        raise SyncError("manifest runtime.python.dependencies must be a list")
+
+    requirements: list[RuntimeRequirement] = []
+    for raw in raw_dependencies:
+        if not isinstance(raw, dict):
+            raise SyncError("each runtime dependency must be an object")
+        unknown = sorted(set(raw) - RUNTIME_DEPENDENCY_FIELDS)
+        if unknown:
+            raise SyncError(f"unknown runtime dependency fields: {', '.join(unknown)}")
+
+        distribution = raw.get("distribution")
+        import_name = raw.get("import_name", distribution)
+        minimum_major = raw.get("minimum_major")
+        maximum_major_exclusive = raw.get("maximum_major_exclusive")
+
+        if not isinstance(distribution, str) or not distribution.strip():
+            raise SyncError("runtime dependency needs a non-empty distribution")
+        if not isinstance(import_name, str) or not import_name.strip():
+            raise SyncError(f"runtime dependency {distribution} needs a non-empty import_name")
+        if not isinstance(minimum_major, int) or isinstance(minimum_major, bool):
+            raise SyncError(f"runtime dependency {distribution} needs an integer minimum_major")
+        if not isinstance(maximum_major_exclusive, int) or isinstance(maximum_major_exclusive, bool):
+            raise SyncError(f"runtime dependency {distribution} needs an integer maximum_major_exclusive")
+        if maximum_major_exclusive <= minimum_major:
+            raise SyncError(
+                f"runtime dependency {distribution} has an empty version range "
+                f"({minimum_major} >= {maximum_major_exclusive})"
+            )
+
+        requirements.append(
+            RuntimeRequirement(
+                distribution=distribution,
+                import_name=import_name,
+                minimum_major=minimum_major,
+                maximum_major_exclusive=maximum_major_exclusive,
+            )
+        )
+    return requirements
+
+
+def load_manifest(path: Path) -> tuple[list[Entry], list[RuntimeRequirement]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
@@ -178,7 +259,7 @@ def load_manifest(path: Path) -> list[Entry]:
     if not isinstance(raw_entries, list) or not raw_entries:
         raise SyncError("manifest entries must be a non-empty list")
 
-    return [parse_entry(raw) for raw in raw_entries]
+    return [parse_entry(raw) for raw in raw_entries], parse_runtime_requirements(data)
 
 
 def resolve_under(base: Path, relative: str, *, must_exist: bool) -> Path:
@@ -552,6 +633,83 @@ def verify_source_quality(source_root: Path, command: str) -> None:
         )
 
 
+def consumer_versions(python_executable: str, distributions: list[str]) -> dict[str, str | None]:
+    """Ask the consumer's interpreter which versions it actually has installed.
+
+    The canonical checkout's own environment says nothing about what the consumer will run
+    the imported harness with, so the probe runs in that interpreter rather than this one.
+    """
+    program = (
+        "import json, sys\n"
+        "from importlib.metadata import PackageNotFoundError, version\n"
+        "found = {}\n"
+        "for distribution in sys.argv[1:]:\n"
+        "    try:\n"
+        "        found[distribution] = version(distribution)\n"
+        "    except PackageNotFoundError:\n"
+        "        found[distribution] = None\n"
+        "print(json.dumps(found))\n"
+    )
+    try:
+        result = subprocess.run(
+            [python_executable, "-c", program, *distributions],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise SyncError(f"could not run the consumer interpreter {python_executable!r}: {error}") from error
+
+    if result.returncode != 0:
+        raise SyncError(
+            f"consumer interpreter {python_executable!r} could not report installed versions: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise SyncError(
+            f"consumer interpreter {python_executable!r} returned unreadable version output: {error}"
+        ) from error
+    return parsed
+
+
+def major_of(version: str) -> int | None:
+    head = version.split(".", 1)[0].strip()
+    return int(head) if head.isdigit() else None
+
+
+def verify_consumer_runtime(requirements: list[RuntimeRequirement], python_executable: str) -> None:
+    """Protection 9: the consumer must be able to execute what it is about to vendor.
+
+    Source provenance and source quality are facts about the canonical repository. This is a
+    fact about the destination, so --allow-unverified-source does not waive it: trusting an
+    unpublished source is not the same as installing code that cannot run.
+    """
+    if not requirements:
+        return
+
+    installed = consumer_versions(python_executable, [requirement.distribution for requirement in requirements])
+
+    problems = []
+    for requirement in requirements:
+        version = installed.get(requirement.distribution)
+        if version is None:
+            problems.append(f"missing_runtime_dependency: {requirement.spec}")
+            continue
+        major = major_of(version)
+        if major is None or not (requirement.minimum_major <= major < requirement.maximum_major_exclusive):
+            problems.append(f"missing_runtime_dependency: {requirement.spec} (found {version})")
+
+    if problems:
+        raise SyncError(
+            "\n".join(problems)
+            + f"\nchecked with {python_executable}; pass --runtime-python to name the interpreter "
+            "the consumer's harness actually runs under."
+        )
+
+
 def main(argv: list[str]) -> int:
     repo_root = Path(argv[0]).resolve()
 
@@ -570,6 +728,12 @@ def main(argv: list[str]) -> int:
         help=f"Canonical quality gate the source must pass before its content is imported. Default: {DEFAULT_QUALITY_COMMAND!r}."
     )
     parser.add_argument(
+        "--runtime-python",
+        default=sys.executable,
+        help="Interpreter the consumer's harness runs under, checked against the manifest's declared "
+        "runtime dependencies. Defaults to the interpreter running this tool."
+    )
+    parser.add_argument(
         "--allow-unverified-source",
         action="store_true",
         help="Development only. Skip the pin, identity, cleanliness and quality checks on the source."
@@ -584,7 +748,7 @@ def main(argv: list[str]) -> int:
 
     source_root = Path(args.source).expanduser().resolve(strict=True)
     manifest = Path(args.manifest).expanduser() if args.manifest else source_root / "automation/reusable-manifest.json"
-    entries = load_manifest(manifest)
+    entries, runtime_requirements = load_manifest(manifest)
     target_root = Path(args.target).expanduser()
 
     ensure_target_is_not_canonical(source_root, target_root, args.expect_remote)
@@ -603,6 +767,10 @@ def main(argv: list[str]) -> int:
         else:
             verify_source_provenance(source_root, args.pin, args.expect_remote)
             verify_source_quality(source_root, args.quality_command)
+
+    # Identity and quality describe the source; this describes the destination, so it runs
+    # for every mode and is not covered by --allow-unverified-source.
+    verify_consumer_runtime(runtime_requirements, args.runtime_python)
 
     if args.sync:
         target_root.mkdir(parents=True, exist_ok=True)

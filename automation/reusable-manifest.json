@@ -1,5 +1,17 @@
 {
   "version": 1,
+  "runtime": {
+    "python": {
+      "dependencies": [
+        {
+          "distribution": "pydantic",
+          "import_name": "pydantic",
+          "minimum_major": 2,
+          "maximum_major_exclusive": 3
+        }
+      ]
+    }
+  },
   "entries": [
     {
       "source": "automation/README.md",
