@@ -146,6 +146,8 @@ The supervisor treats `done`, `blocked`, and `failed` differently:
 - compact queue metadata for dependencies and adjacent queued slices
 - a policy sentence that explains the supervisor model
 - a previous handoff summary when a dependency or nearby predecessor already left one
+- the execution constraints the run must respect: allowed paths, file budget, ownership
+  boundaries, the exact validations to run, and the proof and handoff it must produce
 - a handoff starter shape seeded with the current slice ID and required validations
 - maintained docs relevant to the slice domain and explicitly allowed docs
 

@@ -162,7 +162,7 @@ class LaneTreatmentTests(unittest.TestCase):
         self.assertIn("compile.sh", prompt)
         self.assertIn("owner/proj", prompt)
         self.assertNotIn("Supervised Slice Run", prompt)  # base.md never reaches lane A
-        self.assertNotIn("Acceptance Checks", prompt)
+        self.assertNotIn("Execution constraints", prompt)
 
     def test_lane_c_runs_three_phases_and_passes_artifacts_forward(self) -> None:
         agent, result, _ = run_lane("C")

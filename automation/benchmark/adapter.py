@@ -93,7 +93,7 @@ def build_context_bundle(queue_data: dict, slice_record: dict) -> dict:
         "validation_ownership": build_context.summarize_validation_ownership(slice_record),
         "previous_handoff": None,
         "previous_handoff_summary": build_context.render_previous_handoff_summary(None),
-        "acceptance_checks": build_context.build_acceptance_checks(slice_record),
+        "execution_constraints": build_context.build_execution_constraints(slice_record),
         "handoff_template": build_context.build_handoff_template(slice_record),
         "documents": [],
     }

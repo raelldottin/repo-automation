@@ -35,9 +35,9 @@ Queue metadata for this run:
 __QUEUE_METADATA_JSON__
 ```
 
-Acceptance checks for this slice:
+Execution constraints for this slice:
 
-__ACCEPTANCE_CHECKS__
+__EXECUTION_CONSTRAINTS__
 
 Maintained docs included in this context package:
 
