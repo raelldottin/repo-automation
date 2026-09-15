@@ -43,6 +43,9 @@ def workspace():
             "slice_id": SLICE_ID,
             "manual_proof": ["screenshot"],
             "required_proof_level": "screenshot-verified",
+            "allowed_paths": ["docs/product/domains/today.md"],
+            "required_validations": ["git diff --check"],
+            "max_files_changed": 5,
         }
         handoff = {
             "slice_id": SLICE_ID,
@@ -61,6 +64,19 @@ def workspace():
         }
         with contextlib.chdir(root):
             yield root, slice_record, handoff
+
+
+def completion_fields() -> dict[str, Any]:
+    """The non-proof handoff keys evaluate_completion reads."""
+    return {
+        "status": "done",
+        "validations_passed": ["git diff --check"],
+        "validations_failed": [],
+        "files_touched": ["docs/product/domains/today.md"],
+        "dirty_paths_outside_scope": [],
+        "recommended_next_slice": "",
+        "recommended_next_reason": "",
+    }
 
 
 def drop_proof(slice_record: dict, handoff: dict, root: Path) -> None:
@@ -168,6 +184,47 @@ class ManualProofTrustBoundaryTest(unittest.TestCase):
         with workspace() as (_, slice_record, handoff):
             missing_proofs, missing_level = policy.verify_manual_proofs(slice_record, handoff, HEAD_SHA)
         self.assertEqual(([], False), (missing_proofs, missing_level))
+
+    def completion_decision(self, slice_record: dict, handoff: dict) -> policy.CompletionDecision:
+        """Run the same proof through the supervisor completion boundary."""
+        queue_data = {
+            "policy": {"supervisor_owned_paths": ["automation/queue/slices.json", "automation/handoffs/"]},
+            "slices": [slice_record],
+        }
+        return policy.evaluate_completion(
+            queue_data=queue_data,
+            slice_record=slice_record,
+            handoff=handoff,
+            dirty_paths_before_run=[],
+            dirty_paths_after_run=handoff["files_touched"],
+            completed_autonomous_runs=1,
+            run_limit=2,
+            post_run_commit_sha=HEAD_SHA,
+        )
+
+    def test_completion_rejects_done_handoff_without_verified_commit_sha(self) -> None:
+        with workspace() as (_, slice_record, handoff):
+            handoff.update(completion_fields())
+            handoff.pop("verified_commit_sha")
+            decision = self.completion_decision(slice_record, handoff)
+
+        self.assertEqual("failed", decision.queue_status)
+        self.assertEqual("stop_failed", decision.decision)
+        self.assertFalse(decision.should_continue)
+        self.assertTrue(
+            any("Missing verified_commit_sha" in entry for entry in decision.missing_manual_proofs),
+            decision.missing_manual_proofs,
+        )
+
+    def test_completion_accepts_done_handoff_with_valid_proof(self) -> None:
+        """Control: the rejection above must come from the proof, not the rest of the handoff."""
+        with workspace() as (_, slice_record, handoff):
+            handoff.update(completion_fields())
+            decision = self.completion_decision(slice_record, handoff)
+
+        self.assertEqual("done", decision.queue_status)
+        self.assertEqual([], decision.missing_manual_proofs)
+        self.assertFalse(decision.missing_proof_level)
 
     def test_verified_commit_sha_not_required_when_no_manual_proofs(self) -> None:
         with workspace() as (_, slice_record, handoff):
