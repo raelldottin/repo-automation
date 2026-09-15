@@ -270,6 +270,38 @@ Current practical examples:
 
 The classifier is intentionally small. It exists to make ownership legible, not to classify every possible shell command exhaustively.
 
+## Historical Handoff Evaluation
+
+`automation/supervisor/evaluate_handoff.py` closes a slice whose implementation already landed, without launching another agent. It recomputes the changed files from `git diff base..head` itself, refuses any path outside the slice's `allowed_paths` as they stood at `--base-sha`, enforces `max_files_changed`, replays the supervisor-owned validations in a detached worktree at `--head-sha`, and owns the `queued` -> `done` transition.
+
+```bash
+python3 automation/supervisor/evaluate_handoff.py \
+  --slice-id <slice> \
+  --handoff automation/handoffs/<artifact>.json \
+  --base-sha <parent of the verified commit> \
+  --head-sha <the verified commit>
+```
+
+The SHA pair is a contract, not a knob:
+
+- `--base-sha` freezes the contract the work is judged against. Pass the parent of your own implementation commit, never the commit that amended the contract.
+- `--head-sha` is the commit at which every required validation was actually run green. `verified_commit_sha` in the handoff must equal it exactly.
+- `base..head` is the scope diff. It must contain that slice's work and nothing else.
+
+If the evaluator rejects, record the single rejection reason in the queue commit and mark the slice `blocked`. Do not retry with different SHAs until it accepts.
+
+### Blocked -> unblocker -> retry
+
+When a slice is blocked by a failure it does not own, the unblocker is queued as its own slice and the blocked slice names it in `recommended_unblocker`. After the unblocker closes:
+
+1. Flip the blocked slice back to `queued` and rewrite its `entry_condition` to record what cleared it, in a dedicated supervisor-owned commit.
+2. Re-run every required validation at the current `HEAD` and commit the retry handoff.
+3. Evaluate with `--head-sha` set to that retry commit and `--base-sha` set to its parent.
+
+Step 3 deliberately does not re-span the original implementation commit. Once an unblocker has landed, `base..head` over the original range also contains the unblocker's own proof artifacts, which are outside the blocked slice's `allowed_paths` — the evaluator would reject work that is not the candidate's. The historical scope review is not lost: it already ran and passed at the original range, and its result is recorded in the commit that marked the slice blocked. The retry re-proves the thing that was actually missing, which is the validation, at the only commit where it is true.
+
+A retry handoff still lists the real `files_touched` from the original implementation. The evaluator takes the file budget from `max(changed_in_scope, len(set(files_touched)))`, so the narrower diff cannot be used to slip past `max_files_changed`.
+
 ## Continuation Policy
 
 Continuation is allowed only when all of these are true:

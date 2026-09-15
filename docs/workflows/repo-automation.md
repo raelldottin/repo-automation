@@ -1,29 +1,39 @@
 # Reusable Repo Automation
 
-This workflow defines how Owlory's repo automation becomes reusable in other repositories while the current Owlory checkout remains the initial source of truth.
+This workflow defines how the reusable slice harness is owned and how a repository consumes it.
 
-## Target Home
+## Ownership
 
-The reusable automation distribution target is:
-
-```text
-/Users/raelldottin/Documents/Personal/repo-automation
-```
-
-`/Users/raelldottin/Personal` does not exist on this machine. The active Personal workspace is `/Users/raelldottin/Documents/Personal`.
-
-Until an explicit ownership flip is documented, updates flow one way:
+`repo-automation` is the canonical source for all reusable automation. Every consumer — Owlory included — vendors a pinned snapshot of it.
 
 ```text
-Owlory reusable automation source -> /Users/raelldottin/Documents/Personal/repo-automation
+repo-automation (canonical) -> consumer's vendored snapshot, at one pinned commit
 ```
 
-The external folder is a reusable distribution target, not a second source of truth. Reverse edits from `repo-automation` back into Owlory require an explicit migration or patch slice.
+This is the explicit ownership flip that the earlier revision of this document reserved. Owlory was the initial source of truth while the harness was being extracted; it no longer is, and that statement is retired rather than left standing alongside this one.
+
+A consumer never writes to `repo-automation`. Changes to reusable automation are made here, published here, and then imported into the consumer at an exact commit. A consumer that discovers a needed harness change makes it upstream first.
+
+The pin is what makes the snapshot reviewable: a consumer records the canonical repository identity and the full commit SHA it imported, so a reviewer can tell exactly which `repo-automation` commit the vendored files came from. A moving unpinned checkout is not a canonical identity.
+
+### Why the direction matters
+
+The flip was forced by measurement, not preference. While Owlory was still declared the source, its manifest claimed `automation/schemas/` and `automation/benchmark/` with `delete_stale: true`. Those paths had since moved forward here — the Pydantic contract models and the benchmark lanes were added upstream — so the one-way "update" resolved to **568 insertions against 1937 deletions**, destroying five committed upstream files:
+
+```text
+automation/schemas/models.py      automation/benchmark/lanes.py
+automation/schemas/generate.py    automation/benchmark/strategies.py
+automation/schemas/__init__.py
+```
+
+A full inventory of the reusable boundary at that moment found 18 files identical, 15 ahead upstream, 5 upstream-only and exactly 1 diverged — **no file was ahead in the consumer**. The inversion was structural: a consumer's older inventory was deciding what the canonical repository should contain.
+
+The rule that replaces it: the canonical source's inventory decides the content of canonical-owned destination files, and nothing else. An import may never delete a consumer's own files, a consumer-specific path, or a file simply because an older snapshot did not list it.
 
 ## Goals
 
 - Reuse the supervised slice harness in other repositories without copying Owlory product state.
-- Keep the external `repo-automation` folder current whenever Owlory's reusable automation changes.
+- Keep each consumer's vendored snapshot current with the canonical repository, at a pin a reviewer can check.
 - Make reusable assets manifest-owned so sync behavior is deterministic and reviewable.
 - Preserve Owlory-specific release, localization, UI proof, product, and SecondBrain history inside Owlory.
 
@@ -45,7 +55,7 @@ These assets are reusable or intended to become reusable with light parameteriza
 
 ## Owlory-Specific Exclusions
 
-The sync manifest must not copy these into the reusable automation distribution unless a later slice explicitly extracts and generalizes them:
+These are consumer-owned. They are never canonical-owned, never imported, and an import may never delete them:
 
 - `automation/queue/slices.json`: live Owlory work queue and product history.
 - `automation/handoffs/`: live Owlory handoff history.
@@ -64,8 +74,8 @@ The tracked manifest lives at `automation/reusable-manifest.json` and owns the d
 
 The manifest is explicit rather than glob-heavy. Each entry identifies:
 
-- source path in Owlory
-- destination path under `repo-automation`
+- source path in the canonical repository
+- destination path in the consumer
 - file or directory kind
 - whether executable mode should be preserved
 - whether stale destination files under that owned path may be deleted
@@ -77,31 +87,48 @@ The sync tool rejects paths outside the repository root and outside the target r
 
 Use `Tools/repo-automation-sync.sh` for manifest-owned sync:
 
-- `--check`: report drift between Owlory reusable sources and the external folder without changing files.
-- `--sync`: update the external folder to match the manifest.
-- `--auto-update`: for validation and pre-push use only; require the target to be an existing clean Git repository, sync manifest-owned files, then verify `--check` passes.
+- `--check`: report drift between the canonical source and a consumer's vendored snapshot without changing files.
+- `--sync`: update a consumer's vendored snapshot to match the manifest at the pinned canonical commit.
+- `--import`: the explicit mutating path; require the canonical source to be clean and published at the pinned commit, import canonical-owned files inward, then verify `--check` passes. There is no outward `--auto-update`; it was the destructive direction and is removed.
 - `--target <path>`: override the target path for tests and future consumers.
 - `--source <path>` and `--manifest <path>`: test hooks for temp repositories and alternate manifests.
 
 The tool must be idempotent. Running `--sync` twice against the same source should produce no second change. Running `--check` after a successful sync should pass.
 
-Stale-file deletion is allowed only under manifest-owned destination paths. The tool must not clean arbitrary files in `repo-automation`.
+Stale-file deletion is allowed only under manifest-owned destination paths in the consumer, and only for files the canonical source does not track. The tool must not clean arbitrary files, and it must never delete anything in `repo-automation`.
 
-## Automatic Update Contract
+## Import Contract
 
-Owlory wires repo-automation currentness into the normal local automation path:
+A consumer imports canonical files inward. It never updates this repository outward, and no ordinary `git push` in a consumer may rewrite either repository.
 
-- `make repo-automation-check` runs `Tools/repo-automation-sync.sh --check --target /Users/raelldottin/Documents/Personal/repo-automation`.
-- `make repo-automation-update` runs `Tools/repo-automation-sync.sh --auto-update --target /Users/raelldottin/Documents/Personal/repo-automation`.
-- `.githooks/pre-push` detects whether the pending push touches manifest-owned reusable automation sources. If so, it runs `make repo-automation-update` before allowing the push.
+The operation is split so that reading is never coupled to mutating:
 
-Expected behavior:
+- `make repo-automation-check` is **read-only**. It reports whether the vendored snapshot still matches the pinned canonical commit, and exits non-zero on drift without changing a byte.
+- `make repo-automation-import` is the only mutating path, and it is explicit. It imports canonical-owned files at the pinned commit.
 
-- If a commit changes manifest-owned reusable automation, the pre-push path syncs `/Users/raelldottin/Documents/Personal/repo-automation` locally and verifies the target is current.
-- If the external target is missing, `--auto-update` fails and points to the bootstrap path.
-- If the external target is not a Git repository, `--auto-update` fails rather than creating an untracked copy.
-- If the external target has local dirt before the update, `--auto-update` fails rather than overwriting external work.
-- Automatic update means the external folder contents are updated locally. External Git commit or remote push remains explicit unless a later slice adds documented opt-in behavior.
+A consumer's pre-push hook runs the read-only check, never the import. When the check fails it refuses the push and states the remediation in upstream-first order:
+
+1. make the reusable change in `repo-automation`
+2. publish it there
+3. import that exact commit into the consumer
+4. commit the updated pin together with the imported snapshot
+5. retry the push
+
+No automatic external mutation, and no hidden cross-repository commits.
+
+### Import protections
+
+The import path refuses, exits non-zero and changes nothing when:
+
+1. an operation would mutate `repo-automation` from a consumer — there is no outward write path
+2. the canonical source commit is absent or unpinned
+3. the import source repository does not match the expected repository identity recorded in the pin
+4. the canonical source is dirty or unpublished, unless an explicit development-only mode is passed
+5. an import would delete any file outside canonical-owned paths
+6. an older consumer inventory would delete a file that is tracked in the canonical source
+7. an import would overwrite a template or locally customized path
+
+Advisory output does not satisfy any of these.
 
 ## Consumer Repository Contract
 
@@ -168,7 +195,7 @@ The GitHub repository also exposes the SSH URL `git@github.com:raelldottin/repo-
 ## Consumer Adoption Bootstrap
 
 A non-Owlory repository can adopt the reusable automation package by syncing the
-manifest-owned subset from Owlory and then committing it into a fresh local Git
+manifest-owned subset from `repo-automation` and then committing it into a fresh local Git
 repository. The exact sequence proven by `RepoAutomationConsumerAdoptionSmokeTests`
 in `automation/tests/test_repo_automation_sync.py` is:
 
@@ -194,7 +221,7 @@ in `automation/tests/test_repo_automation_sync.py` is:
    git commit -m "Bootstrap reusable automation"
    ```
 
-   The supervisor and `make repo-automation-update` both require a clean Git
+   The supervisor and `make repo-automation-import` both require a clean Git
    working tree. The very first sync produces many untracked files, so the
    bootstrap commit must happen before normal automation runs.
 
