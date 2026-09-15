@@ -1,0 +1,9 @@
+{
+  "$comment": "Pinned identity of the canonical J-Space skill lane E administers. Content is never vendored here; only its identity and hash are pinned. Resolve a checkout at this revision and point JSPACE_ROOT at it.",
+  "source": "Tiger3807861189/J-Space-Cognition-Suite",
+  "url": "https://github.com/Tiger3807861189/J-Space-Cognition-Suite",
+  "revision": "b2023124a1fa08278e3ee82aefa8ed9faeade995",
+  "artifact": "j-space/SKILL.md",
+  "sha256": "2ccbcd13cafb5ce3e2669fd21480b917f662dca2cb38a6fa01806407a68e6c16",
+  "license": "Apache-2.0"
+}

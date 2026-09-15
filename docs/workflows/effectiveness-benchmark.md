@@ -92,7 +92,7 @@ budget, ProgramBench evaluator and scoring code are identical across all of them
 | **B** | The shipped harness: one bounded slice, `base.md` + `slice.md`. **Control.** |
 | **C** | Fresh Research → Plan → Implement sessions, passing typed JSON artifacts. |
 | **D** | C, with each artifact intentionally compacted before the next phase. |
-| **E** | D, with the J-Space ledger active inside each phase. |
+| **E** | D, with the canonical J-Space skill administered inside each phase. |
 
 Because each lane adds exactly one treatment to the one before it, the differences
 decompose:
@@ -105,6 +105,33 @@ E - D  = value of J-Space
 ```
 
 Only adjacent lanes are compared. `E - A` would measure four changes at once.
+
+### Lane E: the canonical J-Space artifact
+
+`E - D` is only a claim about J-Space if lane E receives J-Space itself rather than our
+summary of it, so the skill text is never vendored into this repository or paraphrased in
+`strategies.py`. `automation/benchmark/jspace.lock.json` pins the source repository, the
+revision, the artifact path and the SHA-256 of its bytes; the operator supplies a checkout:
+
+```shell
+git clone https://github.com/Tiger3807861189/J-Space-Cognition-Suite /path/to/j-space
+git -C /path/to/j-space checkout <revision-from-jspace.lock.json>
+export JSPACE_ROOT=/path/to/j-space
+```
+
+At lane-E construction the harness verifies that `JSPACE_ROOT` is a Git checkout sitting
+at the pinned revision and that the artifact hashes to the pinned digest, then injects
+that text verbatim — binding only the two names the skill leaves open, `<skill-root>` and
+`<python-command>`. The resolved identity is written into each cell's `run.json` under
+`strategy.jspace` and echoed in `lane-comparison.md`, so every result states which bytes
+produced it.
+
+Resolution is fail-closed. A missing `JSPACE_ROOT`, a wrong revision, a moved artifact or
+a hash mismatch skips every lane-E cell with the reason recorded in `run.json`; lane E
+never silently degrades into lane D under E's name. Lanes A–D are unaffected and still run.
+
+Updating the pin is a deliberate act: change the revision and hash together in the lock
+file, in a commit that says why. Results produced under different pins are not comparable.
 
 ### Running it
 
@@ -168,9 +195,9 @@ instrumentation and at least three before believing a result.
   before generalising the result.
 - **Tokens are not observable.** The agent runner returns an exit code, so efficiency is
   measured in wall clock and agent invocations only.
-- **The J-Space fragment in lane E is derived** from a description of the method, not
-  from a canonical source. Replace `JSPACE_FRAGMENT` in
-  `automation/benchmark/strategies.py` before treating `E - D` as a verdict on J-Space.
+- **Lane E needs a J-Space checkout to run at all.** It is skipped, not approximated,
+  when the pinned artifact is unavailable (see below). A skipped lane has no outcome; do
+  not read its zeroes as a treatment effect.
 - **No propose-only lane.** A pure-agent lane would change execution authority and Git
   semantics, not just context treatment, so it would confound this experiment. Test it
   against whichever of A–E wins.

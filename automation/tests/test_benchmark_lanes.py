@@ -12,17 +12,29 @@ from automation.benchmark import lanes as lanes_module
 from automation.benchmark.adapter import SupervisorAgentAdapter, build_context_bundle, build_queue_data, build_slice_record
 from automation.benchmark.instances import TaskSpec
 from automation.benchmark.scoring import EffectivenessReport, InstanceScore
+from automation.benchmark.jspace import JSpaceArtifact, JSpaceUnavailable
 from automation.benchmark.strategies import (
     ALL_LANES,
     PLAN_ARTIFACT,
     RESEARCH_ARTIFACT,
     RPI_DIR,
+    RpiStrategy,
     build_strategy,
 )
 from automation.supervisor.run_next import render_prompt
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TASK = TaskSpec("owner__proj.abc1234", "owner/proj", "abc1234", "c", "easy")
+
+JSPACE_MARKER = "CANONICAL-JSPACE-FIXTURE"
+FIXTURE_ARTIFACT = JSpaceArtifact(
+    source="fixture/j-space",
+    revision="b2023124a1fa08278e3ee82aefa8ed9faeade995",
+    artifact="j-space/SKILL.md",
+    sha256="0" * 64,
+    root=Path("/fixture/j-space"),
+    text=f"# {JSPACE_MARKER}\n\nRun `<python-command> <skill-root>/scripts/control.py`.\n",
+)
 
 
 class FakeAgent:
@@ -115,14 +127,18 @@ class FakeAgent:
         return next(session["prompt"] for session in self.sessions if session["phase"] == phase)
 
 
-def run_lane(lane: str, agent: Optional[FakeAgent] = None, timeout_seconds: int = 1800):
-    """Drive one lane end-to-end against the fake agent; return (agent, result, tar_path)."""
+def run_lane(lane: str, agent: Optional[FakeAgent] = None, timeout_seconds: int = 1800, strategy=None):
+    """Drive one lane end-to-end against the fake agent; return (agent, result, tar_path).
+
+    ``strategy`` is only supplied for lane E, whose real factory resolves the canonical
+    J-Space checkout; the fixture stands in for that checkout, not for the treatment.
+    """
     agent = agent or FakeAgent()
     adapter = SupervisorAgentAdapter(
         repo_root=REPO_ROOT,
         runner=agent,
         timeout_seconds=timeout_seconds,
-        strategy=build_strategy(lane),
+        strategy=strategy or build_strategy(lane),
     )
     tmp = tempfile.mkdtemp(prefix=f"lane-{lane}-")
     out_tar = Path(tmp) / "submission.tar.gz"
@@ -195,12 +211,25 @@ class LaneTreatmentTests(unittest.TestCase):
 
     def test_lane_e_is_lane_d_plus_jspace_only(self) -> None:
         agent_d, _, _ = run_lane("D")
-        agent_e, _, _ = run_lane("E")
+        agent_e, result_e, _ = run_lane("E", strategy=RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT))
+        self.assertEqual("E", result_e.strategy.lane if result_e.strategy else None)
         self.assertEqual(agent_d.phases(), agent_e.phases())
         for session in agent_e.sessions:
-            self.assertIn("J-Space Ledger", session["prompt"])
+            self.assertIn(JSPACE_MARKER, session["prompt"])
         for session in agent_d.sessions:
-            self.assertNotIn("J-Space Ledger", session["prompt"])
+            self.assertNotIn(JSPACE_MARKER, session["prompt"])
+
+    def test_lane_e_records_which_artifact_it_administered(self) -> None:
+        _, result, _ = run_lane("E", strategy=RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT))
+        assert result.strategy is not None
+        self.assertEqual(FIXTURE_ARTIFACT.provenance(), result.strategy.to_dict()["jspace"])
+
+    def test_no_other_lane_claims_a_jspace_artifact(self) -> None:
+        for lane in ("A", "B", "C", "D"):
+            with self.subTest(lane=lane):
+                _, result, _ = run_lane(lane)
+                assert result.strategy is not None
+                self.assertIsNone(result.strategy.to_dict()["jspace"])
 
     def test_phase_artifacts_are_kept_but_never_graded(self) -> None:
         _, result, out_tar = run_lane("C")
@@ -271,6 +300,72 @@ class MatrixTests(unittest.TestCase):
         self.assertNotEqual("unknown", provenance["repo_automation_sha"])
         self.assertIn("started_at", provenance)
 
+    def test_an_unresolvable_jspace_skips_lane_e_instead_of_running_lane_d(self) -> None:
+        agents: list[FakeAgent] = []
+
+        def factory(lane: str) -> SupervisorAgentAdapter:
+            if lane == "E":
+                raise JSpaceUnavailable("jspace_unavailable: set JSPACE_ROOT to a checkout")
+            agent = FakeAgent()
+            agents.append(agent)
+            return SupervisorAgentAdapter(repo_root=REPO_ROOT, runner=agent, strategy=build_strategy(lane))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            lanes_module.run_experiment(
+                run_dir=run_dir,
+                instances=["inst-a"],
+                adapter_factory=factory,
+                repo_root=REPO_ROOT,
+                lanes=["D", "E"],
+                repeats=1,
+            )
+            skipped = json.loads((run_dir / "E" / "r1" / "inst-a" / "run.json").read_text(encoding="utf-8"))
+            self.assertFalse((run_dir / "E" / "r1" / "inst-a" / "submission.tar.gz").exists())
+            self.assertTrue((run_dir / "D" / "r1" / "inst-a" / "submission.tar.gz").is_file())
+
+        self.assertTrue(skipped["skipped"])
+        self.assertIsNone(skipped["strategy"])  # no treatment was administered under E's name
+        self.assertIn("jspace_unavailable", skipped["skip_reason"])
+        self.assertEqual(1, len(agents))  # lane E never reached the agent
+
+    def test_summarize_lane_counts_skipped_cells_apart_from_attempts(self) -> None:
+        reports = [EffectivenessReport((InstanceScore("i1", 10, 10),))]
+        with tempfile.TemporaryDirectory() as tmp:
+            cell_dir = Path(tmp) / "E" / "r1" / "inst-a"
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "run.json").write_text(
+                json.dumps({"lane": "E", "skipped": True, "skip_reason": "jspace_unavailable", "strategy": None}),
+                encoding="utf-8",
+            )
+            summary = lanes_module.summarize_lane(Path(tmp), "E", repeats=1, reports=reports)
+        self.assertEqual(1, summary["skipped"])
+        self.assertEqual(0, summary["attempts"])
+        self.assertIsNone(summary["jspace"])
+
+    def test_summarize_lane_carries_the_administered_jspace_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cell_dir = Path(tmp) / "E" / "r1" / "inst-a"
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "lane": "E",
+                        "returncode": 0,
+                        "strategy": {
+                            "seconds": 1.0,
+                            "agent_invocations": 3,
+                            "phase_failures": 0,
+                            "compaction": {},
+                            "jspace": FIXTURE_ARTIFACT.provenance(),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary = lanes_module.summarize_lane(Path(tmp), "E", repeats=1, reports=[])
+        self.assertEqual(FIXTURE_ARTIFACT.provenance(), summary["jspace"])
+
     def test_comparison_reports_adjacent_lane_deltas(self) -> None:
         summaries = [
             {
@@ -322,6 +417,23 @@ class MatrixTests(unittest.TestCase):
         markdown = lanes_module.render_comparison_markdown(comparison)
         self.assertIn("Primary outcome", markdown)
         self.assertIn("one session, raw objective", markdown)
+
+    def test_markdown_flags_unrun_cells_and_names_the_administered_artifact(self) -> None:
+        lane = {
+            "lane": "E",
+            "skipped": 2,
+            "jspace": FIXTURE_ARTIFACT.provenance(),
+            "primary": {"resolve_rate": 0.0, "near_resolve_rate": 0.0, "mean_pass_fraction": 0.0},
+            "efficiency": {"agent_invocations": 0, "wall_clock_seconds": 0.0},
+            "stability": {"resolve_rate_stdev": 0.0},
+            "process": {"phase_failures": 0, "nonzero_returncodes": 0},
+        }
+        markdown = lanes_module.render_comparison_markdown(
+            {"lanes": [lane], "deltas": [], "note": "Primary metric is ProgramBench correctness."}
+        )
+        self.assertIn("Unrun cells", markdown)
+        self.assertIn("| E | 2 |", markdown)
+        self.assertIn(FIXTURE_ARTIFACT.revision, markdown)
 
 
 if __name__ == "__main__":

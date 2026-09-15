@@ -30,6 +30,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 from .adapter import AgentAdapter, SupervisorAgentAdapter
 from .evalrunner import EvalRunner
 from .instances import task_spec
+from .jspace import JSpaceUnavailable
 from .run import REPORT_FILENAME, score_and_write
 from .scoring import EffectivenessReport
 from .strategies import ALL_LANES, build_strategy
@@ -121,6 +122,32 @@ def default_adapter_factory(
     return factory
 
 
+def skip_cell(cell: Cell, run_dir: Path, repo_root: Path, reason: str) -> dict[str, Any]:
+    """Record a cell that could not be administered, without writing a submission.
+
+    A lane whose treatment cannot be resolved is reported as unrun. Substituting a
+    different treatment would silently rename one lane into another.
+    """
+    instance_dir = cell.directory(run_dir)
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    provenance: dict[str, Any] = {
+        "lane": cell.lane,
+        "instance_id": cell.instance_id,
+        "repeat": cell.repeat,
+        "repo_automation_sha": _repo_sha(repo_root),
+        "environment": _environment_fingerprint(),
+        "started_at": now,
+        "finished_at": now,
+        "returncode": None,
+        "skipped": True,
+        "skip_reason": reason,
+        "strategy": None,
+    }
+    (instance_dir / PROVENANCE_FILENAME).write_text(json.dumps(provenance, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return provenance
+
+
 def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) -> dict[str, Any]:
     """Attempt one cell and write its provenance record."""
     instance_dir = cell.directory(run_dir)
@@ -186,6 +213,10 @@ def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[Eff
             provenance.extend(_load_provenance(cell_dir))
 
     strategies = [record["strategy"] for record in provenance if record.get("strategy")]
+    skipped = [record for record in provenance if record.get("skipped")]
+    # A lane whose treatment never resolved has no outcome to compare; carry the count so a
+    # skipped lane cannot be read as a treatment that simply performed badly.
+    jspace = next((strategy["jspace"] for strategy in strategies if strategy.get("jspace")), None)
     compaction_ratios = [
         value
         for strategy in strategies
@@ -196,7 +227,9 @@ def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[Eff
     return {
         "lane": lane,
         "repeats": len(reports),
-        "attempts": len(provenance),
+        "attempts": len(provenance) - len(skipped),
+        "skipped": len(skipped),
+        "jspace": jspace,
         "primary": {
             "resolve_rate": round(_mean(resolve_rates), 4),
             "near_resolve_rate": round(_mean(near_rates), 4),
@@ -306,6 +339,28 @@ def render_comparison_markdown(comparison: dict[str, Any]) -> str:
         lines += ["", "## Process failures", "", "| lane | phase failures | nonzero exits |", "|---|---:|---:|"]
         lines += [f"| {lane} | {phase} | {rc} |" for lane, phase, rc in failures]
 
+    skips = [(summary["lane"], summary["skipped"]) for summary in comparison["lanes"] if summary.get("skipped")]
+    if skips:
+        lines += [
+            "",
+            "## Unrun cells",
+            "",
+            "A skipped cell was never administered, so its lane's rates are computed over fewer",
+            "attempts. Read a skipped lane as unrun, not as a treatment that underperformed.",
+            "",
+            "| lane | skipped cells |",
+            "|---|---:|",
+        ]
+        lines += [f"| {lane} | {count} |" for lane, count in skips]
+
+    administered = [(s["lane"], s["jspace"]) for s in comparison["lanes"] if s.get("jspace")]
+    if administered:
+        lines += ["", "## J-Space artifact administered", ""]
+        lines += [
+            f"- lane {lane}: `{record['source']}` at `{record['revision']}`, `{record['artifact']}` sha256 `{record['sha256']}`"
+            for lane, record in administered
+        ]
+
     lines += ["", comparison["note"], ""]
     return "\n".join(lines)
 
@@ -334,7 +389,12 @@ def run_experiment(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     for cell in interleave(instances, lanes, repeats):
-        run_cell(cell, run_dir, adapter_factory(cell.lane), repo_root)
+        try:
+            adapter = adapter_factory(cell.lane)
+        except JSpaceUnavailable as error:
+            skip_cell(cell, run_dir, repo_root, str(error))
+            continue
+        run_cell(cell, run_dir, adapter, repo_root)
 
     if eval_runner is not None:
         for cell_dir in cell_dirs(run_dir, lanes, repeats):
@@ -361,6 +421,7 @@ __all__ = [
     "lane_deltas",
     "render_comparison_markdown",
     "run_cell",
+    "skip_cell",
     "run_experiment",
     "summarize_lane",
     "write_comparison",
