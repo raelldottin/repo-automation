@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -307,6 +308,11 @@ def format_agent_command(
     )
 
 
+# Scanned before substitution: injected values (notes, context JSON, handoff data) may
+# legitimately contain __FOO__-shaped text, so only the raw template is checked.
+PROMPT_PLACEHOLDER_PATTERN = re.compile(r"__[A-Z0-9_]+__")
+
+
 def render_prompt(repo_root: Path, slice_record: dict, context_bundle: dict, handoff_path: Path) -> str:
     base_prompt = (repo_root / "automation/prompts/base.md").read_text(encoding="utf-8")
     slice_prompt = (repo_root / "automation/prompts/slice.md").read_text(encoding="utf-8")
@@ -331,6 +337,9 @@ def render_prompt(repo_root: Path, slice_record: dict, context_bundle: dict, han
         "__HANDOFF_PATH__": str(handoff_path),
         "__HANDOFF_TEMPLATE_JSON__": json.dumps(context_bundle["handoff_template"], indent=2, ensure_ascii=False),
     }
+    unknown = set(PROMPT_PLACEHOLDER_PATTERN.findall(slice_prompt)) - replacements.keys()
+    if unknown:
+        raise policy.ConfigError("unknown_prompt_placeholder: " + ", ".join(sorted(unknown)))
     rendered_slice_prompt = slice_prompt
     for token, value in replacements.items():
         rendered_slice_prompt = rendered_slice_prompt.replace(token, value)
