@@ -325,7 +325,7 @@ def render_prompt(repo_root: Path, slice_record: dict, context_bundle: dict, han
         "__ADJACENT_SLICE_CANDIDATES__": format_adjacent_slices(context_bundle["queue"]["adjacent_queued_slices"]),
         "__PREVIOUS_HANDOFF_SUMMARY__": context_bundle["previous_handoff_summary"],
         "__QUEUE_METADATA_JSON__": json.dumps(context_bundle["queue"], indent=2, ensure_ascii=False),
-        "__ACCEPTANCE_CHECKS__": format_plain_list(context_bundle["acceptance_checks"]),
+        "__EXECUTION_CONSTRAINTS__": format_plain_list(context_bundle["execution_constraints"]),
         "__CONTEXT_DOCUMENT_INDEX__": format_documents(context_bundle["documents"]),
         "__CONTEXT_JSON__": json.dumps(context_bundle, indent=2, ensure_ascii=False),
         "__HANDOFF_PATH__": str(handoff_path),

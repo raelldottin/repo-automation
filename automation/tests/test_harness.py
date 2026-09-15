@@ -935,6 +935,11 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertIn('"residual_risks"', prompt_text)
         self.assertIn('"repo_clean_status"', prompt_text)
         self.assertIn('"git_mirror_status"', prompt_text)
+        self.assertIn("Execution constraints for this slice:", prompt_text)
+        self.assertIn("Stay within allowed_paths", prompt_text)
+        # A renamed placeholder that the fragment still spells the old way would render
+        # literally rather than fail, so assert none survives substitution.
+        self.assertNotRegex(prompt_text, r"__[A-Z_]+__")
 
     def test_decision_report_includes_supervisor_validation_replays(self) -> None:
         decision = policy.CompletionDecision(

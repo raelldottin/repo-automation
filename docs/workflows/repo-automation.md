@@ -282,6 +282,12 @@ asserted by
 `automation/tests/test_repo_automation_sync.py`, which writes sentinel
 markers into both files and verifies they appear in the rendered prompt.
 
+Because those fragments are first-time-only template entries, a placeholder rename in
+this repository does **not** reach a consumer that already customized the file. The
+supervisor now substitutes `__EXECUTION_CONSTRAINTS__` (previously
+`__ACCEPTANCE_CHECKS__`); a consumer holding an older `slice.md` renders the old token
+literally and loses that section until it renames the placeholder in its own copy.
+
 The consumer-side flow:
 
 1. **Commit the override first.** The supervisor's dirty-tree check refuses

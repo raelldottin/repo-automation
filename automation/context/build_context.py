@@ -76,7 +76,7 @@ def build_context_bundle(
         "validation_ownership": summarize_validation_ownership(slice_record),
         "previous_handoff": compact_previous_handoff,
         "previous_handoff_summary": render_previous_handoff_summary(compact_previous_handoff),
-        "acceptance_checks": build_acceptance_checks(slice_record),
+        "execution_constraints": build_execution_constraints(slice_record),
         "handoff_template": build_handoff_template(slice_record),
         "documents": documents,
     }
@@ -152,7 +152,7 @@ def summarize_validation_ownership(slice_record: dict[str, Any]) -> list[dict[st
     ]
 
 
-def build_acceptance_checks(slice_record: dict[str, Any]) -> list[str]:
+def build_execution_constraints(slice_record: dict[str, Any]) -> list[str]:
     return [
         f"Stay within allowed_paths: {', '.join(slice_record['allowed_paths'])}",
         f"Keep changed files at or below max_files_changed={slice_record['max_files_changed']}",
