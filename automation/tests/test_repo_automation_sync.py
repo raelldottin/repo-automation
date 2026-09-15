@@ -1,7 +1,7 @@
 """Guards on the canonical -> consumer import path.
 
 repo-automation is the canonical source of reusable automation. Consumers vendor a pinned
-snapshot of it and never write back. These tests pin the seven protections that make that
+snapshot of it and never write back. These tests pin the eight protections that make that
 direction unbreakable; they are the canonical copy, and consumers are expected to keep
 their own equivalents against their vendored checkout.
 """
@@ -23,7 +23,7 @@ SYNC_TOOL = REPO_ROOT / "Tools" / "repo-automation-sync.sh"
 
 
 class RepoAutomationImportGuardTests(unittest.TestCase):
-    """The seven protections that make the canonical -> consumer direction unbreakable.
+    """The eight protections that make the canonical -> consumer direction unbreakable.
 
     repo-automation is canonical and Owlory vendors a pinned snapshot of it. Every test
     here drives the real tool the way `make repo-automation-import` drives it: a pinned,
@@ -117,8 +117,18 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         self.git(self.target, "add", "-A")
         self.git(self.target, "commit", "-m", "consumer state")
 
-    def run_tool(self, *args: str, pin: str | None = None, env_path: str | None = None) -> subprocess.CompletedProcess[str]:
-        provenance: list[str] = ["--pin", pin, "--expect-remote", self.remote] if pin else []
+    def run_tool(
+        self,
+        *args: str,
+        pin: str | None = None,
+        env_path: str | None = None,
+        quality_command: str = "true",
+    ) -> subprocess.CompletedProcess[str]:
+        # Fixture sources are bare git repos with no build system, so the canonical quality
+        # gate is stubbed out here. Protection 8 exercises the real gate directly.
+        provenance: list[str] = (
+            ["--pin", pin, "--expect-remote", self.remote, "--quality-command", quality_command] if pin else []
+        )
         env = None
         if env_path is not None:
             # Used to take git away from the tool mid-run, which is one of the ways a guard
@@ -591,6 +601,8 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
                 pin,
                 "--expect-remote",
                 self.remote,
+                "--quality-command",
+                "true",
                 "--source",
                 str(self.source),
                 "--manifest",
@@ -606,6 +618,68 @@ class RepoAutomationImportGuardTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("locally modified", result.stderr)
         self.assertEqual("local work\n", (nested / "vendored/tool.py").read_text(encoding="utf-8"))
+
+    # --- protection 8 ----------------------------------------------------
+
+    def test_8_source_failing_its_own_quality_gate_is_refused(self) -> None:
+        """Pinned, clean and correctly identified is not the same as releasable."""
+        pin = self.canonical_source_with(("tool.py", "canonical\n"))
+        self.write_manifest([self.entry("tool.py", "vendored/tool.py")])
+
+        result = self.run_tool("--sync", pin=pin, quality_command="false")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("quality gate", result.stderr)
+        self.assertFalse((self.target / "vendored/tool.py").exists())
+
+    def test_8_quality_gate_failure_output_is_reported(self) -> None:
+        """A refusal that does not say what failed sends the operator back to guessing."""
+        pin = self.canonical_source_with(("tool.py", "canonical\n"))
+        self.write_manifest([self.entry("tool.py", "vendored/tool.py")])
+
+        result = self.run_tool("--sync", pin=pin, quality_command="sh -c 'echo would-reformat-something >&2; exit 1'")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("would-reformat-something", result.stderr)
+
+    def test_8_unrunnable_quality_gate_is_a_refusal_not_a_pass(self) -> None:
+        """A gate that cannot run has not passed; the tool must not read that as success."""
+        pin = self.canonical_source_with(("tool.py", "canonical\n"))
+        self.write_manifest([self.entry("tool.py", "vendored/tool.py")])
+
+        result = self.run_tool("--sync", pin=pin, quality_command="repo-automation-no-such-gate")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("could not run the canonical quality gate", result.stderr)
+        self.assertFalse((self.target / "vendored/tool.py").exists())
+
+    def test_8_quality_gate_runs_in_the_source_not_the_consumer(self) -> None:
+        """The gate describes the canonical snapshot, so it must execute there."""
+        pin = self.canonical_source_with(("tool.py", "canonical\n"))
+        self.write_manifest([self.entry("tool.py", "vendored/tool.py")])
+        marker = self.tmpdir / "gate-cwd.txt"
+
+        result = self.run_tool("--sync", pin=pin, quality_command=f"sh -c 'pwd > {marker}'")
+
+        self.assertEqual(0, result.returncode, msg=result.stderr)
+        self.assertEqual(self.source.resolve(), Path(marker.read_text(encoding="utf-8").strip()).resolve())
+        self.assertEqual("canonical\n", (self.target / "vendored/tool.py").read_text(encoding="utf-8"))
+
+    def test_8_check_with_a_pin_also_requires_the_quality_gate(self) -> None:
+        """--check with a pin answers "is this snapshot importable", which includes quality."""
+        pin = self.canonical_source_with(("tool.py", "canonical\n"))
+        self.write_manifest([self.entry("tool.py", "vendored/tool.py")])
+
+        result = self.run_tool("--check", pin=pin, quality_command="false")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("quality gate", result.stderr)
+
+    def test_8_default_quality_gate_is_the_canonical_make_target(self) -> None:
+        """The tool names one contract; the canonical repo owns which tools it runs."""
+        self.assertIn("reusable-check:", (REPO_ROOT / "Makefile").read_text(encoding="utf-8"))
+        help_text = subprocess.run([str(SYNC_TOOL), "--help"], cwd=REPO_ROOT, capture_output=True, text=True).stdout
+        self.assertIn("make reusable-check", help_text)
 
 
 if __name__ == "__main__":

@@ -95,6 +95,16 @@ Use `Tools/repo-automation-sync.sh` for manifest-owned sync:
 - `--target <path>`: **required.** The consumer to write into. There is no default, and it may not be the canonical repository or another checkout of it.
 - `--source <path>` and `--manifest <path>`: test hooks for temp repositories and alternate manifests.
 
+### Canonical quality gate
+
+`make reusable-check` is this repository's one named quality contract. It owns which tools run — currently `ruff check`, `ruff format --check`, `ty`, the JSON Schema drift check and the automation test suite — so consumers ask a single question instead of tracking the toolchain:
+
+```bash
+make reusable-check
+```
+
+The sync tool invokes it as the import preflight (protection 8). Adding or replacing a check here changes nothing on the consumer side.
+
 The tool must be idempotent. Running `--sync` twice against the same source should produce no second change. Running `--check` after a successful sync should pass.
 
 Stale-file deletion is allowed only under manifest-owned destination paths in the consumer, and only for files the canonical source does not track. The tool must not clean arbitrary files, and it must never delete anything in `repo-automation`.
@@ -130,7 +140,9 @@ These are enforced in `Tools/repo-automation-sync.sh` itself, not in a consumer'
 6. **Stale deletion stays inside what the canonical side owns.** Because (5) is enforced when the manifest is parsed, `delete_stale` can only ever reach canonical-owned destinations.
 7. **Locally modified files are never clobbered.** A tracked destination file with uncommitted consumer edits stops the import; that work exists in neither history. Template entries are additionally not overwritten by an ordinary import. This check fails closed: a consumer that is not under version control has nothing to protect and imports normally, but any *other* Git failure — dubious ownership, a missing `git` — refuses the import rather than silently proceeding without the guard.
 
-Protections 2, 3 and 4 can be waived together with `--allow-unverified-source` for local development. It prints a warning, the consumer's `make` targets never pass it, and it cannot waive 1, 5, 6 or 7.
+8. **The canonical snapshot must pass the canonical quality gate.** Provenance establishes identity, not quality: a source can sit at the pinned commit, on the right remote, with a clean worktree, and still be lint-red or schema-drifted — canonical `main` was exactly that for two commits on 2026-09-15. Before any file is read for import, the tool runs `--quality-command` (default `make reusable-check`) in the *source* checkout and refuses the import if it exits non-zero, quoting the tail of its output. The gate is named rather than enumerated: the tool never learns which linters exist this month, and adding a check to `reusable-check` needs no change on the consumer side. A gate that cannot be run at all is a refusal, not a pass.
+
+Protections 2, 3, 4 and 8 can be waived together with `--allow-unverified-source` for local development. It prints a warning, the consumer's `make` targets never pass it, and it cannot waive 1, 5, 6 or 7.
 
 Cleanliness is not provenance: the destructive 2026-09-14 run was against a clean worktree on the correct branch. What it lacked was any statement of which commit it was meant to be.
 
