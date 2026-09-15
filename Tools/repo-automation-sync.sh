@@ -41,6 +41,13 @@ FORBIDDEN_SOURCE_FILES = {
     "Tools/verify-build-provenance.sh",
 }
 
+# Destinations a consumer owns outright. The canonical repository supplies both the file
+# list and this tool, so without a destination check an upstream entry could aim reusable
+# content at the consumer's hook, Makefile or live queue - and delete_stale could remove
+# them. Unlike the source check there is no manifest opt-out: these are never importable.
+FORBIDDEN_DESTINATION_PREFIXES = FORBIDDEN_SOURCE_PREFIXES
+FORBIDDEN_DESTINATION_FILES = FORBIDDEN_SOURCE_FILES
+
 SKIP_NAMES = {"__pycache__", ".DS_Store"}
 
 
@@ -104,6 +111,22 @@ def parse_entry(raw: object) -> Entry:
         for prefix in FORBIDDEN_SOURCE_PREFIXES:
             if source == prefix.rstrip("/") or source.startswith(prefix):
                 raise SyncError(f"forbidden Owlory-specific source requires explicit approval: {source}")
+
+    if destination in FORBIDDEN_DESTINATION_FILES:
+        raise SyncError(f"forbidden import destination is owned by the consumer: {destination}")
+    for prefix in FORBIDDEN_DESTINATION_PREFIXES:
+        if destination == prefix.rstrip("/") or destination.startswith(prefix):
+            raise SyncError(f"forbidden import destination is owned by the consumer: {destination}")
+
+    # An ancestor is just as dangerous: a directory entry rooted at "automation" with
+    # delete_stale set would sweep automation/queue, automation/handoffs and automation/proofs
+    # without ever naming them.
+    owned = sorted(FORBIDDEN_DESTINATION_FILES) + [prefix.rstrip("/") for prefix in FORBIDDEN_DESTINATION_PREFIXES]
+    for consumer_path in owned:
+        if consumer_path.startswith(destination + "/"):
+            raise SyncError(
+                f"forbidden import destination {destination!r} contains consumer-owned {consumer_path!r}"
+            )
 
     return Entry(
         source=source,
@@ -241,6 +264,34 @@ def remove_empty_dirs(root: Path) -> None:
             pass
 
 
+def locally_modified_targets(target_root: Path) -> set[Path]:
+    """Tracked files the consumer has edited but not committed.
+
+    Overwriting one of these destroys work that exists nowhere else - not in the consumer's
+    history and not upstream. Untracked files are excluded: a brand new file in a vendored
+    directory is stale, which is a different decision handled by delete_stale.
+    """
+    status = subprocess.run(
+        ["git", "-C", str(target_root), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if status.returncode != 0:
+        return set()
+
+    modified: set[Path] = set()
+    for line in status.stdout.splitlines():
+        if not line.strip():
+            continue
+        entry_path = line[3:]
+        # Renames report "old -> new"; the new path is the one on disk.
+        if " -> " in entry_path:
+            entry_path = entry_path.split(" -> ", 1)[1]
+        modified.add((target_root / entry_path.strip().strip('"')).resolve(strict=False))
+    return modified
+
+
 def sync_entries(
     source_root: Path,
     target_root: Path,
@@ -251,7 +302,11 @@ def sync_entries(
 ) -> int:
     target_root_resolved = target_root.resolve(strict=False)
     issues: list[str] = []
-    changes = 0
+
+    # Plan the whole import before touching anything, so a refusal leaves the consumer
+    # byte-for-byte unchanged rather than half-imported.
+    writes: list[tuple[Path, Path, str, Entry]] = []
+    deletions: list[tuple[Path, str]] = []
 
     for entry in entries:
         pairs = source_files(source_root, target_root_resolved, entry)
@@ -260,31 +315,19 @@ def sync_entries(
         for source, target, display in pairs:
             if entry.template and target.exists() and not force_templates:
                 continue
-
             drift = file_drift(source, target, preserve_executable=entry.preserve_executable)
             if drift is None:
                 continue
-
             if check:
                 issues.append(f"{drift}: {display}")
                 continue
-
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-            set_target_mode(source, target, preserve_executable=entry.preserve_executable)
-            print(f"synced: {display}")
-            changes += 1
+            writes.append((source, target, display, entry))
 
         for stale, display in stale_files(target_root_resolved, entry, expected):
             if check:
                 issues.append(f"stale: {display}")
                 continue
-            stale.unlink()
-            print(f"removed stale: {display}")
-            changes += 1
-
-        if not check and entry.kind == "directory" and entry.delete_stale:
-            remove_empty_dirs(resolve_under(target_root_resolved, entry.destination, must_exist=False))
+            deletions.append((stale, display))
 
     if check:
         if issues:
@@ -295,6 +338,36 @@ def sync_entries(
         print("result: target is current")
         return 0
 
+    modified = locally_modified_targets(target_root_resolved)
+    clobbered = sorted(
+        display
+        for path, display in [(target, display) for _, target, display, _ in writes] + deletions
+        if path.resolve(strict=False) in modified
+    )
+    if clobbered:
+        raise SyncError(
+            "refusing to import over locally modified files: "
+            + ", ".join(clobbered)
+            + ". Commit, stash or revert them first - an import overwrites them silently otherwise."
+        )
+
+    changes = 0
+    for source, target, display, entry in writes:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        set_target_mode(source, target, preserve_executable=entry.preserve_executable)
+        print(f"synced: {display}")
+        changes += 1
+
+    for stale, display in deletions:
+        stale.unlink()
+        print(f"removed stale: {display}")
+        changes += 1
+
+    for entry in entries:
+        if entry.kind == "directory" and entry.delete_stale:
+            remove_empty_dirs(resolve_under(target_root_resolved, entry.destination, must_exist=False))
+
     if changes:
         print(f"result: synced {changes} change(s)")
     else:
@@ -302,59 +375,99 @@ def sync_entries(
     return 0
 
 
-def target_git_status(target_root: Path) -> tuple[bool, list[str]]:
-    git_root = subprocess.run(
-        ["git", "-C", str(target_root), "rev-parse", "--show-toplevel"],
+def git_output(repo: Path, *args: str) -> tuple[int, str]:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
         capture_output=True,
         text=True,
+        check=False,
     )
-    if git_root.returncode != 0:
-        return False, []
-
-    status = subprocess.run(
-        ["git", "-C", str(target_root), "status", "--short", "--untracked-files=all"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    lines = [line for line in status.stdout.splitlines() if line.strip()]
-    return True, lines
+    return result.returncode, result.stdout.strip()
 
 
-def ensure_auto_update_target_safe(target_root: Path) -> int:
-    if not target_root.exists():
-        print(f"missing target: {target_root}")
-        print("result: auto-update refused (target missing)")
-        print("remediation: run the repo-automation bootstrap slice or sync the target explicitly with --sync first")
-        return 1
+def ensure_target_is_not_the_source(source_root: Path, target_root: Path) -> None:
+    """Protection 1: an import has no write path back into the canonical repository.
 
-    is_git_repo, dirty_lines = target_git_status(target_root)
-    if not is_git_repo:
-        print(f"repo-automation-sync: error: auto-update target is not a Git repository: {target_root}", file=sys.stderr)
-        print("remediation: initialize the external repo-automation folder before enabling automatic updates", file=sys.stderr)
-        return 2
+    The old --auto-update mode wrote outward and once resolved to deleting 1937 lines of
+    committed canonical work. There is no flag to re-enable that: files move canonical ->
+    consumer only, so writing into the source, or into anything containing it, is refused.
+    """
+    source = source_root.resolve(strict=False)
+    target = target_root.resolve(strict=False)
 
-    if dirty_lines:
-        print(f"repo-automation-sync: error: refusing auto-update because target has local dirt: {target_root}", file=sys.stderr)
-        for line in dirty_lines:
-            print(f"  {line}", file=sys.stderr)
-        print("remediation: commit, stash, or clean the external repo-automation worktree, then retry", file=sys.stderr)
-        return 1
+    if source == target:
+        raise SyncError(f"refusing to import into the canonical source itself: {target}")
+    if source in target.parents:
+        raise SyncError(f"refusing to import into {target}, which lives inside the canonical source {source}")
+    if target in source.parents:
+        raise SyncError(f"refusing to import into {target}, which contains the canonical source {source}")
 
-    return 0
+
+def verify_source_provenance(source_root: Path, pin: str | None, expect_remote: str | None) -> None:
+    """Protections 2, 3 and 4: the snapshot must be traceable to a published commit.
+
+    Cleanliness is not provenance. The destructive 2026-09-14 run was against a clean
+    worktree on the correct branch; what it lacked was any statement of which commit it
+    was meant to be. A checkout that merely resembles the canonical repository is refused.
+    """
+    if not pin:
+        raise SyncError(
+            "refusing to import without --pin: the canonical source commit must be explicit. "
+            "Pass --pin <full-sha> (Owlory reads it from automation/repo-automation.lock), "
+            "or --allow-unverified-source for local development only."
+        )
+
+    is_repo, _ = git_output(source_root, "rev-parse", "--show-toplevel")
+    if is_repo != 0:
+        raise SyncError(f"source is not a Git checkout, so its identity cannot be verified: {source_root}")
+
+    # Protection 3. An absent origin is a failure, not a pass - a source that cannot state
+    # what repository it is, is exactly the case this check exists for.
+    remote_code, remote_url = git_output(source_root, "remote", "get-url", "origin")
+    if remote_code != 0 or not remote_url:
+        raise SyncError(
+            f"source repository identity cannot be established: {source_root} has no 'origin' remote"
+        )
+    if expect_remote and remote_url != expect_remote:
+        raise SyncError(
+            f"source repository identity mismatch: expected {expect_remote}, found {remote_url}"
+        )
+
+    # Protection 4. Uncommitted content is unpublished by definition.
+    status_code, status = git_output(source_root, "status", "--porcelain", "--untracked-files=all")
+    if status_code != 0:
+        raise SyncError(f"could not read source status: {source_root}")
+    if status:
+        raise SyncError(
+            f"canonical source has uncommitted changes, so the import would vendor unpublished content:\n{status}"
+        )
+
+    head_code, head = git_output(source_root, "rev-parse", "HEAD")
+    if head_code != 0:
+        raise SyncError(f"could not resolve source HEAD: {source_root}")
+    if head != pin:
+        raise SyncError(
+            f"source is not at the pinned commit: pinned {pin}, source HEAD {head}"
+        )
 
 
 def main(argv: list[str]) -> int:
     repo_root = Path(argv[0]).resolve()
 
-    parser = argparse.ArgumentParser(description="Mirror Owlory reusable automation into an external repo-automation folder.")
+    parser = argparse.ArgumentParser(description="Import reusable automation from the canonical repo-automation checkout into a consumer.")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="Report drift without changing files.")
     mode.add_argument("--sync", action="store_true", help="Update the target to match the reusable manifest.")
-    mode.add_argument("--auto-update", action="store_true", help="Safely update an existing clean Git target, then verify it is current.")
-    parser.add_argument("--target", help="Destination repo-automation folder. Defaults to manifest default_target.")
-    parser.add_argument("--source", default=str(repo_root), help="Source repository root. Defaults to this checkout.")
+    parser.add_argument("--target", help="Destination consumer folder. Defaults to manifest default_target.")
+    parser.add_argument("--source", default=str(repo_root), help="Canonical source repository root. Defaults to this checkout.")
     parser.add_argument("--manifest", help="Manifest path. Defaults to <source>/automation/reusable-manifest.json.")
+    parser.add_argument("--pin", help="Full commit SHA the canonical source must be checked out at.")
+    parser.add_argument("--expect-remote", help="Remote URL the canonical source's 'origin' must match.")
+    parser.add_argument(
+        "--allow-unverified-source",
+        action="store_true",
+        help="Development only. Skip the pin, identity and cleanliness checks on the source."
+    )
     parser.add_argument(
         "--force-templates",
         action="store_true",
@@ -368,28 +481,17 @@ def main(argv: list[str]) -> int:
     default_target, entries = load_manifest(manifest)
     target_root = Path(args.target).expanduser() if args.target else default_target
 
-    if args.auto_update:
-        safe_result = ensure_auto_update_target_safe(target_root)
-        if safe_result != 0:
-            return safe_result
-        sync_result = sync_entries(
-            source_root,
-            target_root,
-            entries,
-            check=False,
-            force_templates=args.force_templates
-        )
-        if sync_result != 0:
-            return sync_result
-        return sync_entries(
-            source_root,
-            target_root,
-            entries,
-            check=True,
-            force_templates=args.force_templates
-        )
+    ensure_target_is_not_the_source(source_root, target_root)
 
     if args.sync:
+        if args.allow_unverified_source:
+            print(
+                "repo-automation-sync: warning: importing from an unverified source "
+                "(--allow-unverified-source); the result is not traceable to a published commit.",
+                file=sys.stderr,
+            )
+        else:
+            verify_source_provenance(source_root, args.pin, args.expect_remote)
         target_root.mkdir(parents=True, exist_ok=True)
     elif not target_root.exists():
         print(f"missing target: {target_root}")

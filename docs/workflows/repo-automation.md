@@ -118,17 +118,21 @@ No automatic external mutation, and no hidden cross-repository commits.
 
 ### Import protections
 
-The import path refuses, exits non-zero and changes nothing when:
+These are enforced in `Tools/repo-automation-sync.sh` itself, not in a consumer's Makefile, so they hold however the tool is invoked. Each one refuses with a non-zero exit and changes nothing — the import is planned in full before a single file is written, so a refusal leaves the consumer byte-for-byte unchanged rather than half-imported.
 
-1. an operation would mutate `repo-automation` from a consumer — there is no outward write path
-2. the canonical source commit is absent or unpinned
-3. the import source repository does not match the expected repository identity recorded in the pin
-4. the canonical source is dirty or unpublished, unless an explicit development-only mode is passed
-5. an import would delete any file outside canonical-owned paths
-6. an older consumer inventory would delete a file that is tracked in the canonical source
-7. an import would overwrite a template or locally customized path
+1. **No outward mutation.** Importing into the canonical source, into anything inside it, or into anything containing it, is refused. `--auto-update` — the mode that once resolved to deleting 1937 lines of committed canonical work — has been removed, and no flag re-enables it.
+2. **The canonical commit is explicit.** `--sync` requires `--pin <full-sha>`.
+3. **Repository identity is verified.** The source's `origin` must equal `--expect-remote`. A source with no `origin` fails; it cannot state what repository it is, which is the case the check exists for.
+4. **The source must be published and clean.** Uncommitted content is unpublished by definition, and the source must be at the pinned commit, not merely near it.
+5. **Consumer-owned destinations are never importable.** A manifest entry may not target `.githooks/`, `Makefile`, `automation/queue/`, `automation/handoffs/`, `automation/proofs/`, app code or release tooling — nor any *ancestor* of them, since a `delete_stale` directory entry rooted at `automation` would sweep the queue without ever naming it. Unlike the source-side check there is no manifest opt-out.
+6. **Stale deletion stays inside what the canonical side owns.** Because (5) is enforced when the manifest is parsed, `delete_stale` can only ever reach canonical-owned destinations.
+7. **Locally modified files are never clobbered.** A tracked destination file with uncommitted consumer edits stops the import; that work exists in neither history. Template entries are additionally not overwritten by an ordinary import.
 
-Advisory output does not satisfy any of these.
+Protections 2, 3 and 4 can be waived together with `--allow-unverified-source` for local development. It prints a warning, the consumer's `make` targets never pass it, and it cannot waive 1, 5, 6 or 7.
+
+Cleanliness is not provenance: the destructive 2026-09-14 run was against a clean worktree on the correct branch. What it lacked was any statement of which commit it was meant to be.
+
+`automation/tests/test_repo_automation_sync.py` holds one test per protection. Consumers are expected to keep equivalents against their own vendored checkout.
 
 ## Consumer Repository Contract
 
