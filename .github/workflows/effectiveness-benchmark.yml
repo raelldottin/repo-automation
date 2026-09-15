@@ -30,6 +30,10 @@ on:
         description: "Attempts per lane/instance (experiment only; >=2 recommended)"
         type: string
         default: "2"
+      timeout:
+        description: "Per-instance agent budget in seconds (shared across a lane's sessions)"
+        type: string
+        default: "1800"
   schedule:
     # 07:17 UTC nightly — off the top of the hour on purpose.
     - cron: "17 7 * * *"
@@ -118,8 +122,11 @@ jobs:
           else
             SELECTION=""
           fi
+          # The budget is per instance, so worst-case wall clock is instances x lanes x
+          # repeats x timeout; keep it under this job's 360-minute cap.
           uv run python -m automation.benchmark lanes --run-dir out --eval \
-            --lanes ${{ inputs.lanes }} --repeats ${{ inputs.repeats }} $SELECTION
+            --lanes ${{ inputs.lanes }} --repeats ${{ inputs.repeats }} \
+            --timeout ${{ inputs.timeout }} $SELECTION
 
       - name: Upload effectiveness report
         if: always()
