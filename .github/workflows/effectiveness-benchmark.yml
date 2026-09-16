@@ -102,28 +102,29 @@ jobs:
           name = "NVIDIA"
           base_url = "$OPENAI_BASE_URL"
           env_key = "OPENAI_API_KEY"
-          wire_api = "chat"
+          wire_api = "responses"
           TOML
 
-      # One request, before any lane runs: a provider that cannot answer is the one failure
-      # that makes an entire matrix worthless, and it costs seconds to rule out.
-      - name: Verify the agent provider answers
+      # Preflight with the agent itself, not with an HTTP request that resembles what the
+      # agent sends. A hand-written probe only proves the endpoint answers the protocol the
+      # probe chose; it passed while codex was failing on a config key it had dropped. One
+      # trivial session exercises config, wire protocol, auth and model id together.
+      - name: Verify the agent can complete one session
         run: |
-          status=$(curl -sS -o /tmp/provider.json -w '%{http_code}' \
-            -X POST "$OPENAI_BASE_URL/chat/completions" \
-            -H "Authorization: Bearer $OPENAI_API_KEY" \
-            -H 'Content-Type: application/json' \
-            -d '{"model": "${{ inputs.model }}", "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]}')
-          if [ "$status" != "200" ]; then
-            echo "::error::Provider returned HTTP $status for model ${{ inputs.model }}." >&2
-            head -c 400 /tmp/provider.json >&2
-            echo >&2
+          mkdir -p "$RUNNER_TEMP/agent-preflight"
+          git -C "$RUNNER_TEMP/agent-preflight" init --quiet
+          if ! echo 'Reply with the single word: ok' | codex --ask-for-approval never exec \
+            -C "$RUNNER_TEMP/agent-preflight" --sandbox read-only - 2>&1 | tee /tmp/preflight.log; then
+            echo "::error::The agent could not complete a trivial session with ${{ inputs.model }}." >&2
             echo "Models this key can reach:" >&2
             curl -sS "$OPENAI_BASE_URL/models" -H "Authorization: Bearer $OPENAI_API_KEY" \
               | python -c "import json,sys; [print(' ', m['id']) for m in json.load(sys.stdin).get('data', [])[:40]]" >&2 || true
             exit 1
           fi
-          echo "Provider answered for ${{ inputs.model }}."
+          grep -qiE '\bok\b' /tmp/preflight.log || {
+            echo "::error::The agent ran but produced no usable reply; see the log above." >&2
+            exit 1
+          }
 
       - name: Run benchmark (rebuild -> eval -> score)
         if: inputs.experiment != true
