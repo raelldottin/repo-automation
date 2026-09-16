@@ -41,6 +41,29 @@ uv run python -m automation.benchmark score --run-dir path/to/run-dir
 `eval` needs Docker and the amd64 cleanroom images, so run it on a native x86_64 Linux
 host (or in CI). Point the agent at an OpenAI-compatible LLM — e.g. NVIDIA:
 
+Current `codex` builds ignore `OPENAI_BASE_URL` and dial `api.openai.com` whatever it says,
+so a non-OpenAI endpoint must be declared as a provider in `~/.codex/config.toml`:
+
+```toml
+model = "qwen/qwen3-coder-480b-a35b-instruct"
+model_provider = "nvidia"
+
+[model_providers.nvidia]
+name = "NVIDIA"
+base_url = "https://integrate.api.nvidia.com/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "chat"
+```
+
+Check the endpoint answers before spending a matrix on it — a provider that cannot reply
+turns every cell into an agent error that looks like a harness failure:
+
+```shell
+curl -sS -X POST "$OPENAI_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model": "<model-id>", "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]}'
+```
+
 ```shell
 export REPO_AUTOMATION_AGENT_RUNNER=codex
 export OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
@@ -53,6 +76,10 @@ uv run python -m automation.benchmark all --run-dir out --instances abishekvasho
 
 > On Apple Silicon the cleanroom images run only under slow amd64 emulation; prefer an
 > x86_64 host for real runs.
+
+Eval containers are given the host's CPU count, capped at 10. Docker refuses a container
+that asks for more CPUs than exist, which fails every container and produces no results,
+so `--docker-cpus` only ever lowers that default.
 
 ## In production (CI)
 

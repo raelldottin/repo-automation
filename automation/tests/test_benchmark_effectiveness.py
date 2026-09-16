@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import os
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import Mapping
 
 from automation.benchmark import adapter as benchmark_adapter
 from automation.benchmark import run as benchmark_run
 from automation.benchmark.adapter import SubmissionResult, SupervisorAgentAdapter, build_queue_data, build_slice_record
-from automation.benchmark.evalrunner import RecordedEvalRunner
+from automation.benchmark import evalrunner
+from automation.benchmark.evalrunner import ProgramBenchEvalRunner, RecordedEvalRunner
 from automation.benchmark.instances import TaskSpec, task_spec
 from automation.benchmark.scoring import (
     EffectivenessReport,
@@ -181,6 +184,27 @@ class InstancesTests(unittest.TestCase):
         self.assertEqual("someowner__someproj.deadbee", spec.instance_id)
         self.assertIn("someowner", spec.repository)
         self.assertIn("from scratch", spec.objective)
+
+
+class EvalContainerBudgetTests(unittest.TestCase):
+    """Docker refuses a container asking for more CPUs than the host has, so the eval
+    must never ask. Getting this wrong fails every container and yields no results."""
+
+    def _argv(self, **kwargs) -> list[str]:
+        recorded: list[list[str]] = []
+        with unittest.mock.patch.object(evalrunner.subprocess, "run", lambda argv, **_: recorded.append(argv)):
+            ProgramBenchEvalRunner(("programbench",), **kwargs).evaluate(Path("run-dir"))
+        return recorded[0]
+
+    def test_cpu_request_never_exceeds_the_host(self) -> None:
+        argv = self._argv()
+        requested = int(argv[argv.index("--docker-cpus") + 1])
+        self.assertLessEqual(requested, os.cpu_count() or 1)
+        self.assertGreaterEqual(requested, 1)
+
+    def test_an_explicit_budget_is_passed_through(self) -> None:
+        argv = self._argv(docker_cpus=2, workers=3)
+        self.assertEqual(["--workers", "3", "--docker-cpus", "2"], argv[-4:])
 
 
 if __name__ == "__main__":
