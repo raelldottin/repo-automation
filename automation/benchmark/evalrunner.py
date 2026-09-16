@@ -13,6 +13,7 @@ orchestrator and tests never depend on Docker directly:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -24,6 +25,17 @@ class EvalRunner(Protocol):
         """Write ``<iid>/<iid>.eval.json`` for each submission under ``run_dir``."""
 
 
+# ProgramBench asks Docker for 10 CPUs per container by default. Docker refuses outright
+# when that exceeds the host, so on any smaller machine -- a 4-core CI runner, a laptop --
+# every container fails to start and the whole eval produces nothing. Never request more
+# than exists.
+MAX_DOCKER_CPUS = 10
+
+
+def default_docker_cpus() -> int:
+    return max(1, min(os.cpu_count() or 1, MAX_DOCKER_CPUS))
+
+
 class ProgramBenchEvalRunner:
     """Authoritative eval via the ProgramBench CLI. Requires Docker (amd64)."""
 
@@ -31,16 +43,19 @@ class ProgramBenchEvalRunner:
         self,
         programbench_cmd: Sequence[str] = ("uvx", "programbench"),
         workers: Union[int, None] = None,
+        docker_cpus: Union[int, None] = None,
         extra_args: Sequence[str] = (),
     ) -> None:
         self._cmd = list(programbench_cmd)
         self._workers = workers
+        self._docker_cpus = docker_cpus or default_docker_cpus()
         self._extra = list(extra_args)
 
     def evaluate(self, run_dir: Path) -> None:
         argv = [*self._cmd, "eval", str(run_dir)]
         if self._workers is not None:
             argv += ["--workers", str(self._workers)]
+        argv += ["--docker-cpus", str(self._docker_cpus)]
         argv += self._extra
         subprocess.run(argv, check=True)
 

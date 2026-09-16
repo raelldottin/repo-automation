@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .adapter import AgentAdapter, SupervisorAgentAdapter
-from .evalrunner import EvalRunner, ProgramBenchEvalRunner
+from .evalrunner import MAX_DOCKER_CPUS, EvalRunner, ProgramBenchEvalRunner
 from .instances import resolve_instances, task_spec
 from .scoring import EffectivenessReport, score_run_dir, write_report
 from .strategies import ALL_LANES
@@ -90,6 +90,11 @@ def _add_adapter_args(parser: argparse.ArgumentParser) -> None:
 def _add_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workers", type=int, help="ProgramBench eval workers.")
     parser.add_argument(
+        "--docker-cpus",
+        type=int,
+        help=f"CPUs per eval container (default: host CPUs, capped at {MAX_DOCKER_CPUS}).",
+    )
+    parser.add_argument(
         "--programbench-cmd",
         nargs="+",
         default=["uvx", "programbench"],
@@ -145,7 +150,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.command == "eval":
-        ProgramBenchEvalRunner(args.programbench_cmd, workers=args.workers).evaluate(args.run_dir)
+        ProgramBenchEvalRunner(args.programbench_cmd, workers=args.workers, docker_cpus=args.docker_cpus).evaluate(args.run_dir)
         return 0
 
     if args.command == "score":
@@ -170,7 +175,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 repo_root=Path(args.repo_root),
                 lanes=args.lanes,
                 repeats=args.repeats,
-                eval_runner=(ProgramBenchEvalRunner(args.programbench_cmd, workers=args.workers) if args.eval else None),
+                eval_runner=(
+                    ProgramBenchEvalRunner(args.programbench_cmd, workers=args.workers, docker_cpus=args.docker_cpus)
+                    if args.eval
+                    else None
+                ),
             )
         assert comparison is not None
         path = lanes_module.write_comparison(comparison, args.run_dir)
@@ -183,7 +192,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             run_dir=args.run_dir,
             instances=_instances_from_args(args),
             adapter=_build_adapter(args),
-            eval_runner=ProgramBenchEvalRunner(args.programbench_cmd, workers=args.workers),
+            eval_runner=ProgramBenchEvalRunner(args.programbench_cmd, workers=args.workers, docker_cpus=args.docker_cpus),
         )
         assert report is not None
         print(report.summary_table())
