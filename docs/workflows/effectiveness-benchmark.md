@@ -52,16 +52,18 @@ model_provider = "nvidia"
 name = "NVIDIA"
 base_url = "https://integrate.api.nvidia.com/v1"
 env_key = "OPENAI_API_KEY"
-wire_api = "chat"
+wire_api = "responses"
 ```
 
-Check the endpoint answers before spending a matrix on it — a provider that cannot reply
-turns every cell into an agent error that looks like a harness failure:
+Recent codex versions dropped `wire_api = "chat"` and speak only the Responses API, so the
+endpoint has to serve `/v1/responses`.
+
+Check the agent before spending a matrix on it — a provider it cannot talk to turns every
+cell into an agent error that looks like a harness failure. Use the agent itself rather
+than a hand-written HTTP probe, which only proves whatever protocol the probe chose:
 
 ```shell
-curl -sS -X POST "$OPENAI_BASE_URL/chat/completions" \
-  -H "Authorization: Bearer $OPENAI_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"model": "<model-id>", "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]}'
+echo 'Reply with the single word: ok' | codex --ask-for-approval never exec --sandbox read-only -
 ```
 
 ```shell
