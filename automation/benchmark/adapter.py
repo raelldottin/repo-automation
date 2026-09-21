@@ -132,6 +132,8 @@ def _subprocess_runner(command: str, workspace: Path, env: Mapping[str, str], ti
 EXCLUDED_FROM_SUBMISSION = frozenset({".git", RPI_DIR})
 # Per-session agent reports, written next to the submission rather than into it.
 AGENT_SESSIONS_DIR = "agent-sessions"
+# What was actually graded, kept when the tarball itself is not.
+SUBMISSION_MANIFEST_FILENAME = "submission.files.txt"
 
 
 def _archive_workspace(workspace: Path, out_tar: Path) -> None:
@@ -141,6 +143,11 @@ def _archive_workspace(workspace: Path, out_tar: Path) -> None:
             if entry.name in EXCLUDED_FROM_SUBMISSION:
                 continue
             tar.add(entry, arcname=entry.name)
+        members = tar.getnames()
+    # The tarball itself is too large to keep, so the graded contents are unprovable after
+    # the job ends: whether the cell submitted anything, and whether a lane's own phase
+    # artifacts leaked into what was scored. List what went in, next to what came out.
+    out_tar.with_name(SUBMISSION_MANIFEST_FILENAME).write_text("".join(f"{name}\n" for name in members), encoding="utf-8")
 
 
 def _save_phase_artifacts(workspace: Path, out_dir: Path) -> None:

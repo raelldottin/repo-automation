@@ -264,6 +264,7 @@ jobs:
             out/**/effectiveness-report.json
             out/**/run.json
             out/**/*.eval.json
+            out/**/submission.files.txt
             out/**/rpi/*.json
             out/**/agent-sessions/*.json
           if-no-files-found: warn
