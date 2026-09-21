@@ -130,6 +130,8 @@ def _subprocess_runner(command: str, workspace: Path, env: Mapping[str, str], ti
 
 # Never graded: VCS metadata and the lane's own phase artifacts.
 EXCLUDED_FROM_SUBMISSION = frozenset({".git", RPI_DIR})
+# Per-session agent reports, written next to the submission rather than into it.
+AGENT_SESSIONS_DIR = "agent-sessions"
 
 
 def _archive_workspace(workspace: Path, out_tar: Path) -> None:
@@ -188,6 +190,11 @@ class SupervisorAgentAdapter:
         subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
         control_dir = Path(tempfile.mkdtemp(prefix=f"pb-control-{task.instance_id}-"))
 
+        environment = self._run_environment()
+        # Beside the submission, never inside it: one usage + controls report per agent
+        # session, so a result says which model answered and what it was allowed to do.
+        environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(out_tar.parent / AGENT_SESSIONS_DIR)
+
         strategy_result = self._strategy.execute(
             ExecutionContext(
                 repo_root=self._repo_root,
@@ -195,7 +202,7 @@ class SupervisorAgentAdapter:
                 workspace=workspace,
                 control_dir=control_dir,
                 command_template=self._template,
-                env=self._run_environment(),
+                env=environment,
                 timeout_seconds=self._timeout,
                 runner=self._runner,
             )

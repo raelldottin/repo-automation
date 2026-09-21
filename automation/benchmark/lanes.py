@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
-from .adapter import AgentAdapter, SupervisorAgentAdapter
+from .adapter import AGENT_SESSIONS_DIR, AgentAdapter, SupervisorAgentAdapter
 from .evalrunner import EvalRunner
 from .instances import task_spec
 from .jspace import JSpaceUnavailable
@@ -49,6 +49,7 @@ PROVENANCE_ENV_KEYS = (
     "ANTHROPIC_BASE_URL",
     "HERMES_INFERENCE_PROVIDER",
     "HERMES_INFERENCE_MODEL",
+    "HERMES_REVISION",
 )
 _SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
 
@@ -150,6 +151,26 @@ def skip_cell(cell: Cell, run_dir: Path, repo_root: Path, reason: str) -> dict[s
     return provenance
 
 
+def _agent_sessions(instance_dir: Path) -> list[dict[str, Any]]:
+    """What each agent session spent, and what it was allowed to do while spending it.
+
+    Declared settings say what was asked for; the usage report says which model actually
+    answered and how many calls it took. Both are kept, because they can disagree.
+    """
+    sessions_dir = instance_dir / AGENT_SESSIONS_DIR
+    sessions: list[dict[str, Any]] = []
+    for usage_path in sorted(sessions_dir.glob("*.usage.json")):
+        controls_path = usage_path.with_name(usage_path.name.replace(".usage.json", ".controls.json"))
+        session: dict[str, Any] = {"session": usage_path.stem.removesuffix(".usage")}
+        for key, path in (("usage", usage_path), ("controls", controls_path)):
+            try:
+                session[key] = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                session[key] = None
+        sessions.append(session)
+    return sessions
+
+
 def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) -> dict[str, Any]:
     """Attempt one cell and write its provenance record."""
     instance_dir = cell.directory(run_dir)
@@ -167,6 +188,7 @@ def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) 
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "returncode": result.returncode,
+        "agent_sessions": _agent_sessions(instance_dir),
         "strategy": result.strategy.to_dict() if result.strategy is not None else None,
     }
     (instance_dir / PROVENANCE_FILENAME).write_text(json.dumps(provenance, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

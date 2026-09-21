@@ -53,11 +53,47 @@ export HERMES_INFERENCE_MODEL=moonshotai/kimi-k3
 export NVIDIA_API_KEY="$NVIDIA_API_KEY"
 ```
 
-The wrapper runs Hermes with `--safe-mode`. That is not a convenience: it switches off the
-operator's config, `AGENTS.md`/memory injection, plugins and MCP servers, and with them the
-MoA and fallback-provider chains that live in that config. A lane that quietly answered
-from a second model, or arrived with the operator's own J-Space skill already loaded, would
-make `E - D` mean something other than J-Space.
+The wrapper reproduces the deployed Hermes posture and then subtracts what would
+contaminate a lane. It deliberately does **not** pass `--safe-mode`. That flag sets three
+independent controls at once, and one of them — `HERMES_IGNORE_USER_CONFIG` — discards
+`config.yaml` and falls back to Hermes' built-in defaults. A benchmark run on those
+defaults measures shipped Hermes, not the harness anyone operates:
+
+| control | how | what it removes |
+|---|---|---|
+| `HERMES_SAFE_MODE=1` (env) | set by the wrapper | plugins, MCP servers, outbound webhooks, shell hooks |
+| `--ignore-rules` | flag | `AGENTS.md`, `SOUL.md`, `.cursorrules`, memory, preloaded skills |
+| `--toolsets` | flag | 51 of the 59 default tools, including `delegate_task`, `memory`, `session_search` |
+| throwaway `HERMES_HOME` | per invocation | prior sessions and memories |
+| `automation/supervisor/hermes-benchmark.yaml` | copied into that home | *kept*: the deployed Kanban posture, narrowed to one worker |
+
+`HERMES_IGNORE_USER_CONFIG` is left unset, so the config profile loads. Its identity is
+recorded as `config_profile` and `config_sha256` in each session's controls report.
+
+A lane that spawned child agents would not be running the session the lane administered,
+and a lane that wrote memories would hand the next cell context the treatment never gave
+it. For the same reason each invocation gets a throwaway `HERMES_HOME`: sessions and
+memories are per-home, and a measurement of what compaction drops is worthless if the
+dropped context can be recalled.
+
+Because the home is thrown away, it carries no `.env` — **credentials must come from the
+environment**, not from `~/.hermes/.env`.
+
+Hermes ignores config keys it does not recognise, so a key renamed upstream would leave a
+control at its default while `run.json` claimed otherwise. The workflow checks every key in
+the profile against the pinned revision's own `DEFAULT_CONFIG` before spending any budget.
+
+Declared controls are not evidence, so each agent session also writes a usage report next
+to the submission, under `agent-sessions/`, and every cell's `run.json` records both:
+
+```text
+agent_sessions[].usage      model and provider that served each turn, tokens, api_calls
+agent_sessions[].controls   revision, config profile + hash, toolset, HERMES_HOME
+```
+
+`usage.auxiliary.api_calls` is the one that catches a second model answering alongside the
+lane. The profile turns off background review and the title-generation model upgrade, so
+a one-turn session reports zero — which makes it evidence rather than an assumption.
 
 Check the agent before spending a matrix on it — a provider it cannot talk to turns every
 cell into an agent error that looks like a harness failure. Use the agent itself rather
@@ -65,8 +101,13 @@ than a hand-written HTTP probe, which only proves whatever protocol the probe ch
 such probe returned 200 while every agent session was failing:
 
 ```shell
-hermes --safe-mode --usage-file /tmp/usage.json --oneshot 'Reply with the single word: ok'
+REPO_AUTOMATION_HERMES_USAGE_DIR=/tmp/preflight automation/supervisor/run_agent.sh \
+  --repo-root /tmp/scratch-checkout --prompt-file /tmp/prompt.md \
+  --context-file /tmp/context.json --handoff-file /tmp/handoff.json --slice-id preflight
 ```
+
+Drive the wrapper rather than `hermes` directly: that is what a cell runs, so it exercises
+the config profile, the toolset pin and the throwaway home along with transport and auth.
 
 `--usage-file` names the model and provider that actually served the turn. Compare it with
 what you asked for: a silent substitution turns a lane comparison into a comparison between
@@ -197,6 +238,7 @@ sessions each. Start with a few instances before spending money on the full matr
 out/<lane>/r<repeat>/<instance>/submission.tar.gz   graded artefact
 out/<lane>/r<repeat>/<instance>/run.json            provenance + process metrics
 out/<lane>/r<repeat>/<instance>/rpi/                phase artifacts (C–E)
+out/<lane>/r<repeat>/<instance>/agent-sessions/     per-session usage + controls
 out/<lane>/r<repeat>/effectiveness-report.json      ProgramBench score for that cell
 out/lane-comparison.json | lane-comparison.md       the comparison
 ```
@@ -240,8 +282,9 @@ instrumentation and at least three before believing a result.
   therefore measures RPI's value for requirements analysis, *not* for brownfield code
   exploration, which is the case RPI was designed for. A brownfield fixture is needed
   before generalising the result.
-- **Tokens are not observable.** The agent runner returns an exit code, so efficiency is
-  measured in wall clock and agent invocations only.
+- **Tokens are recorded but not compared.** Hermes sessions write token counts into
+  `run.json`; the comparison still reports wall clock and agent invocations only, because
+  the reported metric has to mean the same thing for every runner the seam accepts.
 - **Lane E needs a J-Space checkout to run at all.** It is skipped, not approximated,
   when the pinned artifact is unavailable (see below). A skipped lane has no outcome; do
   not read its zeroes as a treatment effect.

@@ -1,0 +1,63 @@
+# Hermes config profile: kanban-benchmark-v1
+#
+# Copied into a throwaway HERMES_HOME by run_agent.sh. This is the operating posture the
+# benchmark reproduces - the deployed Kanban configuration, narrowed to one worker - so a
+# lane result describes the harness as it is actually run rather than Hermes' shipped
+# defaults.
+#
+# The controls this file sets are NOT reachable by the benchmark toolset
+# (terminal,file,code_execution,todo): a worker cannot call delegate_task or the kanban
+# tools at all. That is deliberate. Same posture, smaller allowed capability surface: if a
+# future toolset change hands a lane one of those tools, it inherits a bounded posture
+# instead of Hermes' defaults of 10 concurrent children and an enabled orchestrator.
+#
+# Every key here is checked against the pinned Hermes revision's DEFAULT_CONFIG before a
+# run (see the benchmark workflow). Hermes ignores keys it does not know, so an unchecked
+# typo would leave a control silently at its default while run.json claimed otherwise.
+#
+# Omitted on purpose, because they do not exist at the pinned revision and would be
+# silently ignored: kanban.max_spawn (use max_in_progress / max_in_progress_per_profile)
+# and auxiliary.compression.max_concurrency (auxiliary.compression is a model block with
+# no concurrency key).
+
+max_concurrent_sessions: 1
+
+kanban:
+  dispatch_in_gateway: true
+  dispatch_interval_seconds: 60
+  max_in_progress: 3
+  max_in_progress_per_profile: 1
+  failure_limit: 2
+  auto_decompose: false
+  auto_decompose_per_tick: 1
+  orchestrator_profile: ""
+
+gateway:
+  api_server:
+    max_concurrent_runs: 1
+
+cron:
+  max_parallel_jobs: 1
+
+delegation:
+  max_concurrent_children: 1
+  max_spawn_depth: 1
+  oneshot_max_children: 1
+  orchestrator_enabled: false
+
+# A second model writing titles or reviewing in the background is a call the lane did not
+# administer. Turning these off is what makes auxiliary.api_calls == 0 in the usage report
+# evidence rather than an assumption.
+auxiliary:
+  title_generation:
+    model_upgrade_enabled: false
+  background_review:
+    enabled: false
+
+compression:
+  idle_compact_after_seconds: 0
+
+# Lane D compacts deliberately and lane E adds J-Space. A MoA preset would answer from a
+# second model and make E - D mean something else.
+moa:
+  active_preset: ""
