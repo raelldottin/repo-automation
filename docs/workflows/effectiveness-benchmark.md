@@ -65,7 +65,16 @@ defaults measures shipped Hermes, not the harness anyone operates:
 | `--ignore-rules` | flag | `AGENTS.md`, `SOUL.md`, `.cursorrules`, memory, preloaded skills |
 | `--toolsets` | flag | 51 of the 59 default tools, including `delegate_task`, `memory`, `session_search` |
 | throwaway `HERMES_HOME` | per invocation | prior sessions and memories |
+| `TERMINAL_CWD=<workspace>` (env) | set by the wrapper | work landing outside the cell's workspace |
 | `automation/supervisor/hermes-benchmark.yaml` | copied into that home | *kept*: the deployed Kanban posture, narrowed to one worker |
+
+`TERMINAL_CWD` is not decoration. `--in DIR` changes the process directory, but the
+terminal, file and code_execution tools resolve their own working directory and prefer
+`TERMINAL_CWD` to it. Left unset, a session writes outside the checkout it was handed:
+the cell archives an empty workspace, ProgramBench scores it `compile_failed`, and the
+next cell opens on top of the previous one's files. That is a silent result, not an
+error, which is why the preflight now makes the agent write a file and checks where it
+landed before any budget is spent.
 
 `HERMES_IGNORE_USER_CONFIG` is left unset, so the config profile loads. Its identity is
 recorded as `config_profile` and `config_sha256` in each session's controls report.

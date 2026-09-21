@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import tarfile
 import tempfile
@@ -228,6 +229,35 @@ class AgentBudgetTests(unittest.TestCase):
             benchmark_adapter._subprocess_runner(command, Path(workspace), os.environ, 1)
             time.sleep(3)
             self.assertFalse(marker.exists(), "a subprocess of the agent survived the budget")
+
+
+class AgentSessionReportTests(unittest.TestCase):
+    """The session reports have to land beside the submission, wherever the run dir is.
+
+    ``--run-dir out`` is relative and the agent runs with the workspace as its working
+    directory, so a relative report path put every usage and controls report inside the
+    workspace: archived into the submission, absent from ``run.json``.
+    """
+
+    def test_the_session_report_directory_is_absolute(self) -> None:
+        captured: dict[str, str] = {}
+
+        def fake_runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            captured["sessions"] = env["REPO_AUTOMATION_HERMES_USAGE_DIR"]
+            return 0
+
+        task = TaskSpec(
+            instance_id="owner__proj.abc1234", repository="owner/proj", commit="abc1234", language="c", difficulty="easy"
+        )
+        adapter = SupervisorAgentAdapter(repo_root=Path.cwd(), runner=fake_runner)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.chdir(tmp):
+                adapter.produce_submission(task, Path("out/A/r1/owner__proj.abc1234/submission.tar.gz"))
+            sessions = Path(captured["sessions"])
+            self.assertTrue(sessions.is_absolute(), sessions)
+            self.assertEqual(
+                Path(tmp).resolve() / "out/A/r1/owner__proj.abc1234" / benchmark_adapter.AGENT_SESSIONS_DIR, sessions
+            )
 
 
 if __name__ == "__main__":

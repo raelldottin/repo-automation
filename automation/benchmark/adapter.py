@@ -193,7 +193,10 @@ class SupervisorAgentAdapter:
         environment = self._run_environment()
         # Beside the submission, never inside it: one usage + controls report per agent
         # session, so a result says which model answered and what it was allowed to do.
-        environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(out_tar.parent / AGENT_SESSIONS_DIR)
+        # Absolute, because the agent runs with the workspace as its working directory and
+        # --run-dir is usually relative: a relative path here wrote the reports into the
+        # workspace, which archived them into the submission and left run.json with none.
+        environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str((out_tar.parent / AGENT_SESSIONS_DIR).resolve())
 
         strategy_result = self._strategy.execute(
             ExecutionContext(
