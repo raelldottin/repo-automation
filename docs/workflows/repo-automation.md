@@ -213,14 +213,15 @@ This applies even in multi-agent workspaces. If another agent leaves dirt in a r
 
 `automation/supervisor/run_agent.sh` is the reusable launch wrapper for fresh slice agents. Its default `auto` mode supports both Codex and Claude Code without changing `policy.agent_command_template` in every consumer queue.
 
-The wrapper chooses Claude Code when it detects that the supervisor was invoked from a Claude Code process tree and a `claude` executable is available. Outside Claude Code it preserves the previous Codex-first behavior: use `codex` when present, then fall back to `claude` if Codex is not installed. Operators can pin a runner with:
+The wrapper chooses Claude Code when it detects that the supervisor was invoked from a Claude Code process tree and a `claude` executable is available. Outside Claude Code it preserves the previous Codex-first behavior: use `codex` when present, then `claude`, then `hermes`. Operators can pin a runner with:
 
 ```bash
 REPO_AUTOMATION_AGENT_RUNNER=claude python3 automation/supervisor/run_next.py
 REPO_AUTOMATION_AGENT_RUNNER=codex python3 automation/supervisor/run_next.py
+REPO_AUTOMATION_AGENT_RUNNER=hermes python3 automation/supervisor/run_next.py
 ```
 
-Codex runs with the existing no-approval, workspace-write invocation. Claude Code runs non-interactively with prompt stdin, `--print`, `--input-format text`, `--no-session-persistence`, `--permission-mode bypassPermissions`, and `--add-dir <repo_root>`.
+Codex runs with the existing no-approval, workspace-write invocation. Claude Code runs non-interactively with prompt stdin, `--print`, `--input-format text`, `--no-session-persistence`, `--permission-mode bypassPermissions`, and `--add-dir <repo_root>`. Hermes runs one-shot with `--safe-mode` and `--in <repo_root>`, so a run carries no operator config, memory, plugins or MCP servers; it takes its provider and model from `HERMES_INFERENCE_PROVIDER` and `HERMES_INFERENCE_MODEL`.
 
 Consumer repositories can override executable names with `REPO_AUTOMATION_CODEX_BIN` or `REPO_AUTOMATION_CLAUDE_BIN`. `OWLORY_CODEX_BIN` remains supported for existing Codex setups. Consumers that require a stricter Claude local policy can set `REPO_AUTOMATION_CLAUDE_PERMISSION_MODE` to another Claude Code permission mode.
 

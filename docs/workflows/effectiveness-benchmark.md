@@ -39,38 +39,40 @@ uv run python -m automation.benchmark score --run-dir path/to/run-dir
 ### Full run (rebuild → eval → score)
 
 `eval` needs Docker and the amd64 cleanroom images, so run it on a native x86_64 Linux
-host (or in CI). Point the agent at an OpenAI-compatible LLM — e.g. NVIDIA:
+host (or in CI).
 
-Current `codex` builds ignore `OPENAI_BASE_URL` and dial `api.openai.com` whatever it says,
-so a non-OpenAI endpoint must be declared as a provider in `~/.codex/config.toml`:
+The benchmark drives Hermes, which reaches NVIDIA directly: provider and model are
+first-class flags, so nothing has to be translated through a second vendor's config file
+or wire protocol. `REPO_AUTOMATION_AGENT_RUNNER=codex|claude` still work; they are just
+more setup for the same thing.
 
-```toml
-model = "qwen/qwen3-coder-480b-a35b-instruct"
-model_provider = "nvidia"
-
-[model_providers.nvidia]
-name = "NVIDIA"
-base_url = "https://integrate.api.nvidia.com/v1"
-env_key = "OPENAI_API_KEY"
-wire_api = "responses"
+```shell
+export REPO_AUTOMATION_AGENT_RUNNER=hermes
+export HERMES_INFERENCE_PROVIDER=nvidia
+export HERMES_INFERENCE_MODEL=moonshotai/kimi-k3
+export NVIDIA_API_KEY="$NVIDIA_API_KEY"
 ```
 
-Recent codex versions dropped `wire_api = "chat"` and speak only the Responses API, so the
-endpoint has to serve `/v1/responses`.
+The wrapper runs Hermes with `--safe-mode`. That is not a convenience: it switches off the
+operator's config, `AGENTS.md`/memory injection, plugins and MCP servers, and with them the
+MoA and fallback-provider chains that live in that config. A lane that quietly answered
+from a second model, or arrived with the operator's own J-Space skill already loaded, would
+make `E - D` mean something other than J-Space.
 
 Check the agent before spending a matrix on it — a provider it cannot talk to turns every
 cell into an agent error that looks like a harness failure. Use the agent itself rather
-than a hand-written HTTP probe, which only proves whatever protocol the probe chose:
+than a hand-written HTTP probe, which only proves whatever protocol the probe chose; one
+such probe returned 200 while every agent session was failing:
 
 ```shell
-echo 'Reply with the single word: ok' | codex --ask-for-approval never exec --sandbox read-only -
+hermes --safe-mode --usage-file /tmp/usage.json --oneshot 'Reply with the single word: ok'
 ```
 
-```shell
-export REPO_AUTOMATION_AGENT_RUNNER=codex
-export OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
-export OPENAI_API_KEY="$NVIDIA_API_KEY"
+`--usage-file` names the model and provider that actually served the turn. Compare it with
+what you asked for: a silent substitution turns a lane comparison into a comparison between
+two different models.
 
+```shell
 uv pip install programbench
 uv run python -m automation.benchmark all --run-dir out --all          # full set
 uv run python -m automation.benchmark all --run-dir out --instances abishekvashok__cmatrix.5c082c6

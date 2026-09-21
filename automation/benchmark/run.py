@@ -8,9 +8,9 @@ Subcommands:
   lanes  Run the A-E effectiveness experiment (lane x repeat x instance matrix).
   compare  Reduce an existing lane matrix to lane-comparison.json/md (no Docker).
 
-Point the harness agent at any OpenAI-compatible endpoint (e.g. NVIDIA) via the runner
-env: REPO_AUTOMATION_AGENT_RUNNER=codex, OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1,
-OPENAI_API_KEY=$NVIDIA_API_KEY.
+Pick the agent and the model it talks to with the runner env, e.g. NVIDIA via Hermes:
+REPO_AUTOMATION_AGENT_RUNNER=hermes, HERMES_INFERENCE_PROVIDER=nvidia,
+HERMES_INFERENCE_MODEL=moonshotai/kimi-k3, NVIDIA_API_KEY=...
 """
 
 from __future__ import annotations
