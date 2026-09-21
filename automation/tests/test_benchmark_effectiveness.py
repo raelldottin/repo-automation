@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tarfile
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -205,6 +206,28 @@ class EvalContainerBudgetTests(unittest.TestCase):
     def test_an_explicit_budget_is_passed_through(self) -> None:
         argv = self._argv(docker_cpus=2, workers=3)
         self.assertEqual(["--workers", "3", "--docker-cpus", "2"], argv[-4:])
+
+
+class AgentBudgetTests(unittest.TestCase):
+    """A cell that runs out of budget must be a recorded failure, not a crash.
+
+    Letting the timeout raise took the whole matrix down with the first slow cell: a
+    dispatched A-E run reported nothing, including for the lane that had finished.
+    """
+
+    def test_a_session_that_outlives_its_budget_reports_a_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            returncode = benchmark_adapter._subprocess_runner("sleep 30", Path(workspace), os.environ, 1)
+        self.assertEqual(benchmark_adapter.AGENT_TIMEOUT_RETURNCODE, returncode)
+
+    def test_the_timeout_collects_what_the_session_spawned(self) -> None:
+        """An abandoned tool subprocess would spend the next cell's wall clock as well."""
+        with tempfile.TemporaryDirectory() as workspace:
+            marker = Path(workspace) / "outlived-the-kill"
+            command = f"( sleep 2; touch {marker} ) & sleep 30"
+            benchmark_adapter._subprocess_runner(command, Path(workspace), os.environ, 1)
+            time.sleep(3)
+            self.assertFalse(marker.exists(), "a subprocess of the agent survived the budget")
 
 
 if __name__ == "__main__":
