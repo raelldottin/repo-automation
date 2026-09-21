@@ -147,7 +147,7 @@ jobs:
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/agent-preflight"
           git -C "$RUNNER_TEMP/agent-preflight" init --quiet
-          printf 'Reply with the single word: ok\n' > "$RUNNER_TEMP/preflight-prompt.md"
+          printf 'Create a file named agent-was-here.txt containing the single word ok in your current working directory, then reply with the single word: ok\n' > "$RUNNER_TEMP/preflight-prompt.md"
           echo '{}' > "$RUNNER_TEMP/preflight-context.json"
           if ! REPO_AUTOMATION_HERMES_USAGE_DIR="$RUNNER_TEMP/preflight-session" \
             automation/supervisor/run_agent.sh \
@@ -164,6 +164,16 @@ jobs:
           fi
           grep -qiE '\bok\b' /tmp/preflight.log || {
             echo "::error::The agent ran but produced no usable reply; see the log above." >&2
+            exit 1
+          }
+          # Where the work lands, not just whether a turn came back. The agent's tools
+          # resolve their own working directory, and when it was not the checkout the
+          # harness handed over, every cell archived an empty workspace, scored
+          # compile_failed, and the next cell started on top of the last one's files -
+          # after 2h16m of agent budget. Ninety seconds here says so instead.
+          test -f "$RUNNER_TEMP/agent-preflight/agent-was-here.txt" || {
+            echo "::error::The agent did not write inside the repo root it was given; its work would not reach the submission." >&2
+            find "$RUNNER_TEMP/agent-preflight" "$HOME" -maxdepth 1 -name 'agent-was-here.txt' >&2 || true
             exit 1
           }
           python - "$RUNNER_TEMP/preflight-session" <<'PY'

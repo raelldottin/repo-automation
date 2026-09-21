@@ -216,6 +216,12 @@ case "$agent_runner" in
     #   --ignore-rules       AGENTS.md, SOUL.md, .cursorrules, memory, preloaded skills
     #   config.yaml          honoured - this is the posture under test
     export HERMES_SAFE_MODE=1
+    # Where the tools actually run. --in changes the process directory, but the terminal,
+    # file and code_execution tools resolve their own working directory and prefer
+    # TERMINAL_CWD to it. Left unset, a session edits files outside the checkout it was
+    # handed: a benchmark cell then archives an empty workspace, scores compile_failed,
+    # and the next cell inherits the last one's files from wherever the tools defaulted to.
+    export TERMINAL_CWD="$repo_root"
     # Pin the toolset: the default CLI set hands the model delegate_task, memory,
     # session_search and the skills tools, so a session could spawn a second agent, keep
     # state for the next one, or load a skill of its own choosing - none of which is the
@@ -242,10 +248,10 @@ case "$agent_runner" in
       # allowed to do. Record the controls beside it, from the same variables that set them,
       # and hash the config so a cell states exactly which posture produced it.
       config_sha="$(sha256_of "$hermes_config")"
-      printf '{"runner":"hermes","hermes_revision":"%s","config_profile":"kanban-benchmark-v1","config_sha256":"%s","safe_mode_env":true,"ignore_rules":true,"ignore_user_config":false,"toolsets":["terminal","file","code_execution","todo"],"provider":"%s","model":"%s","slice_id":"%s","hermes_home":"%s"}\n' \
+      printf '{"runner":"hermes","hermes_revision":"%s","config_profile":"kanban-benchmark-v1","config_sha256":"%s","safe_mode_env":true,"ignore_rules":true,"ignore_user_config":false,"toolsets":["terminal","file","code_execution","todo"],"provider":"%s","model":"%s","slice_id":"%s","hermes_home":"%s","terminal_cwd":"%s"}\n' \
         "${HERMES_REVISION:-unknown}" "$config_sha" \
         "${HERMES_INFERENCE_PROVIDER:-}" "${HERMES_INFERENCE_MODEL:-}" \
-        "$slice_id" "$HERMES_HOME" > "$session_stem.controls.json"
+        "$slice_id" "$HERMES_HOME" "$TERMINAL_CWD" > "$session_stem.controls.json"
     fi
     exec "$hermes_bin" "${hermes_args[@]}" --oneshot "$(cat "$prompt_file")"
     ;;

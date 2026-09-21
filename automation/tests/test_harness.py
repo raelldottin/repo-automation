@@ -427,6 +427,7 @@ class AutomationHarnessTests(unittest.TestCase):
   printf 'home:%s\\n' "${HERMES_HOME:-}"
   printf 'safemode:%s\\n' "${HERMES_SAFE_MODE:-}"
   printf 'ignoreconfig:%s\\n' "${HERMES_IGNORE_USER_CONFIG:-}"
+  printf 'termcwd:%s\\n' "${TERMINAL_CWD:-}"
 } > "$CAPTURE_FILE"
 """,
             )
@@ -470,6 +471,11 @@ class AutomationHarnessTests(unittest.TestCase):
             self.assertIn("arg:--oneshot", capture)
             self.assertIn(f"arg:{prompt}", capture)
             self.assertIn(f"cwd:{repo_root}", capture)
+            # The agent's tools pick their own working directory and prefer TERMINAL_CWD to
+            # the process one, so --in alone let a session write outside the checkout it was
+            # given: the benchmark archived an empty workspace and scored every lane
+            # compile_failed while the work sat in the home directory.
+            self.assertIn(f"termcwd:{repo_root}", capture)
             self.assertIn("slice:slice-c", capture)
             self.assertFalse((repo_root / "pwned").exists())
             self.assertFalse((self.repo_root / "pwned").exists())
@@ -509,6 +515,7 @@ class AutomationHarnessTests(unittest.TestCase):
             )
             self.assertEqual("slice-c", recorded["slice_id"])
             self.assertEqual(home, recorded["hermes_home"])
+            self.assertEqual(str(repo_root), recorded["terminal_cwd"])
             # The usage report and the controls that qualify it name the same session.
             usage_arg = Path(args[args.index("--usage-file") + 1])
             self.assertEqual(controls[0].name.replace(".controls.json", ".usage.json"), usage_arg.name)
