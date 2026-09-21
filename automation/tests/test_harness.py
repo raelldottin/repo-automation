@@ -423,13 +423,17 @@ class AutomationHarnessTests(unittest.TestCase):
   for arg in "$@"; do printf 'arg:%s\\n' "$arg"; done
   printf 'cwd:%s\\n' "$PWD"
   printf 'slice:%s\\n' "${REPO_AUTOMATION_SUPERVISOR_SLICE_ID:-}"
+  printf 'home:%s\\n' "${HERMES_HOME:-}"
 } > "$CAPTURE_FILE"
 """,
             )
+            usage_dir = temp_path / "sessions"
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
             env["CAPTURE_FILE"] = str(capture_path)
             env["REPO_AUTOMATION_AGENT_RUNNER"] = "hermes"
+            env["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(usage_dir)
+            env["HERMES_HOME"] = str(temp_path / "shared-home")
 
             result = subprocess.run(
                 [
@@ -464,6 +468,28 @@ class AutomationHarnessTests(unittest.TestCase):
             self.assertIn("slice:slice-c", capture)
             self.assertFalse((repo_root / "pwned").exists())
             self.assertFalse((self.repo_root / "pwned").exists())
+            # Safe mode leaves the default toolset alone, which includes delegate_task,
+            # memory and the skills tools. Pinning it is what keeps a session to one agent.
+            self.assertIn("arg:--toolsets", capture)
+            self.assertIn("arg:terminal,file,code_execution,todo", capture)
+            # A throwaway home per invocation: a shared one carries sessions/ and memories/
+            # from the previous session into the next.
+            lines = capture.splitlines()
+            args = [line.removeprefix("arg:") for line in lines if line.startswith("arg:")]
+            home = next(line.removeprefix("home:") for line in lines if line.startswith("home:"))
+            self.assertNotEqual(str(temp_path / "shared-home"), home)
+            self.assertTrue(Path(home).is_dir())
+
+            controls = sorted(usage_dir.glob("*.controls.json"))
+            self.assertEqual(1, len(controls), f"expected one controls report, got {controls}")
+            recorded = json.loads(controls[0].read_text(encoding="utf-8"))
+            self.assertEqual("terminal,file,code_execution,todo", recorded["toolsets"])
+            self.assertTrue(recorded["safe_mode"])
+            self.assertEqual("slice-c", recorded["slice_id"])
+            self.assertEqual(home, recorded["hermes_home"])
+            # The usage report and the controls that qualify it name the same session.
+            usage_arg = Path(args[args.index("--usage-file") + 1])
+            self.assertEqual(controls[0].name.replace(".controls.json", ".usage.json"), usage_arg.name)
 
     def test_format_agent_command_shell_quotes_placeholder_values(self) -> None:
         formatted = format_agent_command(

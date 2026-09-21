@@ -63,6 +63,8 @@ jobs:
       HERMES_INFERENCE_MODEL: ${{ inputs.model }}
       NVIDIA_BASE_URL: https://integrate.api.nvidia.com/v1
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      # Job-level so every run.json records which Hermes produced the result.
+      HERMES_REVISION: 14efb46089250e8b9e56e59b74291cf8dce8b207
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -94,8 +96,6 @@ jobs:
       # names. Bump HERMES_REVISION deliberately; an unpinned agent silently changes the
       # execution engine between runs that are supposed to be comparable.
       - name: Install agent CLI (hermes)
-        env:
-          HERMES_REVISION: 14efb46089250e8b9e56e59b74291cf8dce8b207
         run: |
           # Fetch the one pinned revision, not the history: a full clone of this repo is
           # ~1GB, a single-revision fetch is ~80MB.
@@ -206,4 +206,5 @@ jobs:
             out/**/run.json
             out/**/*.eval.json
             out/**/rpi/*.json
+            out/**/agent-sessions/*.json
           if-no-files-found: warn

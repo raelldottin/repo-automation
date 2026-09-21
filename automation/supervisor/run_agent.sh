@@ -18,6 +18,7 @@ Runner selection:
   REPO_AUTOMATION_CLAUDE_BIN overrides the Claude Code executable.
   REPO_AUTOMATION_CLAUDE_PERMISSION_MODE overrides the Claude permission mode.
   REPO_AUTOMATION_HERMES_BIN overrides the Hermes executable.
+  REPO_AUTOMATION_HERMES_USAGE_DIR collects a per-session usage and controls report.
   HERMES_INFERENCE_PROVIDER and HERMES_INFERENCE_MODEL choose what Hermes talks to.
 
 Legacy OWLORY_CODEX_BIN remains supported for Codex executable overrides.
@@ -196,8 +197,28 @@ case "$agent_runner" in
     # fallback-provider chains live in the user config it ignores, so a session cannot
     # silently change model or provider partway through and be scored as one treatment.
     # Provider and model come from HERMES_INFERENCE_PROVIDER/HERMES_INFERENCE_MODEL.
-    exec "$hermes_bin" --safe-mode \
-      --in "$repo_root" \
-      --oneshot "$(cat "$prompt_file")"
+    #
+    # Safe mode does not narrow the toolset, so pin it. The default CLI set also hands the
+    # model delegate_task, memory and the skills tools; a session could then spawn a second
+    # agent, keep state for the next one, or load a skill of its own choosing, none of which
+    # is the treatment the caller administered.
+    hermes_toolsets="terminal,file,code_execution,todo"
+    # One throwaway HERMES_HOME per invocation. sessions/ and memories/ are per-home, so a
+    # shared one would let a later session read what an earlier one saw - and a measurement
+    # of what compaction drops is worthless if the dropped context can be recalled.
+    # ponytail: left for the OS to reap, like the workspace dirs the adapter makes.
+    HERMES_HOME="$(mktemp -d "${TMPDIR:-/tmp}/repo-automation-hermes-XXXXXX")"
+    export HERMES_HOME
+    hermes_args=(--safe-mode --in "$repo_root" --toolsets "$hermes_toolsets")
+    if [[ -n "${REPO_AUTOMATION_HERMES_USAGE_DIR:-}" ]]; then
+      mkdir -p "$REPO_AUTOMATION_HERMES_USAGE_DIR"
+      session_stem="$REPO_AUTOMATION_HERMES_USAGE_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+      hermes_args+=(--usage-file "$session_stem.usage.json")
+      # The usage report says what the session spent; it does not say what the session was
+      # allowed to do. Record the controls beside it, from the same variables that set them.
+      printf '{"runner":"hermes","safe_mode":true,"toolsets":"%s","slice_id":"%s","hermes_home":"%s"}\n' \
+        "$hermes_toolsets" "$slice_id" "$HERMES_HOME" > "$session_stem.controls.json"
+    fi
+    exec "$hermes_bin" "${hermes_args[@]}" --oneshot "$(cat "$prompt_file")"
     ;;
 esac
