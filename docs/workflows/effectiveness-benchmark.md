@@ -212,6 +212,11 @@ lane-by-lane, so provider load or time of day cannot masquerade as a lane effect
 The time budget is per *instance*, not per session: a three-session lane must not get
 three times the wall clock of lane A, or it wins on budget rather than on treatment.
 
+A session that runs the budget out is killed, with its tool subprocesses, and the phase is
+recorded with returncode 124 — the same code `timeout(1)` reports. The cell counts as a
+failure and the matrix continues; one slow cell does not take the finished lanes with it.
+Repeated 124s mean the budget is too small for the instance, not that the lane lost.
+
 Phase artifacts live in `<workspace>/.rpi/` and are excluded from the submission archive,
 so what ProgramBench grades is the same kind of thing in every lane.
 
