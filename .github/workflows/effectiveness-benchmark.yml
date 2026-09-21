@@ -64,7 +64,7 @@ jobs:
       NVIDIA_BASE_URL: https://integrate.api.nvidia.com/v1
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       # Job-level so every run.json records which Hermes produced the result.
-      HERMES_REVISION: 14efb46089250e8b9e56e59b74291cf8dce8b207
+      HERMES_REVISION: b6a87db515e493faba25e4a09d9e15dac6ddab37
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -109,19 +109,53 @@ jobs:
           uv pip install --python "$RUNNER_TEMP/hermes-venv/bin/python" -e "$RUNNER_TEMP/hermes-agent"
           echo "$RUNNER_TEMP/hermes-venv/bin" >> "$GITHUB_PATH"
 
-      # Preflight with the agent itself, not with an HTTP request that resembles what the
-      # agent sends. A hand-written probe only proves the endpoint answers the protocol the
-      # probe chose; one returned 200 while every agent session was dying on a config key
-      # the agent had dropped. One trivial session exercises config, transport, auth and
-      # model id together, and the usage report says which model actually answered.
+      # Hermes silently ignores config keys it does not know, so a key that was renamed
+      # or removed upstream would leave a control at its default while run.json claimed the
+      # benchmark posture. Check every key against the pinned revision's own defaults.
+      - name: Verify the benchmark config matches the pinned agent
+        run: |
+          "$RUNNER_TEMP/hermes-venv/bin/python" - <<'PY'
+          import os, sys, yaml
+          sys.path.insert(0, os.environ["RUNNER_TEMP"] + "/hermes-agent")
+          from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+          profile = yaml.safe_load(open("automation/supervisor/hermes-benchmark.yaml"))
+
+          def unknown(node, defaults, prefix=""):
+              for key, value in node.items():
+                  path = f"{prefix}{key}"
+                  if not isinstance(defaults, dict) or key not in defaults:
+                      yield path
+                  elif isinstance(value, dict):
+                      yield from unknown(value, defaults[key], f"{path}.")
+
+          missing = list(unknown(profile, DEFAULT_CONFIG))
+          if missing:
+              print(f"::error::Keys absent from Hermes {os.environ['HERMES_REVISION']}: {missing}")
+              sys.exit(1)
+          print(f"benchmark config: every key resolves against {os.environ['HERMES_REVISION']}")
+          PY
+
+      # Preflight with the wrapper the benchmark actually calls, not with a hand-written
+      # invocation that resembles it. A probe only proves whatever it chose to do: one
+      # returned 200 while every agent session was dying on a config key the agent had
+      # dropped. Driving run_agent.sh exercises the config profile, the toolset pin, the
+      # throwaway HERMES_HOME, transport, auth and the model id together - and leaves the
+      # same usage and controls reports a real cell produces.
       - name: Verify the agent can complete one session
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/agent-preflight"
           git -C "$RUNNER_TEMP/agent-preflight" init --quiet
-          if ! hermes --safe-mode --in "$RUNNER_TEMP/agent-preflight" \
-            --usage-file "$RUNNER_TEMP/preflight-usage.json" \
-            --oneshot 'Reply with the single word: ok' 2>&1 | tee /tmp/preflight.log; then
+          printf 'Reply with the single word: ok\n' > "$RUNNER_TEMP/preflight-prompt.md"
+          echo '{}' > "$RUNNER_TEMP/preflight-context.json"
+          if ! REPO_AUTOMATION_HERMES_USAGE_DIR="$RUNNER_TEMP/preflight-session" \
+            automation/supervisor/run_agent.sh \
+              --repo-root "$RUNNER_TEMP/agent-preflight" \
+              --prompt-file "$RUNNER_TEMP/preflight-prompt.md" \
+              --context-file "$RUNNER_TEMP/preflight-context.json" \
+              --handoff-file "$RUNNER_TEMP/preflight-handoff.json" \
+              --slice-id preflight 2>&1 | tee /tmp/preflight.log; then
             echo "::error::The agent could not complete a trivial session with ${{ inputs.model }}." >&2
             echo "Models this key can reach:" >&2
             curl -sS "$NVIDIA_BASE_URL/models" -H "Authorization: Bearer $NVIDIA_API_KEY" \
@@ -132,13 +166,17 @@ jobs:
             echo "::error::The agent ran but produced no usable reply; see the log above." >&2
             exit 1
           }
+          python - "$RUNNER_TEMP/preflight-session" <<'PY'
+          import glob, json, os, sys
+
+          session = sys.argv[1]
+          usage = json.load(open(glob.glob(f"{session}/*.usage.json")[0]))
+          controls = json.load(open(glob.glob(f"{session}/*.controls.json")[0]))
+          print("preflight usage:", json.dumps(usage))
+          print("preflight controls:", json.dumps(controls))
+
           # Hermes can serve a turn from a different model than the one asked for. Comparing
           # lanes across two models measures nothing, so refuse the run rather than record it.
-          python - "$RUNNER_TEMP/preflight-usage.json" <<'PY'
-          import json, os, sys
-
-          usage = json.load(open(sys.argv[1]))
-          print("preflight usage:", json.dumps(usage))
           served = {"model": usage.get("model"), "provider": usage.get("provider")}
           asked = {
               "model": os.environ["HERMES_INFERENCE_MODEL"],
@@ -146,6 +184,17 @@ jobs:
           }
           if served != asked:
               print(f"::error::Asked for {asked} but the turn was served by {served}.")
+              sys.exit(1)
+
+          # The config profile turns off background review and the title-generation model
+          # upgrade. If it had not loaded, a second model would be answering alongside the
+          # lane - so a non-zero auxiliary count means the posture is not the one on record.
+          auxiliary = usage.get("auxiliary", {}).get("api_calls")
+          if auxiliary != 0:
+              print(f"::error::Config profile not in effect: {auxiliary} auxiliary calls in a one-turn session.")
+              sys.exit(1)
+          if controls.get("ignore_user_config") is not False:
+              print("::error::The session discarded the benchmark config profile.")
               sys.exit(1)
           PY
 

@@ -19,6 +19,7 @@ Runner selection:
   REPO_AUTOMATION_CLAUDE_PERMISSION_MODE overrides the Claude permission mode.
   REPO_AUTOMATION_HERMES_BIN overrides the Hermes executable.
   REPO_AUTOMATION_HERMES_USAGE_DIR collects a per-session usage and controls report.
+  HERMES_REVISION is recorded in that report; set it to the pinned Hermes commit.
   HERMES_INFERENCE_PROVIDER and HERMES_INFERENCE_MODEL choose what Hermes talks to.
 
 Legacy OWLORY_CODEX_BIN remains supported for Codex executable overrides.
@@ -46,6 +47,17 @@ process_tree_contains() {
 command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
+
+# sha256sum on Linux, shasum on macOS. Both CI and a developer laptop run this script.
+sha256_of() {
+  if command_exists sha256sum; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 running_under_claude_code() {
   [[ -n "${CLAUDECODE:-}" || -n "${CLAUDE_CODE:-}" || -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]] ||
@@ -192,16 +204,22 @@ case "$agent_runner" in
       echo "Hermes CLI not found. Set REPO_AUTOMATION_HERMES_BIN or install hermes." >&2
       exit 69
     fi
-    # --safe-mode is what makes a Hermes run comparable to the other runners: no user
-    # config, no AGENTS.md or memory injection, no plugins, no MCP servers. The MoA and
-    # fallback-provider chains live in the user config it ignores, so a session cannot
-    # silently change model or provider partway through and be scored as one treatment.
-    # Provider and model come from HERMES_INFERENCE_PROVIDER/HERMES_INFERENCE_MODEL.
+    # Reproduce the deployed Hermes posture, then subtract what would contaminate a lane.
     #
-    # Safe mode does not narrow the toolset, so pin it. The default CLI set also hands the
-    # model delegate_task, memory and the skills tools; a session could then spawn a second
-    # agent, keep state for the next one, or load a skill of its own choosing, none of which
-    # is the treatment the caller administered.
+    # NOT --safe-mode. That flag sets three independent controls at once, and one of them,
+    # HERMES_IGNORE_USER_CONFIG, discards config.yaml and falls back to Hermes' built-in
+    # defaults - 10 concurrent delegation children, an enabled orchestrator, background
+    # review on. A benchmark that ran on those defaults would not be measuring the harness
+    # anyone operates. So set the other two directly and leave the config loading:
+    #
+    #   HERMES_SAFE_MODE=1   plugins, MCP servers, outbound webhooks, shell hooks
+    #   --ignore-rules       AGENTS.md, SOUL.md, .cursorrules, memory, preloaded skills
+    #   config.yaml          honoured - this is the posture under test
+    export HERMES_SAFE_MODE=1
+    # Pin the toolset: the default CLI set hands the model delegate_task, memory,
+    # session_search and the skills tools, so a session could spawn a second agent, keep
+    # state for the next one, or load a skill of its own choosing - none of which is the
+    # treatment the caller administered.
     hermes_toolsets="terminal,file,code_execution,todo"
     # One throwaway HERMES_HOME per invocation. sessions/ and memories/ are per-home, so a
     # shared one would let a later session read what an earlier one saw - and a measurement
@@ -209,15 +227,25 @@ case "$agent_runner" in
     # ponytail: left for the OS to reap, like the workspace dirs the adapter makes.
     HERMES_HOME="$(mktemp -d "${TMPDIR:-/tmp}/repo-automation-hermes-XXXXXX")"
     export HERMES_HOME
-    hermes_args=(--safe-mode --in "$repo_root" --toolsets "$hermes_toolsets")
+    hermes_config="$script_dir/hermes-benchmark.yaml"
+    if [[ ! -f "$hermes_config" ]]; then
+      echo "Hermes benchmark config not found: $hermes_config" >&2
+      exit 69
+    fi
+    cp "$hermes_config" "$HERMES_HOME/config.yaml"
+    hermes_args=(--ignore-rules --in "$repo_root" --toolsets "$hermes_toolsets")
     if [[ -n "${REPO_AUTOMATION_HERMES_USAGE_DIR:-}" ]]; then
       mkdir -p "$REPO_AUTOMATION_HERMES_USAGE_DIR"
       session_stem="$REPO_AUTOMATION_HERMES_USAGE_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$$"
       hermes_args+=(--usage-file "$session_stem.usage.json")
       # The usage report says what the session spent; it does not say what the session was
-      # allowed to do. Record the controls beside it, from the same variables that set them.
-      printf '{"runner":"hermes","safe_mode":true,"toolsets":"%s","slice_id":"%s","hermes_home":"%s"}\n' \
-        "$hermes_toolsets" "$slice_id" "$HERMES_HOME" > "$session_stem.controls.json"
+      # allowed to do. Record the controls beside it, from the same variables that set them,
+      # and hash the config so a cell states exactly which posture produced it.
+      config_sha="$(sha256_of "$hermes_config")"
+      printf '{"runner":"hermes","hermes_revision":"%s","config_profile":"kanban-benchmark-v1","config_sha256":"%s","safe_mode_env":true,"ignore_rules":true,"ignore_user_config":false,"toolsets":["terminal","file","code_execution","todo"],"provider":"%s","model":"%s","slice_id":"%s","hermes_home":"%s"}\n' \
+        "${HERMES_REVISION:-unknown}" "$config_sha" \
+        "${HERMES_INFERENCE_PROVIDER:-}" "${HERMES_INFERENCE_MODEL:-}" \
+        "$slice_id" "$HERMES_HOME" > "$session_stem.controls.json"
     fi
     exec "$hermes_bin" "${hermes_args[@]}" --oneshot "$(cat "$prompt_file")"
     ;;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -398,7 +399,7 @@ class AutomationHarnessTests(unittest.TestCase):
             self.assertIn(f"cwd:{repo_root}", capture)
             self.assertIn("stdin:codex prompt", capture)
 
-    def test_agent_wrapper_launches_hermes_in_safe_mode_with_the_prompt_verbatim(self) -> None:
+    def test_agent_wrapper_launches_hermes_in_the_benchmark_posture_with_the_prompt_verbatim(self) -> None:
         script_path = self.repo_root / "automation/supervisor/run_agent.sh"
         # Hermes takes the prompt as an argument rather than on stdin, so the wrapper has
         # to hand it over without a shell ever looking at it.
@@ -424,6 +425,8 @@ class AutomationHarnessTests(unittest.TestCase):
   printf 'cwd:%s\\n' "$PWD"
   printf 'slice:%s\\n' "${REPO_AUTOMATION_SUPERVISOR_SLICE_ID:-}"
   printf 'home:%s\\n' "${HERMES_HOME:-}"
+  printf 'safemode:%s\\n' "${HERMES_SAFE_MODE:-}"
+  printf 'ignoreconfig:%s\\n' "${HERMES_IGNORE_USER_CONFIG:-}"
 } > "$CAPTURE_FILE"
 """,
             )
@@ -457,9 +460,11 @@ class AutomationHarnessTests(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, result.stderr)
             capture = capture_path.read_text(encoding="utf-8")
-            # Without --safe-mode the run inherits the operator's config, memory, plugins
-            # and MoA/fallback chains, and stops being one comparable treatment.
-            self.assertIn("arg:--safe-mode", capture)
+            # --ignore-rules, not --safe-mode. The flag also sets HERMES_IGNORE_USER_CONFIG,
+            # which discards the benchmark config profile and falls back to Hermes' own
+            # defaults - a different operating posture than the one being measured.
+            self.assertIn("arg:--ignore-rules", capture)
+            self.assertNotIn("arg:--safe-mode", capture)
             self.assertIn("arg:--in", capture)
             self.assertIn(f"arg:{repo_root}", capture)
             self.assertIn("arg:--oneshot", capture)
@@ -468,8 +473,8 @@ class AutomationHarnessTests(unittest.TestCase):
             self.assertIn("slice:slice-c", capture)
             self.assertFalse((repo_root / "pwned").exists())
             self.assertFalse((self.repo_root / "pwned").exists())
-            # Safe mode leaves the default toolset alone, which includes delegate_task,
-            # memory and the skills tools. Pinning it is what keeps a session to one agent.
+            # Nothing else narrows the toolset: the default CLI set includes delegate_task,
+            # memory and session_search. Pinning it is what keeps a session to one agent.
             self.assertIn("arg:--toolsets", capture)
             self.assertIn("arg:terminal,file,code_execution,todo", capture)
             # A throwaway home per invocation: a shared one carries sessions/ and memories/
@@ -480,11 +485,28 @@ class AutomationHarnessTests(unittest.TestCase):
             self.assertNotEqual(str(temp_path / "shared-home"), home)
             self.assertTrue(Path(home).is_dir())
 
+            # Plugins, MCP servers, webhooks and shell hooks still go off, via the env var
+            # rather than the flag, so the config profile survives.
+            self.assertIn("safemode:1", capture)
+            self.assertEqual("", next(line.removeprefix("ignoreconfig:") for line in lines if line.startswith("ignoreconfig:")))
+            # The profile is what makes the benchmark reproduce the deployed posture rather
+            # than Hermes' defaults, so it has to arrive in the throwaway home intact.
+            profile = self.repo_root / "automation/supervisor/hermes-benchmark.yaml"
+            self.assertEqual(profile.read_bytes(), (Path(home) / "config.yaml").read_bytes())
+
             controls = sorted(usage_dir.glob("*.controls.json"))
             self.assertEqual(1, len(controls), f"expected one controls report, got {controls}")
             recorded = json.loads(controls[0].read_text(encoding="utf-8"))
-            self.assertEqual("terminal,file,code_execution,todo", recorded["toolsets"])
-            self.assertTrue(recorded["safe_mode"])
+            self.assertEqual(["terminal", "file", "code_execution", "todo"], recorded["toolsets"])
+            self.assertTrue(recorded["safe_mode_env"])
+            self.assertTrue(recorded["ignore_rules"])
+            # The claim the whole revision turns on: the config profile was not discarded.
+            self.assertFalse(recorded["ignore_user_config"])
+            self.assertEqual("kanban-benchmark-v1", recorded["config_profile"])
+            self.assertEqual(
+                hashlib.sha256((self.repo_root / "automation/supervisor/hermes-benchmark.yaml").read_bytes()).hexdigest(),
+                recorded["config_sha256"],
+            )
             self.assertEqual("slice-c", recorded["slice_id"])
             self.assertEqual(home, recorded["hermes_home"])
             # The usage report and the controls that qualify it name the same session.
