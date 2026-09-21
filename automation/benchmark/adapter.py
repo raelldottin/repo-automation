@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import tarfile
 import tempfile
@@ -33,6 +34,8 @@ from .instances import TaskSpec
 from .strategies import RPI_DIR, ExecutionContext, ExecutionStrategy, SliceContextStrategy, StrategyResult
 
 DEFAULT_TIMEOUT_SECONDS = 1800
+# What timeout(1) reports, so the code means the same thing here as it does in a shell.
+AGENT_TIMEOUT_RETURNCODE = 124
 # Allow the agent to touch the whole rebuild workspace.
 WORKSPACE_ALLOWED_PATH = "./"
 # Effectively unbounded diff budget: a from-scratch rebuild is not a bounded slice.
@@ -109,8 +112,20 @@ def _default_command_template(repo_root: Path) -> str:
 
 
 def _subprocess_runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
-    result = subprocess.run(command, cwd=workspace, shell=True, env=dict(env), timeout=timeout)
-    return result.returncode
+    """Run one agent session, and treat exhausting its budget as a result, not a crash.
+
+    The budget exists to bound a cell. If running it out raised, one slow cell would take
+    the rest of the matrix with it and the run would report nothing at all - including for
+    the lanes that finished. A timed-out session is a failed phase like any other.
+    """
+    # Its own process group, so the timeout can collect the whole session: the agent spawns
+    # tool subprocesses, and one left behind would spend the next cell's wall clock too.
+    with subprocess.Popen(command, cwd=workspace, shell=True, env=dict(env), start_new_session=True) as agent:
+        try:
+            return agent.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(agent.pid, signal.SIGKILL)
+            return AGENT_TIMEOUT_RETURNCODE
 
 
 # Never graded: VCS metadata and the lane's own phase artifacts.
