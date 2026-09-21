@@ -55,17 +55,21 @@ jobs:
     runs-on: ubuntu-latest # native x86_64: ProgramBench cleanroom images run without emulation.
     timeout-minutes: 360
     env:
-      # The harness agent talks to NVIDIA's OpenAI-compatible endpoint.
-      REPO_AUTOMATION_AGENT_RUNNER: codex
-      OPENAI_BASE_URL: https://integrate.api.nvidia.com/v1
-      OPENAI_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      # Hermes drives every lane. The runner is held fixed on purpose: A-E differ only in
+      # context and workflow, so a lane that changed execution engine would measure the
+      # engine, not the treatment.
+      REPO_AUTOMATION_AGENT_RUNNER: hermes
+      HERMES_INFERENCE_PROVIDER: nvidia
+      HERMES_INFERENCE_MODEL: ${{ inputs.model }}
+      NVIDIA_BASE_URL: https://integrate.api.nvidia.com/v1
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Require NVIDIA_API_KEY
         run: |
-          if [ -z "${OPENAI_API_KEY}" ]; then
+          if [ -z "${NVIDIA_API_KEY}" ]; then
             echo "::error::Repository secret NVIDIA_API_KEY is not set; the agent cannot run." >&2
             exit 1
           fi
@@ -85,39 +89,42 @@ jobs:
           uv sync
           uv pip install programbench
 
-      - name: Install agent CLI (codex)
-        run: npm install -g @openai/codex
-
-      # Current codex builds ignore OPENAI_BASE_URL and dial api.openai.com regardless, so
-      # the endpoint has to be declared as a provider. Without this every agent session
-      # fails 401 against the wrong host while the harness records it as an agent error.
-      - name: Point the agent at the NVIDIA endpoint
+      # Hermes refuses to build a wheel and is distributed as a checkout, so pin it the
+      # way the J-Space artifact is pinned: one named revision, installed from the tree it
+      # names. Bump HERMES_REVISION deliberately; an unpinned agent silently changes the
+      # execution engine between runs that are supposed to be comparable.
+      - name: Install agent CLI (hermes)
+        env:
+          HERMES_REVISION: 14efb46089250e8b9e56e59b74291cf8dce8b207
         run: |
-          mkdir -p "$HOME/.codex"
-          cat > "$HOME/.codex/config.toml" <<TOML
-          model = "${{ inputs.model }}"
-          model_provider = "nvidia"
-
-          [model_providers.nvidia]
-          name = "NVIDIA"
-          base_url = "$OPENAI_BASE_URL"
-          env_key = "OPENAI_API_KEY"
-          wire_api = "responses"
-          TOML
+          # Fetch the one pinned revision, not the history: a full clone of this repo is
+          # ~1GB, a single-revision fetch is ~80MB.
+          git init --quiet "$RUNNER_TEMP/hermes-agent"
+          git -C "$RUNNER_TEMP/hermes-agent" remote add origin https://github.com/NousResearch/hermes-agent
+          git -C "$RUNNER_TEMP/hermes-agent" fetch --quiet --depth 1 origin "$HERMES_REVISION"
+          git -C "$RUNNER_TEMP/hermes-agent" checkout --quiet FETCH_HEAD
+          # The venv lives outside the checkout: Hermes warns that a venv inside the tree
+          # the agent operates on can be wiped by the agent mid-session.
+          uv venv "$RUNNER_TEMP/hermes-venv" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/hermes-venv/bin/python" -e "$RUNNER_TEMP/hermes-agent"
+          echo "$RUNNER_TEMP/hermes-venv/bin" >> "$GITHUB_PATH"
 
       # Preflight with the agent itself, not with an HTTP request that resembles what the
       # agent sends. A hand-written probe only proves the endpoint answers the protocol the
-      # probe chose; it passed while codex was failing on a config key it had dropped. One
-      # trivial session exercises config, wire protocol, auth and model id together.
+      # probe chose; one returned 200 while every agent session was dying on a config key
+      # the agent had dropped. One trivial session exercises config, transport, auth and
+      # model id together, and the usage report says which model actually answered.
       - name: Verify the agent can complete one session
         run: |
+          set -o pipefail
           mkdir -p "$RUNNER_TEMP/agent-preflight"
           git -C "$RUNNER_TEMP/agent-preflight" init --quiet
-          if ! echo 'Reply with the single word: ok' | codex --ask-for-approval never exec \
-            -C "$RUNNER_TEMP/agent-preflight" --sandbox read-only - 2>&1 | tee /tmp/preflight.log; then
+          if ! hermes --safe-mode --in "$RUNNER_TEMP/agent-preflight" \
+            --usage-file "$RUNNER_TEMP/preflight-usage.json" \
+            --oneshot 'Reply with the single word: ok' 2>&1 | tee /tmp/preflight.log; then
             echo "::error::The agent could not complete a trivial session with ${{ inputs.model }}." >&2
             echo "Models this key can reach:" >&2
-            curl -sS "$OPENAI_BASE_URL/models" -H "Authorization: Bearer $OPENAI_API_KEY" \
+            curl -sS "$NVIDIA_BASE_URL/models" -H "Authorization: Bearer $NVIDIA_API_KEY" \
               | python -c "import json,sys; [print(' ', m['id']) for m in json.load(sys.stdin).get('data', [])[:40]]" >&2 || true
             exit 1
           fi
@@ -125,6 +132,22 @@ jobs:
             echo "::error::The agent ran but produced no usable reply; see the log above." >&2
             exit 1
           }
+          # Hermes can serve a turn from a different model than the one asked for. Comparing
+          # lanes across two models measures nothing, so refuse the run rather than record it.
+          python - "$RUNNER_TEMP/preflight-usage.json" <<'PY'
+          import json, os, sys
+
+          usage = json.load(open(sys.argv[1]))
+          print("preflight usage:", json.dumps(usage))
+          served = {"model": usage.get("model"), "provider": usage.get("provider")}
+          asked = {
+              "model": os.environ["HERMES_INFERENCE_MODEL"],
+              "provider": os.environ["HERMES_INFERENCE_PROVIDER"],
+          }
+          if served != asked:
+              print(f"::error::Asked for {asked} but the turn was served by {served}.")
+              sys.exit(1)
+          PY
 
       - name: Run benchmark (rebuild -> eval -> score)
         if: inputs.experiment != true

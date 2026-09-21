@@ -398,6 +398,73 @@ class AutomationHarnessTests(unittest.TestCase):
             self.assertIn(f"cwd:{repo_root}", capture)
             self.assertIn("stdin:codex prompt", capture)
 
+    def test_agent_wrapper_launches_hermes_in_safe_mode_with_the_prompt_verbatim(self) -> None:
+        script_path = self.repo_root / "automation/supervisor/run_agent.sh"
+        # Hermes takes the prompt as an argument rather than on stdin, so the wrapper has
+        # to hand it over without a shell ever looking at it.
+        prompt = "hermes prompt $(touch pwned) `touch pwned` \"quoted\" 'single'"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repo_root = temp_path / "repo"
+            repo_root.mkdir()
+            (repo_root / ".git").mkdir()
+            prompt_path = temp_path / "prompt.md"
+            prompt_path.write_text(prompt, encoding="utf-8")
+            context_path = temp_path / "context.json"
+            context_path.write_text("{}", encoding="utf-8")
+            handoff_path = temp_path / "handoff.json"
+            capture_path = temp_path / "capture.txt"
+            bin_dir = temp_path / "bin"
+            bin_dir.mkdir()
+            self.write_fake_executable(
+                bin_dir / "hermes",
+                """#!/usr/bin/env bash
+{
+  for arg in "$@"; do printf 'arg:%s\\n' "$arg"; done
+  printf 'cwd:%s\\n' "$PWD"
+  printf 'slice:%s\\n' "${REPO_AUTOMATION_SUPERVISOR_SLICE_ID:-}"
+} > "$CAPTURE_FILE"
+""",
+            )
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+            env["CAPTURE_FILE"] = str(capture_path)
+            env["REPO_AUTOMATION_AGENT_RUNNER"] = "hermes"
+
+            result = subprocess.run(
+                [
+                    str(script_path),
+                    "--repo-root",
+                    str(repo_root),
+                    "--prompt-file",
+                    str(prompt_path),
+                    "--context-file",
+                    str(context_path),
+                    "--handoff-file",
+                    str(handoff_path),
+                    "--slice-id",
+                    "slice-c",
+                ],
+                cwd=self.repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            capture = capture_path.read_text(encoding="utf-8")
+            # Without --safe-mode the run inherits the operator's config, memory, plugins
+            # and MoA/fallback chains, and stops being one comparable treatment.
+            self.assertIn("arg:--safe-mode", capture)
+            self.assertIn("arg:--in", capture)
+            self.assertIn(f"arg:{repo_root}", capture)
+            self.assertIn("arg:--oneshot", capture)
+            self.assertIn(f"arg:{prompt}", capture)
+            self.assertIn(f"cwd:{repo_root}", capture)
+            self.assertIn("slice:slice-c", capture)
+            self.assertFalse((repo_root / "pwned").exists())
+            self.assertFalse((self.repo_root / "pwned").exists())
+
     def test_format_agent_command_shell_quotes_placeholder_values(self) -> None:
         formatted = format_agent_command(
             command_template=(

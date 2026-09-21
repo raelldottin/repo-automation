@@ -13,10 +13,12 @@ Usage: automation/supervisor/run_agent.sh \
 Launch a fresh agent run for one supervisor-selected slice.
 
 Runner selection:
-  REPO_AUTOMATION_AGENT_RUNNER=auto|codex|claude (default: auto)
+  REPO_AUTOMATION_AGENT_RUNNER=auto|codex|claude|hermes (default: auto)
   REPO_AUTOMATION_CODEX_BIN overrides the Codex executable.
   REPO_AUTOMATION_CLAUDE_BIN overrides the Claude Code executable.
   REPO_AUTOMATION_CLAUDE_PERMISSION_MODE overrides the Claude permission mode.
+  REPO_AUTOMATION_HERMES_BIN overrides the Hermes executable.
+  HERMES_INFERENCE_PROVIDER and HERMES_INFERENCE_MODEL choose what Hermes talks to.
 
 Legacy OWLORY_CODEX_BIN remains supported for Codex executable overrides.
 USAGE
@@ -53,6 +55,7 @@ select_agent_runner() {
   local requested_runner="$1"
   local codex_bin="$2"
   local claude_bin="$3"
+  local hermes_bin="$4"
 
   case "$requested_runner" in
     auto)
@@ -62,17 +65,19 @@ select_agent_runner() {
         printf 'codex\n'
       elif command_exists "$claude_bin"; then
         printf 'claude\n'
+      elif command_exists "$hermes_bin"; then
+        printf 'hermes\n'
       else
-        echo "No supported agent CLI found. Install Codex or Claude Code, or set REPO_AUTOMATION_AGENT_RUNNER with a matching binary override." >&2
+        echo "No supported agent CLI found. Install Codex, Claude Code or Hermes, or set REPO_AUTOMATION_AGENT_RUNNER with a matching binary override." >&2
         return 69
       fi
       ;;
-    codex|claude)
+    codex|claude|hermes)
       printf '%s\n' "$requested_runner"
       ;;
     *)
       echo "Unsupported REPO_AUTOMATION_AGENT_RUNNER: $requested_runner" >&2
-      echo "Expected one of: auto, codex, claude." >&2
+      echo "Expected one of: auto, codex, claude, hermes." >&2
       return 64
       ;;
   esac
@@ -146,7 +151,8 @@ fi
 
 codex_bin="${REPO_AUTOMATION_CODEX_BIN:-${OWLORY_CODEX_BIN:-codex}}"
 claude_bin="${REPO_AUTOMATION_CLAUDE_BIN:-claude}"
-agent_runner="$(select_agent_runner "${REPO_AUTOMATION_AGENT_RUNNER:-auto}" "$codex_bin" "$claude_bin")"
+hermes_bin="${REPO_AUTOMATION_HERMES_BIN:-hermes}"
+agent_runner="$(select_agent_runner "${REPO_AUTOMATION_AGENT_RUNNER:-auto}" "$codex_bin" "$claude_bin" "$hermes_bin")"
 
 export REPO_AUTOMATION_SUPERVISOR_CONTEXT_FILE="$context_file"
 export REPO_AUTOMATION_SUPERVISOR_HANDOFF_FILE="$handoff_file"
@@ -179,5 +185,19 @@ case "$agent_runner" in
       --permission-mode "${REPO_AUTOMATION_CLAUDE_PERMISSION_MODE:-bypassPermissions}" \
       --add-dir "$repo_root" \
       < "$prompt_file"
+    ;;
+  hermes)
+    if ! command_exists "$hermes_bin"; then
+      echo "Hermes CLI not found. Set REPO_AUTOMATION_HERMES_BIN or install hermes." >&2
+      exit 69
+    fi
+    # --safe-mode is what makes a Hermes run comparable to the other runners: no user
+    # config, no AGENTS.md or memory injection, no plugins, no MCP servers. The MoA and
+    # fallback-provider chains live in the user config it ignores, so a session cannot
+    # silently change model or provider partway through and be scored as one treatment.
+    # Provider and model come from HERMES_INFERENCE_PROVIDER/HERMES_INFERENCE_MODEL.
+    exec "$hermes_bin" --safe-mode \
+      --in "$repo_root" \
+      --oneshot "$(cat "$prompt_file")"
     ;;
 esac

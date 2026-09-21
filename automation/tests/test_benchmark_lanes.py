@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -299,6 +301,25 @@ class MatrixTests(unittest.TestCase):
         self.assertEqual(3, provenance["strategy"]["agent_invocations"])
         self.assertNotEqual("unknown", provenance["repo_automation_sha"])
         self.assertIn("started_at", provenance)
+
+    def test_provenance_names_the_runner_and_the_model_but_never_the_key(self) -> None:
+        """A lane result is only reproducible if it records what executed it."""
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "REPO_AUTOMATION_AGENT_RUNNER": "hermes",
+                "HERMES_INFERENCE_PROVIDER": "nvidia",
+                "HERMES_INFERENCE_MODEL": "moonshotai/kimi-k3",
+                "NVIDIA_API_KEY": "sk-should-never-be-recorded",
+            },
+            clear=False,
+        ):
+            fingerprint = lanes_module._environment_fingerprint()
+
+        self.assertEqual("hermes", fingerprint["REPO_AUTOMATION_AGENT_RUNNER"])
+        self.assertEqual("nvidia", fingerprint["HERMES_INFERENCE_PROVIDER"])
+        self.assertEqual("moonshotai/kimi-k3", fingerprint["HERMES_INFERENCE_MODEL"])
+        self.assertNotIn("sk-should-never-be-recorded", json.dumps(fingerprint))
 
     def test_an_unresolvable_jspace_skips_lane_e_instead_of_running_lane_d(self) -> None:
         agents: list[FakeAgent] = []
