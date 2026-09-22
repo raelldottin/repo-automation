@@ -42,6 +42,22 @@ RPI_DIR = ".rpi"
 # information is not compaction, so lane D must be able to fail to preserve something.
 COMPACT_BUDGET_CHARS = 4000
 
+# The lane ceiling these phase budgets are written against; a different instance budget
+# scales them proportionally, so the profile below always describes a whole lane.
+LANE_CEILING_SECONDS = 2700
+# Fixed ceilings, not one fungible remainder. A single "remaining" counter let the first
+# phase eat the lane: in run 35650966066, lane D spent 1799 of 1800 seconds researching
+# and implement got one, so no multi-phase lane submitted anything. Ceilings also keep the
+# decomposition honest - C never reclaims the compaction slots D and E spend, so D - C is
+# the cost of compaction rather than compaction plus whatever C did with the spare time.
+PHASE_CEILING_SECONDS: dict[str, int] = {
+    "research": 420,
+    "research_compact": 360,
+    "plan": 300,
+    "plan_compact": 360,
+    "implement": 1260,
+}
+
 RESEARCH_ARTIFACT = "research.json"
 PLAN_ARTIFACT = "plan.json"
 RESEARCH_COMPACT_ARTIFACT = "research.compact.json"
@@ -56,6 +72,7 @@ class PhaseResult:
     returncode: int
     seconds: float
     prompt_chars: int
+    budget_seconds: int = 0
     artifact_chars: int = 0
     artifact_valid: Optional[bool] = None
     artifact_errors: tuple[str, ...] = ()
@@ -65,6 +82,7 @@ class PhaseResult:
             "phase": self.phase,
             "returncode": self.returncode,
             "seconds": round(self.seconds, 3),
+            "budget_seconds": self.budget_seconds,
             "prompt_chars": self.prompt_chars,
             "artifact_chars": self.artifact_chars,
             "artifact_valid": self.artifact_valid,
@@ -81,6 +99,9 @@ class StrategyResult:
     phases: tuple[PhaseResult, ...] = ()
     compaction: dict[str, Any] = field(default_factory=dict)
     jspace: Optional[dict[str, Any]] = None
+    # The ceilings this lane ran under. Part of the treatment, not an implementation
+    # detail: change them and D - C stops meaning what it meant in the previous run.
+    phase_budgets: dict[str, int] = field(default_factory=dict)
 
     @property
     def agent_invocations(self) -> int:
@@ -104,6 +125,7 @@ class StrategyResult:
             "phases": [phase.to_dict() for phase in self.phases],
             "compaction": self.compaction,
             "jspace": self.jspace,
+            "phase_budgets": self.phase_budgets,
         }
 
 
@@ -342,19 +364,26 @@ def run_phase(
         slice_id=f"{ctx.task.instance_id}:{phase}",
     )
 
+    budget = max(remaining_seconds, 1)
     started = time.monotonic()
-    returncode = ctx.runner(command, ctx.workspace, ctx.env, max(remaining_seconds, 1))
+    returncode = ctx.runner(command, ctx.workspace, ctx.env, budget)
     elapsed = time.monotonic() - started
-    return PhaseResult(phase=phase, returncode=returncode, seconds=elapsed, prompt_chars=len(prompt_text))
+    return PhaseResult(phase=phase, returncode=returncode, seconds=elapsed, budget_seconds=budget, prompt_chars=len(prompt_text))
 
 
 class _BudgetedRun:
-    """Spend one instance-wide time budget across however many sessions a lane uses."""
+    """Spend one instance-wide time budget across however many sessions a lane uses.
 
-    def __init__(self, ctx: ExecutionContext) -> None:
+    A lane with per-phase ceilings spends each phase's own allowance, so an overrunning
+    research phase is cut off at its ceiling instead of taking implement's time with it.
+    A lane without them (A, B) is one session and gets the whole instance budget.
+    """
+
+    def __init__(self, ctx: ExecutionContext, ceilings: Optional[Mapping[str, int]] = None) -> None:
         self._ctx = ctx
         self._started = time.monotonic()
         self.phases: list[PhaseResult] = []
+        self.budgets = _scaled_ceilings(ceilings, ctx.timeout_seconds) if ceilings else {}
 
     @property
     def remaining(self) -> int:
@@ -366,9 +395,18 @@ class _BudgetedRun:
         return self.remaining <= 0
 
     def phase(self, name: str, prompt_text: str, context_data: dict[str, Any]) -> PhaseResult:
-        result = run_phase(self._ctx, name, prompt_text, context_data, self.remaining)
+        # The instance budget stays the backstop: ceilings sum to it, but a lane must not
+        # outlive it if a phase overruns its own kill.
+        allowed = min(self.budgets.get(name, self.remaining), self.remaining)
+        result = run_phase(self._ctx, name, prompt_text, context_data, allowed)
         self.phases.append(result)
         return result
+
+
+def _scaled_ceilings(ceilings: Mapping[str, int], timeout_seconds: int) -> dict[str, int]:
+    """Hold the profile's shape when the instance budget is not the ceiling it was written for."""
+    scale = timeout_seconds / LANE_CEILING_SECONDS
+    return {phase: max(int(round(seconds * scale)), 1) for phase, seconds in ceilings.items()}
 
 
 # --------------------------------------------------------------------------------------
@@ -389,7 +427,12 @@ class OneSessionStrategy:
         )
         run = _BudgetedRun(ctx)
         result = run.phase("implement", prompt, {"objective": ctx.task.objective})
-        return StrategyResult(lane=self.name, returncode=result.returncode, phases=tuple(run.phases))
+        return StrategyResult(
+            lane=self.name,
+            returncode=result.returncode,
+            phases=tuple(run.phases),
+            phase_budgets={"implement": ctx.timeout_seconds},
+        )
 
 
 class SliceContextStrategy:
@@ -419,7 +462,12 @@ class SliceContextStrategy:
         )
         run = _BudgetedRun(ctx)
         result = run.phase("implement", prompt_text, context_bundle)
-        return StrategyResult(lane=self.name, returncode=result.returncode, phases=tuple(run.phases))
+        return StrategyResult(
+            lane=self.name,
+            returncode=result.returncode,
+            phases=tuple(run.phases),
+            phase_budgets={"implement": ctx.timeout_seconds},
+        )
 
 
 class RpiStrategy:
@@ -483,7 +531,7 @@ class RpiStrategy:
         return (compacted if compacted is not None else data), stats
 
     def execute(self, ctx: ExecutionContext) -> StrategyResult:
-        run = _BudgetedRun(ctx)
+        run = _BudgetedRun(ctx, ceilings=PHASE_CEILING_SECONDS)
         compaction_stats: dict[str, Any] = {}
 
         research_prompt = compose_prompt(
@@ -534,6 +582,7 @@ class RpiStrategy:
             phases=tuple(run.phases),
             compaction=compaction_stats,
             jspace=self.jspace.provenance() if self.jspace is not None else None,
+            phase_budgets=dict(run.budgets),
         )
 
 
@@ -559,6 +608,8 @@ def build_strategy(lane: str) -> ExecutionStrategy:
 
 __all__ = [
     "ALL_LANES",
+    "LANE_CEILING_SECONDS",
+    "PHASE_CEILING_SECONDS",
     "ArtifactSpec",
     "ExecutionContext",
     "ExecutionStrategy",

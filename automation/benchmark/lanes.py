@@ -156,15 +156,20 @@ def _agent_sessions(instance_dir: Path) -> list[dict[str, Any]]:
 
     Declared settings say what was asked for; the usage report says which model actually
     answered and how many calls it took. Both are kept, because they can disagree.
+
+    Keyed on either file, not on the usage report: a session killed at its budget never
+    writes one, and keying on usage alone deleted those sessions from the record. Lane D
+    of run 35650966066 reported no agent sessions at all while having run two.
     """
     sessions_dir = instance_dir / AGENT_SESSIONS_DIR
+    reports = {"usage": ".usage.json", "controls": ".controls.json"}
+    stems = sorted({path.name[: -len(suffix)] for suffix in reports.values() for path in sessions_dir.glob(f"*{suffix}")})
     sessions: list[dict[str, Any]] = []
-    for usage_path in sorted(sessions_dir.glob("*.usage.json")):
-        controls_path = usage_path.with_name(usage_path.name.replace(".usage.json", ".controls.json"))
-        session: dict[str, Any] = {"session": usage_path.stem.removesuffix(".usage")}
-        for key, path in (("usage", usage_path), ("controls", controls_path)):
+    for stem in stems:
+        session: dict[str, Any] = {"session": stem}
+        for key, suffix in reports.items():
             try:
-                session[key] = json.loads(path.read_text(encoding="utf-8"))
+                session[key] = json.loads((sessions_dir / f"{stem}{suffix}").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 session[key] = None
         sessions.append(session)
