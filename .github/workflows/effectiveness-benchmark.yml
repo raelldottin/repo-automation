@@ -37,7 +37,10 @@ on:
       model:
         description: "Model id served by the NVIDIA endpoint"
         type: string
-        default: "qwen/qwen3-coder-480b-a35b-instruct"
+        # The runtime the campaign is now baselined on. An omitted input must not quietly
+        # test a model nothing else in the campaign is measured against - the nightly
+        # schedule passes no inputs at all, so this default is what it runs.
+        default: "z-ai/glm-5.3"
       probe:
         description: "Diagnostic only: run one research phase over the stream-json transport instead of any benchmark. Not a lane; its output is not comparable with a cell."
         type: boolean
