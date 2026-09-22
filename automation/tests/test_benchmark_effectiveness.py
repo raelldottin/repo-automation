@@ -249,6 +249,28 @@ class AgentBudgetTests(unittest.TestCase):
             returncode = benchmark_adapter._subprocess_runner("sleep 30", Path(workspace), os.environ, 1)
         self.assertEqual(benchmark_adapter.AGENT_TIMEOUT_RETURNCODE, returncode)
 
+    def test_a_session_is_asked_to_stop_before_it_is_compelled_to(self) -> None:
+        """SIGKILL takes the session's buffered output with it; SIGTERM lets it flush."""
+        with tempfile.TemporaryDirectory() as workspace:
+            flushed = Path(workspace) / "flushed-before-exit"
+            command = f"trap 'touch {flushed}; exit 0' TERM; sleep 30"
+            returncode = benchmark_adapter._subprocess_runner(command, Path(workspace), os.environ, 1)
+            self.assertTrue(flushed.exists(), "the session was killed without being asked to stop")
+        self.assertEqual(benchmark_adapter.AGENT_TIMEOUT_RETURNCODE, returncode)
+
+    def test_a_session_that_ignores_the_signal_still_cannot_outlive_its_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            started = time.monotonic()
+            with unittest.mock.patch.object(benchmark_adapter, "AGENT_TERMINATION_GRACE_SECONDS", 1):
+                returncode = benchmark_adapter._subprocess_runner("trap '' TERM; sleep 30", Path(workspace), os.environ, 1)
+            elapsed = time.monotonic() - started
+        self.assertEqual(benchmark_adapter.AGENT_TIMEOUT_RETURNCODE, returncode)
+        self.assertLess(elapsed, 5, "the grace became a second budget")
+
+    def test_the_grace_is_short_enough_to_stay_shutdown_time(self) -> None:
+        self.assertLessEqual(benchmark_adapter.AGENT_TERMINATION_GRACE_SECONDS, 15)
+        self.assertGreater(benchmark_adapter.AGENT_TERMINATION_GRACE_SECONDS, 0)
+
     def test_the_timeout_collects_what_the_session_spawned(self) -> None:
         """An abandoned tool subprocess would spend the next cell's wall clock as well."""
         with tempfile.TemporaryDirectory() as workspace:

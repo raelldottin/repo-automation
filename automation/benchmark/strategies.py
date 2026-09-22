@@ -38,6 +38,9 @@ from .jspace import JSpaceArtifact, JSpaceUnavailable
 # and are stripped from the graded submission.
 RPI_DIR = ".rpi"
 
+# What timeout(1) reports, so the code means the same thing here as it does in a shell.
+AGENT_TIMEOUT_RETURNCODE = 124
+
 # Strict output budget for intentional compaction. Compaction that cannot lose
 # information is not compaction, so lane D must be able to fail to preserve something.
 COMPACT_BUDGET_CHARS = 4000
@@ -71,6 +74,36 @@ PLAN_ARTIFACT = "plan.json"
 RESEARCH_COMPACT_ARTIFACT = "research.compact.json"
 PLAN_COMPACT_ARTIFACT = "plan.compact.json"
 
+# How a phase ended, with administration held apart from validity. Being killed at a
+# ceiling is administrative: the treatment ran and ran out of road, which is a legitimate
+# outcome the benchmark has to be able to report. A required artifact that never arrived
+# is not: the next phase was never handed what this one owed it, so whatever ran after it
+# was not the treatment. Run 35736569601 could not tell the two apart and reported six
+# cells that never produced research.json as merely censored.
+PHASE_COMPLETED = "completed"
+PHASE_CENSORED = "censored"
+PHASE_TREATMENT_INVALID = "treatment_invalid"
+PHASE_FAILED = "failed"
+
+TREATMENT_VALID = "valid"
+TREATMENT_INVALID = "invalid"
+REQUIRED_ARTIFACT_MISSING = "required_phase_artifact_missing"
+
+
+def phase_state(returncode: Optional[int], artifact_valid: Optional[bool]) -> str:
+    """Classify one phase from how it ended and what it left behind.
+
+    ``artifact_valid`` is ``None`` where the phase owed no artifact (implement, and the
+    single-session lanes) and ``False`` only where one was required and did not arrive.
+    An invalid artifact outranks the return code: a phase that exits 0 having written
+    nothing has still not administered its treatment.
+    """
+    if artifact_valid is False:
+        return PHASE_TREATMENT_INVALID
+    if returncode == AGENT_TIMEOUT_RETURNCODE:
+        return PHASE_CENSORED
+    return PHASE_COMPLETED if not returncode else PHASE_FAILED
+
 
 @dataclass
 class PhaseResult:
@@ -84,12 +117,21 @@ class PhaseResult:
     artifact_chars: int = 0
     artifact_valid: Optional[bool] = None
     artifact_errors: tuple[str, ...] = ()
+    # Time after the budget kill, spent flushing and shutting down rather than working.
+    # Kept out of ``seconds`` so the phase is still charged exactly what it was granted.
+    grace_seconds: float = 0.0
+
+    @property
+    def state(self) -> str:
+        return phase_state(self.returncode, self.artifact_valid)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "phase": self.phase,
+            "state": self.state,
             "returncode": self.returncode,
             "seconds": round(self.seconds, 3),
+            "grace_seconds": round(self.grace_seconds, 3),
             "budget_seconds": self.budget_seconds,
             "prompt_chars": self.prompt_chars,
             "artifact_chars": self.artifact_chars,
@@ -110,6 +152,20 @@ class StrategyResult:
     # The ceilings this lane ran under. Part of the treatment, not an implementation
     # detail: change them and D - C stops meaning what it meant in the previous run.
     phase_budgets: dict[str, int] = field(default_factory=dict)
+    # Set where a lane stopped because a required handoff never arrived. Left unset, the
+    # verdict is read off the phases themselves.
+    treatment_invalid_reason: Optional[str] = None
+    treatment_invalid_phase: Optional[str] = None
+
+    @property
+    def treatment_validity(self) -> str:
+        """Did this lane administer its treatment, whatever its score says?
+
+        A cell that never produced a required artifact is not a lane that did badly; it is
+        a lane that did not run. Its score stays as a diagnostic and leaves the deltas.
+        """
+        invalid = self.treatment_invalid_reason or any(phase.state == PHASE_TREATMENT_INVALID for phase in self.phases)
+        return TREATMENT_INVALID if invalid else TREATMENT_VALID
 
     @property
     def agent_invocations(self) -> int:
@@ -134,7 +190,24 @@ class StrategyResult:
             "compaction": self.compaction,
             "jspace": self.jspace,
             "phase_budgets": self.phase_budgets,
+            "treatment_validity": self.treatment_validity,
+            "treatment_invalid_reason": self._invalid_reason(),
+            "treatment_invalid_phase": self._invalid_phase(),
         }
+
+    def _first_invalid_phase(self) -> Optional[PhaseResult]:
+        return next((phase for phase in self.phases if phase.state == PHASE_TREATMENT_INVALID), None)
+
+    def _invalid_reason(self) -> Optional[str]:
+        if self.treatment_invalid_reason:
+            return self.treatment_invalid_reason
+        return REQUIRED_ARTIFACT_MISSING if self._first_invalid_phase() else None
+
+    def _invalid_phase(self) -> Optional[str]:
+        if self.treatment_invalid_reason:
+            return self.treatment_invalid_phase
+        phase = self._first_invalid_phase()
+        return phase.phase if phase else None
 
 
 @dataclass
@@ -242,8 +315,13 @@ It must be a single JSON object with exactly these keys:
 {template}
 ```
 
-Write the file before you finish. Nothing else you produce in this phase is read by the
-next one.
+Create `{RPI_DIR}/{filename}` immediately, as a schema-valid initial checkpoint: every key
+present, lists empty where you have nothing yet. Update it as you work, and keep every
+update schema-valid. The artifact is this phase's durable state; your chat output is not,
+and nothing else you produce here is read by the next phase.
+
+This session can be stopped at any moment without warning. Whatever is in the file at that
+moment is what this phase produced, so never hold results back for one final write.
 """
 
 _RESEARCH_BODY = """## Phase: Research
@@ -376,7 +454,17 @@ def run_phase(
     started = time.monotonic()
     returncode = ctx.runner(command, ctx.workspace, ctx.env, budget)
     elapsed = time.monotonic() - started
-    return PhaseResult(phase=phase, returncode=returncode, seconds=elapsed, budget_seconds=budget, prompt_chars=len(prompt_text))
+    # A killed session is cut off at its budget; anything past that is the shutdown grace
+    # the runner allows it to flush in, which the treatment did not get to spend.
+    worked = min(elapsed, budget) if returncode == AGENT_TIMEOUT_RETURNCODE else elapsed
+    return PhaseResult(
+        phase=phase,
+        returncode=returncode,
+        seconds=worked,
+        grace_seconds=elapsed - worked,
+        budget_seconds=budget,
+        prompt_chars=len(prompt_text),
+    )
 
 
 class _BudgetedRun:
@@ -515,7 +603,11 @@ class RpiStrategy:
         data: Any,
         out_filename: str,
     ) -> tuple[Any, dict[str, Any]]:
-        """Run a compaction session; fall back to the raw artifact if it fails."""
+        """Run a compaction session; fall back to the raw artifact if it fails.
+
+        The fallback keeps the lane running, but the failed phase still reports itself as
+        treatment_invalid: a D cell whose compaction never landed is lane C under D's name.
+        """
         raw_json = json.dumps(data, indent=2, ensure_ascii=False)
         prompt = compose_prompt(
             f"# Compact the {label} artifact",
@@ -540,6 +632,35 @@ class RpiStrategy:
         }
         return (compacted if compacted is not None else data), stats
 
+    def _result(self, run: _BudgetedRun, compaction_stats: dict[str, Any], **extra: Any) -> StrategyResult:
+        return StrategyResult(
+            lane=self.name,
+            phases=tuple(run.phases),
+            compaction=compaction_stats,
+            jspace=self.jspace.provenance() if self.jspace is not None else None,
+            phase_budgets=dict(run.budgets),
+            **extra,
+        )
+
+    def _not_administered(
+        self, run: _BudgetedRun, compaction_stats: dict[str, Any], phase: Optional[str] = None
+    ) -> StrategyResult:
+        """Stop the lane rather than invent the handoff the phase owed the next one.
+
+        Every multi-phase cell of runs 35715428932 and 35736569601 lost research.json and
+        carried on against a stub the harness wrote for itself, so what got scored was some
+        other treatment wearing this lane's name. There is nothing to salvage here: an
+        implement phase given a fabricated plan measures the fabrication.
+        """
+        last = run.phases[-1] if run.phases else None
+        return self._result(
+            run,
+            compaction_stats,
+            returncode=last.returncode if last is not None else AGENT_TIMEOUT_RETURNCODE,
+            treatment_invalid_reason=REQUIRED_ARTIFACT_MISSING,
+            treatment_invalid_phase=phase or (last.phase if last is not None else None),
+        )
+
     def execute(self, ctx: ExecutionContext) -> StrategyResult:
         run = _BudgetedRun(ctx, ceilings=PHASE_CEILING_SECONDS)
         compaction_stats: dict[str, Any] = {}
@@ -553,31 +674,31 @@ class RpiStrategy:
         )
         research_result = run.phase("research", research_prompt, {"objective": ctx.task.objective})
         research = self._validate(research_result, RESEARCH_SPEC, ctx.workspace, RESEARCH_ARTIFACT)
-        if research is None:
-            research = {"task": ctx.task.objective, "findings": [], "unknowns": ["research phase produced no artifact"]}
+        if not research_result.artifact_valid:
+            return self._not_administered(run, compaction_stats)
 
         if self.compaction and not run.exhausted:
             research, stats = self._compact(run, ctx, "research", RESEARCH_SPEC, research, RESEARCH_COMPACT_ARTIFACT)
             compaction_stats.update(stats)
 
-        if not run.exhausted:
-            plan_prompt = compose_prompt(
-                f"# Plan: {ctx.task.repository}",
-                envelope(ctx.task),
-                _PLAN_BODY.format(research=json.dumps(research, indent=2, ensure_ascii=False)),
-                artifact_instruction(PLAN_SPEC),
-                jspace=self.jspace,
-            )
-            plan_result = run.phase("plan", plan_prompt, {"research": research})
-            plan = self._validate(plan_result, PLAN_SPEC, ctx.workspace, PLAN_ARTIFACT)
-            if plan is None:
-                plan = {"goal": ctx.task.objective, "implementation_steps": [], "risks": ["plan phase produced no artifact"]}
+        if run.exhausted:
+            return self._not_administered(run, compaction_stats, phase="plan")
 
-            if self.compaction and not run.exhausted:
-                plan, stats = self._compact(run, ctx, "plan", PLAN_SPEC, plan, PLAN_COMPACT_ARTIFACT)
-                compaction_stats.update(stats)
-        else:
-            plan = {"goal": ctx.task.objective, "implementation_steps": [], "risks": ["budget exhausted before planning"]}
+        plan_prompt = compose_prompt(
+            f"# Plan: {ctx.task.repository}",
+            envelope(ctx.task),
+            _PLAN_BODY.format(research=json.dumps(research, indent=2, ensure_ascii=False)),
+            artifact_instruction(PLAN_SPEC),
+            jspace=self.jspace,
+        )
+        plan_result = run.phase("plan", plan_prompt, {"research": research})
+        plan = self._validate(plan_result, PLAN_SPEC, ctx.workspace, PLAN_ARTIFACT)
+        if not plan_result.artifact_valid:
+            return self._not_administered(run, compaction_stats)
+
+        if self.compaction and not run.exhausted:
+            plan, stats = self._compact(run, ctx, "plan", PLAN_SPEC, plan, PLAN_COMPACT_ARTIFACT)
+            compaction_stats.update(stats)
 
         implement_prompt = compose_prompt(
             f"# Implement: {ctx.task.repository}",
@@ -586,14 +707,7 @@ class RpiStrategy:
             jspace=self.jspace,
         )
         implement_result = run.phase("implement", implement_prompt, {"plan": plan})
-        return StrategyResult(
-            lane=self.name,
-            returncode=implement_result.returncode,
-            phases=tuple(run.phases),
-            compaction=compaction_stats,
-            jspace=self.jspace.provenance() if self.jspace is not None else None,
-            phase_budgets=dict(run.budgets),
-        )
+        return self._result(run, compaction_stats, returncode=implement_result.returncode)
 
 
 LANE_FACTORIES = {
@@ -617,6 +731,7 @@ def build_strategy(lane: str) -> ExecutionStrategy:
 
 
 __all__ = [
+    "AGENT_TIMEOUT_RETURNCODE",
     "ALL_LANES",
     "LANE_CEILING_SECONDS",
     "PHASE_CEILING_SECONDS",
@@ -626,14 +741,22 @@ __all__ = [
     "JSpaceArtifact",
     "JSpaceUnavailable",
     "OneSessionStrategy",
+    "PHASE_CENSORED",
+    "PHASE_COMPLETED",
+    "PHASE_FAILED",
+    "PHASE_TREATMENT_INVALID",
     "PLAN_SPEC",
     "PhaseResult",
     "RESEARCH_SPEC",
     "RPI_DIR",
+    "REQUIRED_ARTIFACT_MISSING",
     "RpiStrategy",
     "SliceContextStrategy",
     "StrategyResult",
+    "TREATMENT_INVALID",
+    "TREATMENT_VALID",
     "build_strategy",
     "envelope",
+    "phase_state",
     "read_artifact",
 ]

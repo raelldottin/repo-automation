@@ -292,12 +292,37 @@ D spent 1799 of 1800 seconds researching, and no multi-phase lane submitted anyt
 all. And C does not reclaim the 720 seconds D and E spend compacting — if it did, `D - C`
 would measure compaction plus whatever C did with the extra time.
 
-A session that runs the budget out is killed, with its tool subprocesses, and the phase is
-recorded with returncode 124 — the same code `timeout(1)` reports. The cell counts as a
-failure and the matrix continues; one slow cell does not take the finished lanes with it.
-Repeated 124s mean the budget is too small for the instance, not that the lane lost. Which
-phases were cut off is reported per lane as `measurement.censored_phases`, because a lane
-that was cut off reports its budget as much as its treatment.
+A session that runs the budget out is asked to stop (SIGTERM), given five seconds to flush
+and exit, and then killed with its tool subprocesses (SIGKILL). The phase is recorded with
+returncode 124 — the same code `timeout(1)` reports — and the grace is recorded separately
+as `grace_seconds`, never charged to the phase. The cell counts as a failure and the matrix
+continues; one slow cell does not take the finished lanes with it. Repeated 124s mean the
+budget is too small for the instance, not that the lane lost.
+
+The grace, and `PYTHONUNBUFFERED=1` in the Hermes branch of `run_agent.sh`, exist for the
+same reason: in runs 35715428932 and 35736569601 every session killed at its ceiling
+archived a **0-byte log**, because SIGKILL discarded block-buffered stdout — and that log
+is the evidence the provider-validity verdict rests on.
+
+### The phase artifact contract
+
+A phase that owes the next one a typed artifact must write it *as a checkpoint*, not as a
+hand-in. The prompt asks for `research.json` / `plan.json` to be created immediately,
+schema-valid, and updated as work proceeds, because the session can be stopped at any
+moment and whatever is in the file then is what the phase produced.
+
+If a required artifact is absent or schema-invalid, the lane **stops**. It does not
+fabricate the handoff: the harness used to substitute a stub (`"research phase produced no
+artifact"`), which is how six multi-phase cells across two runs came to be scored on a
+treatment they never administered. Each phase therefore records its own state, keeping
+administration apart from validity:
+
+| state | what it means |
+|---|---|
+| `completed` | exit 0, and any required artifact arrived schema-valid |
+| `censored` | killed at its ceiling (124), but the required artifact was there — a legitimate outcome |
+| `treatment_invalid` | a required artifact was missing or schema-invalid — the treatment was not administered |
+| `failed` | some other non-zero exit |
 
 Phase artifacts live in `<workspace>/.rpi/` and are excluded from the submission archive,
 so what ProgramBench grades is the same kind of thing in every lane.
@@ -308,7 +333,8 @@ so what ProgramBench grades is the same kind of thing in every lane.
 correctness.** A lane that saves context but loses resolve rate is worse.
 
 - **primary** — resolve rate, near-resolve rate, mean pass fraction
-- **measurement** — branch-balanced pass fraction, executions, unique tests, censored phases
+- **measurement** — branch-balanced pass fraction, executions, unique tests, censored phases,
+  phases that produced no artifact
 - **efficiency** — wall clock, agent invocations
 - **process** — phase failures, non-zero exits, compression ratios
 - **stability** — standard deviation across repeats
@@ -354,6 +380,20 @@ A missing usage report is **not** evidence. A session killed at its phase ceilin
 none either, and returncode 124 stays an experiment outcome. The matched line is copied
 into `run.json`, and the logs themselves are uploaded with the report, so a verdict can be
 checked against the output that produced it.
+
+### Treatment validity
+
+A second, independent question about the same cell: the provider answered, but did the lane
+administer the treatment its name claims? `run.json` records `treatment_validity`, and a
+lane is `invalid` if any cell is.
+
+A cell is invalid when a required phase artifact never arrived — including a compaction
+artifact, since a D cell whose compaction did not land is lane C wearing D's name. Like a
+refused cell, it keeps its score as a *diagnostic* and is dropped from `C - B`, `D - C` and
+`E - D`; `run.json` names the reason (`required_phase_artifact_missing`) and the phase.
+
+Being censored is not being invalid. A phase killed at its ceiling that checkpointed its
+artifact ran its treatment and ran out of road, and stays in the comparison.
 
 One repeat per cell is too noisy to interpret; use at least two while developing the
 instrumentation and at least three before believing a result.
