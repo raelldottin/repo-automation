@@ -1,0 +1,111 @@
+name: Benchmark adapter safety proof
+
+on:
+  push:
+    branches:
+      - repair/benchmark-adapter-environment-output-safety
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python3 -m pip install -r requirements-dev.txt
+
+      - name: Focused benchmark unit tests
+        run: python3 -m unittest automation.tests.test_benchmark_effectiveness
+
+      - name: Mutation A - ambient os.environ must be killed
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("automation/benchmark/adapter.py")
+          text = path.read_text()
+          old = "        environment = _audited_inherited_environment()"
+          new = "        environment = dict(os.environ)"
+          if old not in text:
+              raise SystemExit("mutation A target not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
+          if python3 -m unittest automation.tests.test_benchmark_effectiveness.AdapterTests.test_parent_environment_is_not_implicitly_forwarded_to_agent; then
+            echo "::error::mutation A survived"
+            exit 1
+          fi
+          git checkout -- automation/benchmark/adapter.py
+
+      - name: Mutation B - explicit env forwarding must be killed
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("automation/benchmark/adapter.py")
+          text = path.read_text()
+          old = "            environment.update(self._env)"
+          new = "            pass  # mutation proof: ignore explicit env"
+          if old not in text:
+              raise SystemExit("mutation B target not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
+          if python3 -m unittest automation.tests.test_benchmark_effectiveness.AdapterTests.test_explicit_agent_environment_is_forwarded; then
+            echo "::error::mutation B survived"
+            exit 1
+          fi
+          git checkout -- automation/benchmark/adapter.py
+
+      - name: Mutation C - destructive rmtree must be killed
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("automation/benchmark/adapter.py")
+          text = path.read_text()
+          start = text.index("    try:\n        destination.mkdir(exist_ok=False)", text.index("def _save_phase_artifacts"))
+          end = text.index("\n\n\nclass SupervisorAgentAdapter", start)
+          replacement = (
+              "    shutil.rmtree(destination, ignore_errors=True)\n"
+              "    shutil.copytree(source, destination)"
+          )
+          path.write_text(text[:start] + replacement + text[end:])
+          PY
+          if python3 -m unittest automation.tests.test_benchmark_effectiveness.AdapterTests.test_preexisting_phase_artifact_directory_is_refused_and_preserved; then
+            echo "::error::mutation C survived"
+            exit 1
+          fi
+          git checkout -- automation/benchmark/adapter.py
+
+      - name: Mutation D - merge into existing destination must be killed
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("automation/benchmark/adapter.py")
+          text = path.read_text()
+          old = "        destination.mkdir(exist_ok=False)"
+          new = "        destination.mkdir(exist_ok=True)"
+          if old not in text:
+              raise SystemExit("mutation D target not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
+          if python3 -m unittest automation.tests.test_benchmark_effectiveness.AdapterTests.test_preexisting_phase_artifact_directory_is_refused_and_preserved; then
+            echo "::error::mutation D survived"
+            exit 1
+          fi
+          git checkout -- automation/benchmark/adapter.py
+
+      - name: Proof workspace restored
+        run: |
+          git diff --check
+          git diff --exit-code
