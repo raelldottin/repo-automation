@@ -68,37 +68,62 @@ def _events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def _start(events: list[dict[str, Any]]) -> int:
+    return min((event.get("timestamp") or 0) for event in events) if events else 0
+
+
+def _entry(event: dict[str, Any], start: int) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "at_seconds": round(((event.get("timestamp") or start) - start) / 1000, 1),
+        "type": event.get("type"),
+    }
+    for key in ("name", "tool", "tool_name", "is_error", "subtype"):
+        if event.get(key) is not None:
+            entry[key] = event[key]
+    return entry
+
+
 def timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Tool activity in order, with the offset from the first event.
 
     Text deltas are counted rather than kept: the question is what the session *did* and
     when, and a transcript of its prose would bury that under its own length.
     """
-    if not events:
-        return []
-    start = min(event.get("timestamp") or 0 for event in events)
+    start = _start(events)
     entries: list[dict[str, Any]] = []
     deltas = 0
     for event in events:
-        kind = event.get("type")
-        if kind == "text":
+        if event.get("type") == "text":
             deltas += 1
             continue
-        entry = {
-            "at_seconds": round(((event.get("timestamp") or start) - start) / 1000, 1),
-            "type": kind,
-            "text_deltas_before": deltas,
-        }
-        for key in ("name", "tool", "tool_name", "is_error", "subtype"):
-            if event.get(key) is not None:
-                entry[key] = event[key]
-        entries.append(entry)
+        entries.append({**_entry(event, start), "text_deltas_before": deltas})
     return entries
 
 
 def artifact_mentions(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every event naming the required artifact - the write attempt, or its absence."""
-    return [entry for entry, event in zip(timeline(events), events) if RESEARCH_ARTIFACT in json.dumps(event)]
+    """Every event naming the required artifact - the write attempt, or its absence.
+
+    Read off the events themselves, not off ``timeline``: that one drops text deltas, so
+    pairing the two by position dated run 35799016896's write attempt five events late and
+    lost every mention past the 36th. The archived JSONL was right; this reader was not.
+    """
+    start = _start(events)
+    return [_entry(event, start) for event in events if RESEARCH_ARTIFACT in json.dumps(event)]
+
+
+def terminal_result(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """What the final ``result`` event exposes - the only accounting this transport gives.
+
+    There is no ``--usage-file`` off ``-z/--oneshot``, but the terminal event does carry the
+    exit code, the turn's duration and its token counts. It does not name the model: the
+    ``system/init`` event's ``model`` field came back empty, so nothing here may be read as
+    evidence of which model or provider served the turn.
+    """
+    finals = [event for event in events if event.get("type") == "result"]
+    if not finals:
+        return None
+    final = finals[-1]
+    return {key: final.get(key) for key in ("exit_code", "duration_ms", "tokens", "session_id")}
 
 
 def run_probe(
@@ -175,6 +200,7 @@ def run_probe(
             "text_deltas": sum(1 for event in events if event.get("type") == "text"),
             "timeline": timeline(events),
             "artifact_mentions": artifact_mentions(events),
+            "terminal_result": terminal_result(events),
         },
         "agent_sessions": sessions,
     }
@@ -193,6 +219,12 @@ def summarize(record: dict[str, Any]) -> str:
         f"artifact      {'present' if artifact['present'] else 'ABSENT'}"
         f" ({artifact['chars']} chars, schema {artifact['schema_errors'] or 'valid'})",
     ]
+    final = stream.get("terminal_result")
+    if final:
+        lines.append(
+            f"session       exit {final.get('exit_code')} after {(final.get('duration_ms') or 0) / 1000:.0f}s,"
+            f" tokens {(final.get('tokens') or {}).get('total')} (no model identity on this transport)"
+        )
     mentions = stream["artifact_mentions"]
     named = f"{len(mentions)} events name {RESEARCH_ARTIFACT}" if mentions else "none"
     lines.append(f"write attempt {named}")
