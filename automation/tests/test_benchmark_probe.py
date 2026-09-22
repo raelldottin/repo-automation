@@ -20,7 +20,7 @@ from pathlib import Path
 
 from automation.benchmark.adapter import AGENT_SESSIONS_DIR, _default_command_template, _subprocess_runner
 from automation.benchmark.instances import TaskSpec, task_spec
-from automation.benchmark.probe import STREAM_JSON_SUFFIX, artifact_mentions, timeline
+from automation.benchmark.probe import STREAM_JSON_SUFFIX, artifact_mentions, terminal_result, timeline
 from automation.benchmark.strategies import (
     AGENT_TIMEOUT_RETURNCODE,
     PHASE_CENSORED,
@@ -194,6 +194,51 @@ class TransportContractTests(unittest.TestCase):
             self.assertIn("REPO_AUTOMATION_HERMES_TRANSPORT", done.stderr)
 
 
+class StreamReaderTests(unittest.TestCase):
+    """Run 35799016896 read its own write attempt five events late. Not again."""
+
+    EVENTS = [
+        {"type": "system", "subtype": "init", "timestamp": 0},
+        {"type": "text", "text": "thinking", "timestamp": 1_000},
+        {"type": "text", "text": "out loud", "timestamp": 2_000},
+        {"type": "tool_use", "name": "terminal", "input": {"command": "ls -la"}, "timestamp": 3_000},
+        {"type": "text", "text": "still", "timestamp": 4_000},
+        {"type": "tool_use", "name": "write_file", "input": {"path": ".rpi/research.json"}, "timestamp": 9_000},
+        {
+            "type": "tool_result",
+            "name": "write_file",
+            "output": '{"bytes_written": 2968, "resolved_path": "/w/.rpi/research.json"}',
+            "is_error": False,
+            "timestamp": 9_100,
+        },
+    ]
+
+    def test_a_mention_keeps_the_timestamp_of_the_event_that_made_it(self) -> None:
+        mentions = artifact_mentions(self.EVENTS)
+        self.assertEqual([9.0, 9.1], [mention["at_seconds"] for mention in mentions])
+        self.assertEqual(["write_file", "write_file"], [mention["name"] for mention in mentions])
+
+    def test_the_timeline_still_counts_the_prose_it_drops(self) -> None:
+        entries = timeline(self.EVENTS)
+        self.assertEqual([0.0, 3.0, 9.0, 9.1], [entry["at_seconds"] for entry in entries])
+        self.assertEqual([0, 2, 3, 3], [entry["text_deltas_before"] for entry in entries])
+
+    def test_the_terminal_event_is_the_only_accounting_this_transport_gives(self) -> None:
+        final = {
+            "type": "result",
+            "session_id": "20260922_234826_ef8664",
+            "exit_code": 0,
+            "duration_ms": 100_873,
+            "tokens": {"total": 341_228},
+            "timestamp": 10_000,
+        }
+        self.assertEqual(
+            {"exit_code": 0, "duration_ms": 100_873, "tokens": {"total": 341_228}, "session_id": "20260922_234826_ef8664"},
+            terminal_result([*self.EVENTS, final]),
+        )
+        self.assertIsNone(terminal_result(self.EVENTS), "a killed session never reaches its result event")
+
+
 class ProbeRecordTests(unittest.TestCase):
     """The record has to stand on its own: the runner it came from will be gone."""
 
@@ -262,7 +307,13 @@ class ProbeRecordTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "s.stream.jsonl"
-            path.write_text('{"type": "system", "timestamp": 1}\n{"type": "tool_u', encoding="utf-8")
+            path.write_text(
+                '{"type": "system", "timestamp": 1}\n'
+                # Hermes writes this onto the same stdout as the events; observed in 35799016896.
+                "\u26a0 tirith security scanner enabled but not available\n"
+                '{"type": "tool_u',
+                encoding="utf-8",
+            )
             self.assertEqual([{"type": "system", "timestamp": 1}], _events(path))
 
 
