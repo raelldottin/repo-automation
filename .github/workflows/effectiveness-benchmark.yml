@@ -31,9 +31,9 @@ on:
         type: string
         default: "2"
       timeout:
-        description: "Per-instance agent budget in seconds (shared across a lane's sessions)"
+        description: "Per-instance agent budget in seconds (split across a lane's phases by fixed ceilings)"
         type: string
-        default: "1800"
+        default: "2700"
       model:
         description: "Model id served by the NVIDIA endpoint"
         type: string

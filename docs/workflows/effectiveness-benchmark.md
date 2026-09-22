@@ -263,6 +263,27 @@ lane-by-lane, so provider load or time of day cannot masquerade as a lane effect
 The time budget is per *instance*, not per session: a three-session lane must not get
 three times the wall clock of lane A, or it wins on budget rather than on treatment.
 
+Within a multi-phase lane the budget is divided by fixed ceilings, not spent from one
+shared remainder, and the profile is recorded in `run.json` as `phase_budgets` because it
+is part of the treatment:
+
+| phase | seconds | C | D | E |
+|---|---:|:-:|:-:|:-:|
+| `research` | 420 | ✓ | ✓ | ✓ |
+| `research_compact` | 360 | – | ✓ | ✓ |
+| `plan` | 300 | ✓ | ✓ | ✓ |
+| `plan_compact` | 360 | – | ✓ | ✓ |
+| `implement` | 1260 | ✓ | ✓ | ✓ |
+
+The ceilings are written against a 2700-second lane; a different `--timeout` scales them
+proportionally. Lanes A and B are one session and get the whole instance budget.
+
+Two things follow, and both were bought the hard way. Implement keeps its allowance no
+matter how greedy research is: run 35650966066 handed each phase the whole remainder, lane
+D spent 1799 of 1800 seconds researching, and no multi-phase lane submitted anything at
+all. And C does not reclaim the 720 seconds D and E spend compacting — if it did, `D - C`
+would measure compaction plus whatever C did with the extra time.
+
 A session that runs the budget out is killed, with its tool subprocesses, and the phase is
 recorded with returncode 124 — the same code `timeout(1)` reports. The cell counts as a
 failure and the matrix continues; one slow cell does not take the finished lanes with it.

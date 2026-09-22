@@ -12,6 +12,7 @@ from typing import Mapping, Optional
 
 from automation.benchmark import lanes as lanes_module
 from automation.benchmark.adapter import (
+    AGENT_SESSIONS_DIR,
     SUBMISSION_MANIFEST_FILENAME,
     SupervisorAgentAdapter,
     build_context_bundle,
@@ -23,6 +24,8 @@ from automation.benchmark.scoring import EffectivenessReport, InstanceScore
 from automation.benchmark.jspace import JSpaceArtifact, JSpaceUnavailable
 from automation.benchmark.strategies import (
     ALL_LANES,
+    LANE_CEILING_SECONDS,
+    PHASE_CEILING_SECONDS,
     PLAN_ARTIFACT,
     RESEARCH_ARTIFACT,
     RPI_DIR,
@@ -265,11 +268,13 @@ class LaneTreatmentTests(unittest.TestCase):
 
 class BudgetTests(unittest.TestCase):
     def test_multi_phase_lanes_share_one_instance_budget(self) -> None:
-        """A three-session lane must not get three times the wall clock of lane A."""
+        """A five-session lane must not get five times the wall clock of lane A."""
         agent, _, _ = run_lane("D", timeout_seconds=600)
         granted = [session["timeout"] for session in agent.sessions]
         self.assertTrue(all(value <= 600 for value in granted), granted)
-        self.assertEqual(sorted(granted, reverse=True), granted)  # budget only shrinks
+        # Phases hold their own ceilings now, so the grants no longer shrink monotonically;
+        # what still has to hold is that together they fit inside the instance budget.
+        self.assertLessEqual(sum(granted), 600)
 
 
 class MatrixTests(unittest.TestCase):
@@ -469,3 +474,83 @@ class MatrixTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PhaseBudgetTests(unittest.TestCase):
+    """A greedy first phase must not be able to spend the phase that writes the code.
+
+    In run 35650966066 every multi-phase lane submitted nothing: research was handed the
+    whole remaining budget and lane D spent 1799 of 1800 seconds on it, leaving implement
+    one second. Ceilings also hold the decomposition together - C must not inherit the
+    compaction time D and E spend, or ``D - C`` measures more than compaction.
+    """
+
+    def _budgets(self, lane: str, timeout_seconds: int = LANE_CEILING_SECONDS) -> dict[str, int]:
+        strategy = RpiStrategy(compaction=lane != "C", jspace=FIXTURE_ARTIFACT if lane == "E" else None, name=lane)
+        agent, result, _ = run_lane(lane, timeout_seconds=timeout_seconds, strategy=strategy)
+        assert result.strategy is not None
+        return {session["phase"]: session["timeout"] for session in agent.sessions}
+
+    def test_implement_keeps_its_allowance_whatever_research_does(self) -> None:
+        self.assertEqual(PHASE_CEILING_SECONDS["implement"], self._budgets("C")["implement"])
+
+    def test_shared_phases_get_identical_ceilings_across_c_d_e(self) -> None:
+        budgets = {lane: self._budgets(lane) for lane in ("C", "D", "E")}
+        for phase in ("research", "plan", "implement"):
+            with self.subTest(phase=phase):
+                self.assertEqual(
+                    {PHASE_CEILING_SECONDS[phase]},
+                    {budgets[lane][phase] for lane in ("C", "D", "E")},
+                )
+
+    def test_c_does_not_reclaim_the_compaction_slots(self) -> None:
+        spent = sum(self._budgets("C").values())
+        forfeited = PHASE_CEILING_SECONDS["research_compact"] + PHASE_CEILING_SECONDS["plan_compact"]
+        self.assertEqual(LANE_CEILING_SECONDS - forfeited, spent)
+
+    def test_a_lane_never_exceeds_its_instance_budget(self) -> None:
+        for lane in ("C", "D", "E"):
+            with self.subTest(lane=lane):
+                self.assertLessEqual(sum(self._budgets(lane).values()), LANE_CEILING_SECONDS)
+
+    def test_a_smaller_instance_budget_scales_the_profile(self) -> None:
+        budgets = self._budgets("D", timeout_seconds=LANE_CEILING_SECONDS // 2)
+        self.assertEqual(PHASE_CEILING_SECONDS["implement"] // 2, budgets["implement"])
+
+    def test_single_session_lanes_still_get_the_whole_budget(self) -> None:
+        for lane in ("A", "B"):
+            with self.subTest(lane=lane):
+                agent, result, _ = run_lane(lane, timeout_seconds=LANE_CEILING_SECONDS)
+                assert result.strategy is not None
+                # Minus however long setup took: one session still means the whole budget.
+                self.assertAlmostEqual(LANE_CEILING_SECONDS, agent.sessions[0]["timeout"], delta=5)
+                self.assertEqual({"implement": LANE_CEILING_SECONDS}, result.strategy.to_dict()["phase_budgets"])
+
+    def test_the_profile_is_recorded_with_the_result(self) -> None:
+        _, result, _ = run_lane(
+            "E", timeout_seconds=LANE_CEILING_SECONDS, strategy=RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT)
+        )
+        assert result.strategy is not None
+        self.assertEqual(PHASE_CEILING_SECONDS, result.strategy.to_dict()["phase_budgets"])
+
+
+class AgentSessionProvenanceTests(unittest.TestCase):
+    """A session killed at its budget writes no usage report, and must still be recorded."""
+
+    def test_a_session_with_only_controls_is_still_a_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / AGENT_SESSIONS_DIR
+            sessions.mkdir()
+            (sessions / "20260921T214852Z-11073.controls.json").write_text('{"runner": "hermes"}', encoding="utf-8")
+            (sessions / "20260921T221851Z-11720.controls.json").write_text('{"runner": "hermes"}', encoding="utf-8")
+            (sessions / "20260921T221851Z-11720.usage.json").write_text('{"api_calls": 2}', encoding="utf-8")
+            recorded = lanes_module._agent_sessions(Path(tmp))
+
+        self.assertEqual(
+            ["20260921T214852Z-11073", "20260921T221851Z-11720"],
+            [session["session"] for session in recorded],
+        )
+        killed, completed = recorded
+        self.assertIsNone(killed["usage"])
+        self.assertEqual({"runner": "hermes"}, killed["controls"])
+        self.assertEqual({"api_calls": 2}, completed["usage"])
