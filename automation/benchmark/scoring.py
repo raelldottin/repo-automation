@@ -30,13 +30,31 @@ class InstanceScore:
     """Effectiveness of a single rebuilt instance."""
 
     instance_id: str
+    # Executions, not distinct tests: ProgramBench runs the suite once per test branch, and
+    # how many executions a branch contributes depends on the submission under test. In run
+    # 35715428932 the same 769 test names produced 769 executions in one lane and 1649 in
+    # another, so the pooled denominator is not constant across submissions.
     total_tests: int
     passed_tests: int
     error_code: Optional[str] = None
+    # Per-branch pass fractions, kept so the pooled score can be checked against a
+    # branch-balanced one. Pooling weights a branch by how often it ran; balancing weights
+    # every branch alike. The two can order two submissions differently, which is worth
+    # seeing before a small pooled delta is read as a treatment effect.
+    branch_pass_fractions: tuple[float, ...] = ()
+    unique_tests: int = 0
 
     @property
     def pass_fraction(self) -> float:
+        """ProgramBench's own score: ``n_resolved / len(test_results)``, pooled over branches."""
         return self.passed_tests / self.total_tests if self.total_tests else 0.0
+
+    @property
+    def branch_macro_pass_fraction(self) -> float:
+        """The same outcome, weighting each test branch equally. Sensitivity only, never the score."""
+        if not self.branch_pass_fractions:
+            return self.pass_fraction
+        return sum(self.branch_pass_fractions) / len(self.branch_pass_fractions)
 
     @property
     def resolved(self) -> bool:
@@ -52,6 +70,9 @@ class InstanceScore:
             "total_tests": self.total_tests,
             "passed_tests": self.passed_tests,
             "pass_fraction": round(self.pass_fraction, 4),
+            "branch_macro_pass_fraction": round(self.branch_macro_pass_fraction, 4),
+            "branch_count": len(self.branch_pass_fractions),
+            "unique_tests": self.unique_tests,
             "resolved": self.resolved,
             "near_resolved": self.near_resolved,
             "error_code": self.error_code,
@@ -91,6 +112,20 @@ class EffectivenessReport:
         return sum(score.pass_fraction for score in self.instances) / self.instance_count
 
     @property
+    def mean_branch_macro_pass_fraction(self) -> float:
+        if not self.instances:
+            return 0.0
+        return sum(score.branch_macro_pass_fraction for score in self.instances) / self.instance_count
+
+    @property
+    def executions(self) -> int:
+        return sum(score.total_tests for score in self.instances)
+
+    @property
+    def unique_tests(self) -> int:
+        return sum(score.unique_tests for score in self.instances)
+
+    @property
     def error_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for score in self.instances:
@@ -106,6 +141,9 @@ class EffectivenessReport:
             "resolve_rate": round(self.resolve_rate, 4),
             "near_resolve_rate": round(self.near_resolve_rate, 4),
             "mean_pass_fraction": round(self.mean_pass_fraction, 4),
+            "mean_branch_macro_pass_fraction": round(self.mean_branch_macro_pass_fraction, 4),
+            "executions": self.executions,
+            "unique_tests": self.unique_tests,
             "error_counts": self.error_counts,
             "instances": [score.to_dict() for score in self.instances],
         }
@@ -117,6 +155,8 @@ class EffectivenessReport:
             f"  resolved         : {self.resolved_count} ({self.resolve_rate:.1%})",
             f"  near-resolved    : {self.near_resolved_count} ({self.near_resolve_rate:.1%})",
             f"  mean pass frac.  : {self.mean_pass_fraction:.1%}",
+            f"  branch-macro     : {self.mean_branch_macro_pass_fraction:.1%}",
+            f"  executions       : {self.executions} over {self.unique_tests} unique tests",
         ]
         if self.error_counts:
             errors = ", ".join(f"{code}={count}" for code, count in sorted(self.error_counts.items()))
@@ -133,11 +173,22 @@ def score_eval_data(instance_id: str, data: dict[str, Any]) -> InstanceScore:
     results = data.get("test_results") or []
     total = len(results)
     passed = sum(1 for result in results if result.get("status") == PASSED_STATUS)
+    # Group by test branch for the balanced sensitivity figure. Eval output that carries no
+    # branch lands in one group, where the balanced figure is the pooled one.
+    by_branch: dict[Any, list[int]] = {}
+    names: set[Any] = set()
+    for result in results:
+        names.add(result.get("name"))
+        counts = by_branch.setdefault(result.get("branch"), [0, 0])
+        counts[0] += 1 if result.get("status") == PASSED_STATUS else 0
+        counts[1] += 1
     return InstanceScore(
         instance_id=instance_id,
         total_tests=total,
         passed_tests=passed,
         error_code=data.get("error_code"),
+        branch_pass_fractions=tuple(branch_passed / branch_total for branch_passed, branch_total in by_branch.values()),
+        unique_tests=len(names),
     )
 
 

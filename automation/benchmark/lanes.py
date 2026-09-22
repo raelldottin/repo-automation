@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
-from .adapter import AGENT_SESSIONS_DIR, AgentAdapter, SupervisorAgentAdapter
+from .adapter import AGENT_SESSIONS_DIR, AGENT_TIMEOUT_RETURNCODE, AgentAdapter, SupervisorAgentAdapter
 from .evalrunner import EvalRunner
 from .instances import task_spec
 from .jspace import JSpaceUnavailable
@@ -294,6 +294,7 @@ def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[Eff
     resolve_rates = [report.resolve_rate for report in reports]
     near_rates = [report.near_resolve_rate for report in reports]
     pass_fractions = [report.mean_pass_fraction for report in reports]
+    macro_fractions = [report.mean_branch_macro_pass_fraction for report in reports]
 
     provenance: list[dict[str, Any]] = []
     for repeat in range(1, repeats + 1):
@@ -331,6 +332,21 @@ def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[Eff
             "near_resolve_rate": round(_mean(near_rates), 4),
             "mean_pass_fraction": round(_mean(pass_fractions), 4),
         },
+        # Not the score: how much of the score is an artefact of how it was weighted, and
+        # whether the lane's phases ran to a conclusion or were cut off at their ceilings.
+        # A pooled delta smaller than the pooled-to-balanced gap is not a treatment effect,
+        # and a censored lane reports the budget as much as it reports the treatment.
+        "measurement": {
+            "branch_macro_pass_fraction": round(_mean(macro_fractions), 4),
+            "executions": sum(report.executions for report in reports),
+            "unique_tests": sum(report.unique_tests for report in reports),
+            "censored_phases": sorted(
+                phase["phase"]
+                for strategy in strategies
+                for phase in strategy.get("phases") or []
+                if phase.get("returncode") == AGENT_TIMEOUT_RETURNCODE
+            ),
+        },
         "efficiency": {
             "wall_clock_seconds": round(sum(strategy["seconds"] for strategy in strategies), 3),
             "agent_invocations": sum(strategy["agent_invocations"] for strategy in strategies),
@@ -346,6 +362,10 @@ def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[Eff
             "mean_pass_fraction_stdev": round(_stdev(pass_fractions), 4),
         },
     }
+
+
+def _macro(summary: dict[str, Any]) -> float:
+    return (summary.get("measurement") or {}).get("branch_macro_pass_fraction", 0.0)
 
 
 def lane_deltas(summaries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -379,6 +399,9 @@ def lane_deltas(summaries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
                 "resolve_rate": round(after["primary"]["resolve_rate"] - before["primary"]["resolve_rate"], 4),
                 "near_resolve_rate": round(after["primary"]["near_resolve_rate"] - before["primary"]["near_resolve_rate"], 4),
                 "mean_pass_fraction": round(after["primary"]["mean_pass_fraction"] - before["primary"]["mean_pass_fraction"], 4),
+                # The same delta under equal branch weights. It does not overrule the pooled
+                # figure; it says whether the pooled figure survives a change of weighting.
+                "branch_macro_pass_fraction": round(_macro(after) - _macro(before), 4),
                 "agent_invocations": after["efficiency"]["agent_invocations"] - before["efficiency"]["agent_invocations"],
                 "wall_clock_seconds": round(
                     after["efficiency"]["wall_clock_seconds"] - before["efficiency"]["wall_clock_seconds"], 3
@@ -419,17 +442,32 @@ def build_comparison(run_dir: Path, lanes: Sequence[str], repeats: int) -> dict[
 
 def render_comparison_markdown(comparison: dict[str, Any]) -> str:
     lines = ["# Lane comparison", "", "## Primary outcome (ProgramBench)", ""]
-    lines.append("| lane | treatment | validity | resolve | near | mean pass | stdev(resolve) | agent calls | wall s |")
-    lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|")
+    lines.append(
+        "| lane | treatment | validity | resolve | near | mean pass | macro pass "
+        "| executions | censored | stdev(resolve) | agent calls | wall s |"
+    )
+    lines.append("|---|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|")
     for summary in comparison["lanes"]:
         primary, efficiency, stability = summary["primary"], summary["efficiency"], summary["stability"]
+        measurement = summary.get("measurement") or {}
+        censored = "+".join(sorted(set(measurement.get("censored_phases") or []))) or "-"
         lines.append(
             f"| {summary['lane']} | {LANE_TREATMENTS.get(summary['lane'], '')} "
             f"| {summary.get('provider_validity', VALID)} "
             f"| {primary['resolve_rate']:.1%} | {primary['near_resolve_rate']:.1%} "
-            f"| {primary['mean_pass_fraction']:.1%} | {stability['resolve_rate_stdev']:.3f} "
+            f"| {primary['mean_pass_fraction']:.1%} | {measurement.get('branch_macro_pass_fraction', 0.0):.1%} "
+            f"| {measurement.get('executions', 0)} | {censored} "
+            f"| {stability['resolve_rate_stdev']:.3f} "
             f"| {efficiency['agent_invocations']} | {efficiency['wall_clock_seconds']:.0f} |"
         )
+    lines += [
+        "",
+        "`mean pass` is ProgramBench's own score, pooled over test branches, and stays the primary",
+        "outcome. `macro pass` weights every branch equally over the same results: where the two",
+        "disagree, the lane ordering depends on how often each branch happened to run rather than",
+        "on the submission. `censored` names the phases killed at their ceiling - a censored lane",
+        "reports its budget as much as its treatment.",
+    ]
 
     invalid = [summary for summary in comparison["lanes"] if summary.get("provider_validity", VALID) != VALID]
     if invalid:
@@ -450,14 +488,15 @@ def render_comparison_markdown(comparison: dict[str, Any]) -> str:
     lines += ["", "## Marginal contribution of each treatment", ""]
     comparable = [delta for delta in comparison["deltas"] if delta.get("status", VALID) == VALID]
     if comparable:
-        lines.append("| comparison | treatment added | resolve | near | mean pass | agent calls | wall s |")
-        lines.append("|---|---|---:|---:|---:|---:|---:|")
+        lines.append("| comparison | treatment added | resolve | near | mean pass | macro pass | agent calls | wall s |")
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
     else:
         lines.append("No comparison had a provider-valid pair; this run measures nothing.")
     for delta in comparable:
         lines.append(
             f"| {delta['comparison']} | {delta['treatment']} | {delta['resolve_rate']:+.1%} "
             f"| {delta['near_resolve_rate']:+.1%} | {delta['mean_pass_fraction']:+.1%} "
+            f"| {delta.get('branch_macro_pass_fraction', 0.0):+.1%} "
             f"| {delta['agent_invocations']:+d} | {delta['wall_clock_seconds']:+.0f} |"
         )
 

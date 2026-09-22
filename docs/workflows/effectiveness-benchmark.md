@@ -269,14 +269,22 @@ is part of the treatment:
 
 | phase | seconds | C | D | E |
 |---|---:|:-:|:-:|:-:|
-| `research` | 420 | ✓ | ✓ | ✓ |
-| `research_compact` | 360 | – | ✓ | ✓ |
+| `research` | 600 | ✓ | ✓ | ✓ |
+| `research_compact` | 300 | – | ✓ | ✓ |
 | `plan` | 300 | ✓ | ✓ | ✓ |
-| `plan_compact` | 360 | – | ✓ | ✓ |
-| `implement` | 1260 | ✓ | ✓ | ✓ |
+| `plan_compact` | 300 | – | ✓ | ✓ |
+| `implement` | 1800 | ✓ | ✓ | ✓ |
 
-The ceilings are written against a 2700-second lane; a different `--timeout` scales them
-proportionally. Lanes A and B are one session and get the whole instance budget.
+The ceilings are written against a 3300-second lane; a different `--timeout` scales them
+proportionally. Lanes A and B are one session and get the whole instance budget. C spends
+2700 of the 3300 and forfeits the 600 the compaction slots cost D and E.
+
+This profile replaced a 2700-second one after run 35715428932, where it censored the
+treatments it was supposed to measure: `research` hit its 420-second ceiling in all three
+multi-phase lanes, `implement` hit its 1260-second ceiling in two of three, and lane E was
+killed before it wrote `compile.sh` and scored `compile_failed`. The phases that finished
+peaked near 229 seconds (`plan`) and 202 seconds (compaction), so 300 leaves both room;
+`research` and `implement` get about 43% more than the ceilings they kept hitting.
 
 Two things follow, and both were bought the hard way. Implement keeps its allowance no
 matter how greedy research is: run 35650966066 handed each phase the whole remainder, lane
@@ -287,7 +295,9 @@ would measure compaction plus whatever C did with the extra time.
 A session that runs the budget out is killed, with its tool subprocesses, and the phase is
 recorded with returncode 124 — the same code `timeout(1)` reports. The cell counts as a
 failure and the matrix continues; one slow cell does not take the finished lanes with it.
-Repeated 124s mean the budget is too small for the instance, not that the lane lost.
+Repeated 124s mean the budget is too small for the instance, not that the lane lost. Which
+phases were cut off is reported per lane as `measurement.censored_phases`, because a lane
+that was cut off reports its budget as much as its treatment.
 
 Phase artifacts live in `<workspace>/.rpi/` and are excluded from the submission archive,
 so what ProgramBench grades is the same kind of thing in every lane.
@@ -298,9 +308,24 @@ so what ProgramBench grades is the same kind of thing in every lane.
 correctness.** A lane that saves context but loses resolve rate is worse.
 
 - **primary** — resolve rate, near-resolve rate, mean pass fraction
+- **measurement** — branch-balanced pass fraction, executions, unique tests, censored phases
 - **efficiency** — wall clock, agent invocations
 - **process** — phase failures, non-zero exits, compression ratios
 - **stability** — standard deviation across repeats
+
+### Pooled score, branch-balanced check
+
+`mean_pass_fraction` is ProgramBench's own score — passed over *executions*, pooled across
+test branches — and stays the primary outcome. The denominator is not constant across
+lanes: the suite runs once per test branch, and how many executions a branch contributes
+depends on the submission. In run 35715428932 the same 769 test names produced 769
+executions in lane E and 1649 in lane D.
+
+So each lane also reports `branch_macro_pass_fraction`, the same results with every branch
+weighted equally, plus `executions` and `unique_tests`. It is a sensitivity check, never
+the score. On that run the pooled figures read A 83.3%, B 77.7%, C 76.7%, D 73.3% while
+the balanced ones read A 84.2%, B 83.0%, C 75.4%, D 77.9% — B and D swap. A pooled delta
+smaller than the gap between the two is a weighting artefact, not a treatment effect.
 
 ### Provider validity
 
@@ -326,9 +351,9 @@ The verdict needs the provider on record, in the session's own log:
 ```
 
 A missing usage report is **not** evidence. A session killed at its phase ceiling writes
-none either, and returncode 124 stays an experiment outcome. The logs are kept next to the
-session reports on the runner and are not uploaded; the matched line is copied into
-`run.json` so a verdict can be checked against what caused it.
+none either, and returncode 124 stays an experiment outcome. The matched line is copied
+into `run.json`, and the logs themselves are uploaded with the report, so a verdict can be
+checked against the output that produced it.
 
 One repeat per cell is too noisy to interpret; use at least two while developing the
 instrumentation and at least three before believing a result.

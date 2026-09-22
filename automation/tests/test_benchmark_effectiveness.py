@@ -61,6 +61,30 @@ class ScoringTests(unittest.TestCase):
         self.assertFalse(score.near_resolved)
         self.assertEqual(0.0, score.pass_fraction)
 
+    def test_branch_balanced_fraction_can_disagree_with_the_pooled_one(self) -> None:
+        """Branches contribute unequal numbers of executions, so the two weightings differ.
+
+        Run 35715428932: the same 769 test names produced 769 executions in one lane and
+        1649 in another, and re-weighting swapped two lanes. The pooled figure stays the
+        score; this one says whether an ordering survives a change of weighting.
+        """
+        data = {
+            "test_results": (
+                [{"branch": "big", "name": f"t{index}", "status": "passed"} for index in range(90)]
+                + [{"branch": "big", "name": f"t{index}", "status": "failed"} for index in range(10)]
+                + [{"branch": "small", "name": "t0", "status": "failed"} for _ in range(2)]
+            )
+        }
+        score = score_eval_data("x", data)
+        self.assertAlmostEqual(90 / 102, score.pass_fraction)
+        self.assertAlmostEqual((0.9 + 0.0) / 2, score.branch_macro_pass_fraction)
+        self.assertEqual(102, score.total_tests)  # executions, not distinct tests
+        self.assertEqual(90, score.unique_tests)
+
+    def test_eval_output_without_branches_balances_to_the_pooled_fraction(self) -> None:
+        score = score_eval_data("x", _eval_data(18, 20))
+        self.assertAlmostEqual(score.pass_fraction, score.branch_macro_pass_fraction)
+
     def test_real_cmatrix_fixture_surfaces_error_code(self) -> None:
         score = score_eval_file(self.fixture)
         self.assertEqual("copy_executable_failed", score.error_code)
