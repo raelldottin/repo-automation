@@ -176,7 +176,6 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("--prompt-file", captured["command"])
         self.assertIn("--slice-id", captured["command"])
 
-
     def test_parent_environment_is_not_implicitly_forwarded_to_agent(self) -> None:
         captured: dict[str, str] = {}
 
