@@ -208,13 +208,19 @@ jobs:
               sys.exit(1)
           PY
 
+      # --agent-env, by name, is the only way the key reaches a session: an agent run inherits
+      # what run_agent.sh reads and nothing else, so this job's environment is not ambiently
+      # readable by the model-authored commands a cell executes. Names only - NAME=value here
+      # would print the secret into the job log on top of the runner's process listing.
       - name: Run benchmark (rebuild -> eval -> score)
         if: inputs.experiment != true
         run: |
           if [ "${{ inputs.run_all }}" = "false" ] && [ -n "${{ inputs.instances }}" ]; then
-            uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }}
+            uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }} \
+              --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
           else
-            uv run python -m automation.benchmark all --run-dir out --all
+            uv run python -m automation.benchmark all --run-dir out --all \
+              --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
           fi
 
       # Lane E administers the canonical J-Space skill from a pinned external checkout.
@@ -250,7 +256,8 @@ jobs:
           # repeats x timeout; keep it under this job's 360-minute cap.
           uv run python -m automation.benchmark lanes --run-dir out --eval \
             --lanes ${{ inputs.lanes }} --repeats ${{ inputs.repeats }} \
-            --timeout ${{ inputs.timeout }} $SELECTION
+            --timeout ${{ inputs.timeout }} $SELECTION \
+            --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
 
       - name: Upload effectiveness report
         if: always()

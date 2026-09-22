@@ -51,7 +51,54 @@ export REPO_AUTOMATION_AGENT_RUNNER=hermes
 export HERMES_INFERENCE_PROVIDER=nvidia
 export HERMES_INFERENCE_MODEL=moonshotai/kimi-k3
 export NVIDIA_API_KEY="$NVIDIA_API_KEY"
+
+uv run python -m automation.benchmark all --run-dir out --all \
+  --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
 ```
+
+The first four are read by `run_agent.sh` and inherited automatically. `NVIDIA_API_KEY` is
+not, which is what `--agent-env` is for — see below.
+
+### What a session inherits
+
+A cell exists to run model-authored commands. It used to be launched with the whole
+launcher environment, so every session was handed whatever the operator happened to have
+exported: provider keys for other vendors, `GH_TOKEN`, cloud credentials, `SSH_AUTH_SOCK`.
+None of that rebuilds a C repository.
+
+A session now inherits exactly the variables `automation/supervisor/run_agent.sh` reads,
+listed by literal name in `adapter.INHERITED_ENV_NAMES`:
+
+```text
+PATH  HOME  TMPDIR  LANG  LC_ALL
+REPO_AUTOMATION_AGENT_RUNNER  REPO_AUTOMATION_CODEX_BIN  REPO_AUTOMATION_CLAUDE_BIN
+REPO_AUTOMATION_CLAUDE_PERMISSION_MODE  REPO_AUTOMATION_HERMES_BIN  OWLORY_CODEX_BIN
+HERMES_REVISION  HERMES_INFERENCE_PROVIDER  HERMES_INFERENCE_MODEL
+CLAUDECODE  CLAUDE_CODE  CLAUDE_CODE_ENTRYPOINT
+```
+
+Names, never patterns. `REPO_AUTOMATION_*` would ship the next variable somebody adds under
+that prefix whatever ends up in it; the property worth having is that a variable nobody
+considered is **absent**. `TERMINAL_CWD` and `HERMES_HOME` are deliberately not on the list:
+the runner sets both per invocation, and inheriting either would point a session at the
+previous cell's state.
+
+Anything else a session needs is authorized one name at a time:
+
+```shell
+--agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
+```
+
+`--agent-env` takes a **variable name**, never `NAME=value` — a value on the command line is
+readable in any process listing on the host, and in CI it lands in the job log. A name that
+is not set in the environment is refused before the first agent launches, because a run that
+reached the provider unauthenticated would score the outage as a lane effect. The flag is
+repeatable and applies to `run`, `all` and `lanes`; in `lanes` every lane gets the same
+selection, so what a lane can reach is not one of the things that varies between lanes.
+
+Programmatic callers pass the same thing as `SupervisorAgentAdapter(env=...)`. That mapping
+is the caller's authorization, so it is forwarded as given and wins over an inherited value
+of the same name.
 
 The wrapper reproduces the deployed Hermes posture and then subtracts what would
 contaminate a lane. It deliberately does **not** pass `--safe-mode`. That flag sets three
@@ -229,10 +276,12 @@ file, in a commit that says why. Results produced under different pins are not c
 
 ```shell
 # Small first: the default smoke instance, every lane, twice. No Docker.
-uv run python -m automation.benchmark lanes --run-dir out --repeats 2
+uv run python -m automation.benchmark lanes --run-dir out --repeats 2 \
+  --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
 
 # With authoritative scoring (Docker, amd64):
-uv run python -m automation.benchmark lanes --run-dir out --repeats 2 --eval
+uv run python -m automation.benchmark lanes --run-dir out --repeats 2 --eval \
+  --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
 
 # Score/compare a matrix that was produced elsewhere:
 uv run python -m automation.benchmark compare --run-dir out --repeats 2
@@ -325,7 +374,18 @@ administration apart from validity:
 | `failed` | some other non-zero exit |
 
 Phase artifacts live in `<workspace>/.rpi/` and are excluded from the submission archive,
-so what ProgramBench grades is the same kind of thing in every lane.
+so what ProgramBench grades is the same kind of thing in every lane. They are copied out to
+`out/<lane>/<repeat>/<instance>/rpi/`, and that copy **creates** the directory rather than
+replacing it: if one already exists the run stops with
+
+```text
+refusing to overwrite pre-existing phase artifact directory: out/.../rpi
+```
+
+Re-running into a populated run directory used to delete what was there first — the evidence
+of the attempt under investigation, destroyed by the attempt investigating it. Point
+`--run-dir` somewhere new, or move the old artifacts aside deliberately. A copy that fails
+part-way removes only the directory that call created, never one it found.
 
 ### Reading the comparison
 

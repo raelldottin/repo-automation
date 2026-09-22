@@ -310,5 +310,142 @@ class AgentSessionReportTests(unittest.TestCase):
             )
 
 
+class AgentEnvironmentIsolationTests(unittest.TestCase):
+    """A cell runs model-authored commands, so what it inherits is a security boundary.
+
+    ``dict(os.environ)`` handed every session the launcher's whole environment: the operator's
+    provider keys, GitHub tokens, cloud credentials, agent-harness markers. None of it is
+    needed to rebuild a C repository. The property under test is the absence - a variable that
+    is neither on the runner's list nor passed through ``env=`` is not there at all, whatever
+    it happens to be called. Sentinel values only; a real credential never enters a test.
+    """
+
+    def _session_environment(self, adapter_env: Mapping[str, str] | None = None) -> dict[str, str]:
+        captured: dict[str, dict[str, str]] = {}
+
+        def fake_runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            captured["env"] = dict(env)
+            return 0
+
+        task = TaskSpec(
+            instance_id="owner__proj.abc1234", repository="owner/proj", commit="abc1234", language="c", difficulty="easy"
+        )
+        adapter = SupervisorAgentAdapter(repo_root=Path.cwd(), env=adapter_env, runner=fake_runner)
+        with tempfile.TemporaryDirectory() as tmp:
+            adapter.produce_submission(task, Path(tmp) / "submission.tar.gz")
+        return captured["env"]
+
+    def test_an_unlisted_launcher_variable_does_not_reach_the_session(self) -> None:
+        marker = "BENCHMARK_LEAK_SENTINEL_NOT_A_REAL_SECRET"
+        with unittest.mock.patch.dict(os.environ, {marker: "sentinel-value"}):
+            environment = self._session_environment()
+        # assertFalse, not assertNotIn: assertNotIn renders the whole mapping into the failure
+        # message, so the test that reports a leak would be the one printing the environment.
+        self.assertFalse(marker in environment, f"{marker} reached the agent session")
+
+    def test_the_allowlist_is_exact_names_not_a_prefix_rule(self) -> None:
+        """A prefix rule fails open the first time somebody names a REPO_AUTOMATION_*_TOKEN."""
+        marker = "REPO_AUTOMATION_UNLISTED_SENTINEL"
+        with unittest.mock.patch.dict(os.environ, {marker: "sentinel-value"}):
+            inherited = benchmark_adapter.audited_inherited_environment()
+        self.assertFalse(marker in inherited, f"{marker} matched a pattern instead of a name")
+
+    def test_what_the_agent_runner_reads_is_still_inherited(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"REPO_AUTOMATION_AGENT_RUNNER": "hermes"}):
+            environment = self._session_environment()
+        self.assertEqual("hermes", environment["REPO_AUTOMATION_AGENT_RUNNER"])
+        # Without PATH the runner cannot find any agent CLI at all.
+        self.assertIn("PATH", environment)
+
+    def test_explicitly_supplied_configuration_reaches_the_session(self) -> None:
+        """``env=`` is the caller's authorization, so it is forwarded whatever it is called."""
+        environment = self._session_environment({"NVIDIA_API_KEY": "sentinel-key"})
+        self.assertEqual("sentinel-key", environment["NVIDIA_API_KEY"])
+
+    def test_an_explicit_value_wins_over_the_inherited_one(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"HERMES_INFERENCE_MODEL": "inherited-model"}):
+            environment = self._session_environment({"HERMES_INFERENCE_MODEL": "explicit-model"})
+        self.assertEqual("explicit-model", environment["HERMES_INFERENCE_MODEL"])
+
+
+class PhaseArtifactOwnershipTests(unittest.TestCase):
+    """The ``.rpi`` copy claims its destination; it never takes one over.
+
+    The copy used to open with an unconditional ``rmtree`` of ``out/<cell>/rpi``. Re-running
+    into a run directory that already held a finished cell's phase artifacts deleted them:
+    the evidence of the attempt under investigation, removed by the attempt investigating it.
+    """
+
+    def _workspace_with_artifacts(self, tmp: Path) -> Path:
+        workspace = tmp / "workspace"
+        (workspace / benchmark_adapter.RPI_DIR).mkdir(parents=True)
+        (workspace / benchmark_adapter.RPI_DIR / "phase-1.json").write_text("{}\n", encoding="utf-8")
+        return workspace
+
+    def test_phase_artifacts_are_copied_into_a_destination_this_call_creates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "out"
+            out_dir.mkdir()
+            benchmark_adapter._save_phase_artifacts(self._workspace_with_artifacts(Path(tmp)), out_dir)
+            self.assertEqual("{}\n", (out_dir / "rpi" / "phase-1.json").read_text(encoding="utf-8"))
+
+    def test_a_pre_existing_artifact_directory_is_refused_not_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "out"
+            (out_dir / "rpi").mkdir(parents=True)
+            sentinel = out_dir / "rpi" / "owner-sentinel.txt"
+            sentinel.write_text("first attempt\n", encoding="utf-8")
+            with self.assertRaises(FileExistsError) as refusal:
+                benchmark_adapter._save_phase_artifacts(self._workspace_with_artifacts(Path(tmp)), out_dir)
+            self.assertIn("refusing to overwrite", str(refusal.exception))
+            self.assertEqual("first attempt\n", sentinel.read_text(encoding="utf-8"))
+
+    def test_a_failed_copy_removes_only_what_this_call_created(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "out"
+            out_dir.mkdir()
+            with unittest.mock.patch.object(benchmark_adapter.shutil, "copytree", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    benchmark_adapter._save_phase_artifacts(self._workspace_with_artifacts(Path(tmp)), out_dir)
+            self.assertFalse((out_dir / "rpi").exists())
+
+
+class AgentEnvSelectionTests(unittest.TestCase):
+    """``--agent-env`` names a launcher variable to forward. It never carries the value.
+
+    Removing ambient inheritance removes the provider key with it, so a real run needs a way
+    to say which variables it authorizes. Names only: ``--agent-env NAME=value`` would put the
+    credential in argv, where every process listing on the host can read it.
+    """
+
+    def test_named_variables_are_copied_from_the_launcher(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"SENTINEL_PROVIDER_KEY": "sentinel-value"}):
+            selected = benchmark_run.resolve_agent_env(["SENTINEL_PROVIDER_KEY"])
+        self.assertEqual({"SENTINEL_PROVIDER_KEY": "sentinel-value"}, selected)
+
+    def test_a_variable_that_is_not_set_is_refused_before_the_agent_launches(self) -> None:
+        with self.assertRaises(SystemExit) as refusal:
+            benchmark_run.resolve_agent_env(["SENTINEL_ABSENT_VARIABLE"])
+        self.assertIn("SENTINEL_ABSENT_VARIABLE", str(refusal.exception))
+
+    def test_an_argument_carrying_a_value_is_rejected_without_echoing_it(self) -> None:
+        for argument in ("SENTINEL_KEY=sentinel-value", "FOO-BAR", "$(evil)", "", "2FAST"):
+            with self.subTest(argument=argument):
+                with self.assertRaises(SystemExit) as refusal:
+                    benchmark_run.resolve_agent_env([argument])
+                self.assertNotIn("sentinel-value", str(refusal.exception))
+
+    def test_the_cli_forwards_the_selection_to_the_adapter(self) -> None:
+        args = benchmark_run.build_parser().parse_args(["run", "--run-dir", "out", "--agent-env", "SENTINEL_PROVIDER_KEY"])
+        with unittest.mock.patch.dict(os.environ, {"SENTINEL_PROVIDER_KEY": "sentinel-value"}):
+            environment = benchmark_run._build_adapter(args)._run_environment()
+            self.assertEqual("sentinel-value", environment["SENTINEL_PROVIDER_KEY"])
+
+    def test_the_cli_refuses_an_unset_selection_before_building_an_adapter(self) -> None:
+        args = benchmark_run.build_parser().parse_args(["run", "--run-dir", "out", "--agent-env", "SENTINEL_ABSENT_VARIABLE"])
+        with self.assertRaises(SystemExit):
+            benchmark_run._build_adapter(args)
+
+
 if __name__ == "__main__":
     unittest.main()

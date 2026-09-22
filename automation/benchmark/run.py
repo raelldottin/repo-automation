@@ -16,6 +16,8 @@ HERMES_INFERENCE_MODEL=moonshotai/kimi-k3, NVIDIA_API_KEY=...
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -28,6 +30,33 @@ from .strategies import ALL_LANES
 
 REPORT_FILENAME = "effectiveness-report.json"
 _DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def resolve_agent_env(names: Optional[Sequence[str]]) -> dict[str, str]:
+    """Copy exactly the named launcher variables through to the agent session.
+
+    The session inherits only what the runner reads (``adapter.INHERITED_ENV_NAMES``), which
+    is deliberately too little to reach a provider. This is how a run says which of its own
+    variables it authorizes on top of that - a name at a time.
+
+    Names only. ``--agent-env NAME=value`` would put credential material in argv, where every
+    process listing on the host can read it, so an argument carrying a value is refused and
+    only the part before the ``=`` is ever echoed back. A name that is not set is refused too:
+    a run that reached the provider unauthenticated would score the outage as a lane effect,
+    and it is cheaper to fail now than after the first cell has spent its budget.
+    """
+    selected: dict[str, str] = {}
+    for name in names or ():
+        if not _ENV_NAME.match(name):
+            raise SystemExit(
+                f"--agent-env takes a variable name, not {name.split('=', 1)[0]!r}: "
+                "pass the name and set the variable in the environment."
+            )
+        if name not in os.environ:
+            raise SystemExit(f"--agent-env {name} is not set in this environment; the agent was not launched.")
+        selected[name] = os.environ[name]
+    return selected
 
 
 def produce_submissions(run_dir: Path, instances: Sequence[str], adapter: AgentAdapter) -> None:
@@ -67,6 +96,7 @@ def _build_adapter(args: argparse.Namespace) -> SupervisorAgentAdapter:
         repo_root=Path(args.repo_root),
         agent_command_template=args.agent_cmd,
         timeout_seconds=args.timeout,
+        env=resolve_agent_env(args.agent_env),
     )
 
 
@@ -85,6 +115,13 @@ def _add_adapter_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo-root", type=Path, default=_DEFAULT_REPO_ROOT, help="Harness repo root.")
     parser.add_argument("--agent-cmd", help="Override the agent command template (default: run_agent.sh).")
     parser.add_argument("--timeout", type=int, default=1800, help="Per-instance agent timeout (seconds).")
+    parser.add_argument(
+        "--agent-env",
+        action="append",
+        metavar="VARIABLE_NAME",
+        default=[],
+        help="Forward this launcher variable to the agent session. Repeatable. Name only, never NAME=value.",
+    )
 
 
 def _add_eval_args(parser: argparse.ArgumentParser) -> None:
@@ -171,6 +208,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     repo_root=Path(args.repo_root),
                     agent_command_template=args.agent_cmd,
                     timeout_seconds=args.timeout,
+                    env=resolve_agent_env(args.agent_env),
                 ),
                 repo_root=Path(args.repo_root),
                 lanes=args.lanes,

@@ -25,7 +25,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from .adapter import AGENT_SESSIONS_DIR, AgentAdapter, SupervisorAgentAdapter
 from .evalrunner import EvalRunner
@@ -144,14 +144,20 @@ def default_adapter_factory(
     repo_root: Path,
     agent_command_template: Optional[str] = None,
     timeout_seconds: int = 1800,
+    env: Optional[Mapping[str, str]] = None,
 ) -> AdapterFactory:
-    """Build one adapter per lane; everything except the strategy is held fixed."""
+    """Build one adapter per lane; everything except the strategy is held fixed.
+
+    ``env`` included: every lane is authorized the same variables, or the difference between
+    two lanes would be what they could reach rather than how they were prompted.
+    """
 
     def factory(lane: str) -> AgentAdapter:
         return SupervisorAgentAdapter(
             repo_root=repo_root,
             agent_command_template=agent_command_template,
             timeout_seconds=timeout_seconds,
+            env=env,
             strategy=build_strategy(lane),
         )
 

@@ -55,6 +55,43 @@ REBUILD_DIFF_BUDGET = 1_000_000
 # (formatted_command, workspace, env, timeout_seconds) -> return code
 CommandRunner = Callable[[str, Path, Mapping[str, str], int], int]
 
+# Exactly what ``run_agent.sh`` reads, by literal name, and nothing else.
+#
+# A cell's whole job is to run model-authored commands, and it used to be handed
+# ``dict(os.environ)``: the operator's provider keys, GitHub token, cloud credentials and
+# SSH agent socket, none of which rebuilds a C repository. The list is names, not patterns,
+# because a pattern fails open - ``REPO_AUTOMATION_*`` ships the next variable somebody adds
+# under that prefix, whatever ends up in it, and the property worth having is that a variable
+# nobody considered is absent. Anything else a session genuinely needs (a provider key, a base
+# URL) is authorized deliberately through ``env=`` / ``--agent-env``.
+#
+# ``TERMINAL_CWD`` and ``HERMES_HOME`` are deliberately absent: the runner sets both itself,
+# per invocation, and inheriting either would point a session at the previous cell's state.
+INHERITED_ENV_NAMES = (
+    "PATH",  # find any agent CLI at all
+    "HOME",  # the CLI's own config and credential store
+    "TMPDIR",  # run_agent.sh mktemp -d's the throwaway HERMES_HOME under it
+    "LANG",
+    "LC_ALL",
+    "REPO_AUTOMATION_AGENT_RUNNER",
+    "REPO_AUTOMATION_CODEX_BIN",
+    "REPO_AUTOMATION_CLAUDE_BIN",
+    "REPO_AUTOMATION_CLAUDE_PERMISSION_MODE",
+    "REPO_AUTOMATION_HERMES_BIN",
+    "OWLORY_CODEX_BIN",  # legacy alias run_agent.sh still honours
+    "HERMES_REVISION",
+    "HERMES_INFERENCE_PROVIDER",
+    "HERMES_INFERENCE_MODEL",
+    "CLAUDECODE",  # the three markers run_agent.sh auto-detects Claude Code by
+    "CLAUDE_CODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+)
+
+
+def audited_inherited_environment() -> dict[str, str]:
+    """The launcher variables an agent session inherits, selected by exact name."""
+    return {name: os.environ[name] for name in INHERITED_ENV_NAMES if name in os.environ}
+
 
 @dataclass
 class SubmissionResult:
@@ -175,8 +212,22 @@ def _save_phase_artifacts(workspace: Path, out_dir: Path) -> None:
     if not source.is_dir():
         return
     destination = Path(out_dir) / "rpi"
-    shutil.rmtree(destination, ignore_errors=True)
-    shutil.copytree(source, destination)
+    # mkdir, not exists()-then-copy: claiming the directory is how ownership is decided, so it
+    # has to be the single operation that decides it. The copy used to open with an
+    # unconditional rmtree, which meant a rerun into a run directory holding a finished cell's
+    # phase artifacts deleted them - the evidence of the attempt being investigated, destroyed
+    # by the attempt investigating it. A retry does not get to decide it owns someone's output.
+    try:
+        destination.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as collision:
+        raise FileExistsError(f"refusing to overwrite pre-existing phase artifact directory: {destination}") from collision
+    try:
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+    except BaseException:
+        # Only ever the directory this call created, and only because it created it: a
+        # half-copied artifact set reads as a complete one.
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
 
 
 class SupervisorAgentAdapter:
@@ -203,8 +254,10 @@ class SupervisorAgentAdapter:
         return self._strategy.name
 
     def _run_environment(self) -> dict[str, str]:
-        environment = dict(os.environ)
+        environment = audited_inherited_environment()
         if self._env:
+            # Explicit configuration wins, and is never filtered through the inherited list:
+            # an env= mapping is the caller's authorization, not an accident of the launcher.
             environment.update(self._env)
         return environment
 
