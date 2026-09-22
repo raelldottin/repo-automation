@@ -56,6 +56,42 @@ REBUILD_DIFF_BUDGET = 1_000_000
 CommandRunner = Callable[[str, Path, Mapping[str, str], int], int]
 
 
+# Exact names audited against automation/supervisor/run_agent.sh. This is deliberately
+# not a prefix/denylist scheme: adding a new parent variable cannot silently expand the
+# child agent's authority. Credential-bearing provider variables stay out unless the
+# caller explicitly supplies them through SupervisorAgentAdapter(env=...).
+INHERITED_AGENT_ENV_NAMES = (
+    # Process launch and filesystem basics used by the wrapper and agent CLIs.
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    # Locale/terminal state needed for predictable non-interactive CLI execution.
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    # Exact run_agent.sh runner selection and executable overrides.
+    "REPO_AUTOMATION_AGENT_RUNNER",
+    "REPO_AUTOMATION_CODEX_BIN",
+    "REPO_AUTOMATION_CLAUDE_BIN",
+    "REPO_AUTOMATION_CLAUDE_PERMISSION_MODE",
+    "REPO_AUTOMATION_HERMES_BIN",
+    "OWLORY_CODEX_BIN",
+    # Exact signals used by run_agent.sh's auto-runner selection.
+    "CLAUDECODE",
+    "CLAUDE_CODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    # Non-secret Hermes selection/provenance values read by run_agent.sh.
+    "HERMES_INFERENCE_PROVIDER",
+    "HERMES_INFERENCE_MODEL",
+    "HERMES_REVISION",
+)
+
+
+def _audited_inherited_environment() -> dict[str, str]:
+    return {name: os.environ[name] for name in INHERITED_AGENT_ENV_NAMES if name in os.environ}
+
+
 @dataclass
 class SubmissionResult:
     instance_id: str
@@ -170,13 +206,24 @@ def _archive_workspace(workspace: Path, out_tar: Path) -> None:
 
 
 def _save_phase_artifacts(workspace: Path, out_dir: Path) -> None:
-    """Keep phase artifacts next to the submission so a result can be reproduced."""
+    """Keep phase artifacts next to the submission without taking ownership of caller data."""
     source = workspace / RPI_DIR
     if not source.is_dir():
         return
     destination = Path(out_dir) / "rpi"
-    shutil.rmtree(destination, ignore_errors=True)
-    shutil.copytree(source, destination)
+    try:
+        destination.mkdir(exist_ok=False)
+    except FileExistsError as exc:
+        message = f"refusing to overwrite pre-existing phase artifact directory: {destination}"
+        raise FileExistsError(message) from exc
+
+    # mkdir(exist_ok=False) is the ownership acquisition. Cleanup is safe only after that
+    # succeeds, because only then did this invocation create the destination it removes.
+    try:
+        shutil.copytree(source, destination, dirs_exist_ok=True)
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
 
 
 class SupervisorAgentAdapter:
@@ -203,8 +250,10 @@ class SupervisorAgentAdapter:
         return self._strategy.name
 
     def _run_environment(self) -> dict[str, str]:
-        environment = dict(os.environ)
+        environment = _audited_inherited_environment()
         if self._env:
+            # Explicit caller configuration is the intentional capability boundary and
+            # deliberately wins over an inherited benign value with the same name.
             environment.update(self._env)
         return environment
 
