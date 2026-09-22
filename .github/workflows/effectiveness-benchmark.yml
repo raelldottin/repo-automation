@@ -38,6 +38,10 @@ on:
         description: "Model id served by the NVIDIA endpoint"
         type: string
         default: "qwen/qwen3-coder-480b-a35b-instruct"
+      probe:
+        description: "Diagnostic only: run one research phase over the stream-json transport instead of any benchmark. Not a lane; its output is not comparable with a cell."
+        type: boolean
+        default: false
   schedule:
     # 07:17 UTC nightly — off the top of the hour on purpose.
     - cron: "17 7 * * *"
@@ -209,7 +213,7 @@ jobs:
           PY
 
       - name: Run benchmark (rebuild -> eval -> score)
-        if: inputs.experiment != true
+        if: inputs.experiment != true && inputs.probe != true
         run: |
           if [ "${{ inputs.run_all }}" = "false" ] && [ -n "${{ inputs.instances }}" ]; then
             uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }}
@@ -221,6 +225,23 @@ jobs:
       # Without it every E cell is skipped, which would quietly turn an A-E experiment
       # into an A-D one, so provision it from the lock file and prove it resolves before
       # any agent budget is spent. The lock is the single source of the pin.
+      # A diagnostic, never a cell: one research phase at the lane's own 600s ceiling, run
+      # through `hermes chat --format stream-json` so the events a killed session already
+      # flushed survive it. Three A-E runs died here with a 0-byte log and no research.json,
+      # and --oneshot can never say why. Nothing this step produces belongs in a comparison:
+      # the transport is a different execution path in the agent and leaves no usage receipt.
+      - name: Run the stream-json research probe (diagnostic)
+        if: inputs.probe == true
+        run: |
+          set -o pipefail
+          instance=$(echo "${{ inputs.instances }}" | awk '{print $1}')
+          if [ -z "$instance" ]; then
+            echo "::error::The probe needs one instance id in the instances input." >&2
+            exit 1
+          fi
+          uv run python -m automation.benchmark.probe --instance "$instance" --out-dir out/probe | tee /tmp/probe.txt
+          printf '```\n%s\n```\n' "$(cat /tmp/probe.txt)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Provision the pinned J-Space checkout
         if: inputs.experiment == true && contains(inputs.lanes, 'E')
         run: |
@@ -239,7 +260,7 @@ jobs:
       # The experiment costs lanes x repeats x instances agent runs, so it is manual only
       # and defaults to the smoke set. Never add it to the nightly schedule unattended.
       - name: Run lane experiment (A-E)
-        if: inputs.experiment == true
+        if: inputs.experiment == true && inputs.probe != true
         run: |
           if [ -n "${{ inputs.instances }}" ]; then
             SELECTION="--instances ${{ inputs.instances }}"
@@ -268,4 +289,6 @@ jobs:
             out/**/rpi/*.json
             out/**/agent-sessions/*.json
             out/**/agent-sessions/*.log
+            out/probe/probe.json
+            out/probe/agent-sessions/*.stream.jsonl
           if-no-files-found: warn

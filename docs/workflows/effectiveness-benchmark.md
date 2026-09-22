@@ -248,6 +248,7 @@ out/<lane>/r<repeat>/<instance>/submission.tar.gz   graded artefact
 out/<lane>/r<repeat>/<instance>/run.json            provenance + process metrics
 out/<lane>/r<repeat>/<instance>/rpi/                phase artifacts (C–E)
 out/<lane>/r<repeat>/<instance>/agent-sessions/     per-session usage + controls + log
+out/probe/probe.json | probe/agent-sessions/*.stream.jsonl   diagnostic only, not a cell
 out/<lane>/r<repeat>/effectiveness-report.json      ProgramBench score for that cell
 out/lane-comparison.json | lane-comparison.md       the comparison
 ```
@@ -299,10 +300,41 @@ as `grace_seconds`, never charged to the phase. The cell counts as a failure and
 continues; one slow cell does not take the finished lanes with it. Repeated 124s mean the
 budget is too small for the instance, not that the lane lost.
 
-The grace, and `PYTHONUNBUFFERED=1` in the Hermes branch of `run_agent.sh`, exist for the
-same reason: in runs 35715428932 and 35736569601 every session killed at its ceiling
-archived a **0-byte log**, because SIGKILL discarded block-buffered stdout — and that log
-is the evidence the provider-validity verdict rests on.
+A session killed at its ceiling archives a **0-byte log**, and no buffering setting
+changes that. Under `--oneshot` Hermes redirects the turn's stdout *and* stderr to
+`/dev/null` for the whole call tree and prints the final response only after the turn
+returns, and it disables logging, so `$HERMES_HOME/logs/agent.log` holds nothing past
+startup either. Runs 35715428932, 35736569601 and 35788842735 all recorded this;
+`PYTHONUNBUFFERED=1` stayed in the Hermes branch of `run_agent.sh` only because it is
+harmless. Where the evidence actually comes from is the diagnostic transport below.
+
+### The diagnostic transport (`stream-json`)
+
+`REPO_AUTOMATION_HERMES_TRANSPORT=stream-json` runs the session as
+`hermes chat -q "$PROMPT" --format stream-json` instead of `hermes --oneshot "$PROMPT"`.
+That path flushes one JSON object per event — `system/init`, text deltas, `tool_use`,
+`tool_result` — so a session killed at its ceiling keeps everything it had already emitted.
+The raw JSONL is archived untouched as `agent-sessions/<stem>.stream.jsonl`, with the
+ordinary controls receipt beside it and `transport` recorded in it.
+
+**This is a diagnostic, never a lane.** `hermes chat` is a different execution path inside
+the agent, so a result produced on it is not comparable with an A–E cell measured on
+`--oneshot`, and it carries no `--usage-file` receipt — that flag has no effect outside
+`-z/--oneshot`, so the probe records no usage rather than an empty one that would read like
+a session that spent nothing. The default transport stays `oneshot`; an unrecognised value
+is refused with exit 64 rather than silently falling back.
+
+```shell
+uv run python -m automation.benchmark.probe \
+  --instance abishekvashok__cmatrix.5c082c6 --out-dir out/probe
+```
+
+One research phase at the lane's own 600-second ceiling. `out/probe/probe.json` holds the
+phase result, the artifact and its schema errors, the tool-event timeline with offsets from
+the first event, and every event naming `research.json`; the printed summary answers what
+the model did first, whether it ever called a tool to write the artifact, when, and what the
+tool said back. In CI it is the `probe` input on the workflow, which reuses the same Hermes
+install and config-verification preflight and skips the matrix and eval entirely.
 
 ### The phase artifact contract
 

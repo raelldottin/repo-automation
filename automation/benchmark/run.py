@@ -8,6 +8,9 @@ Subcommands:
   lanes  Run the A-E effectiveness experiment (lane x repeat x instance matrix).
   compare  Reduce an existing lane matrix to lane-comparison.json/md (no Docker).
 
+The one-phase stream-JSON diagnostic is a separate entry point on purpose - it is not a
+lane and its output is not comparable with one: python -m automation.benchmark.probe.
+
 Pick the agent and the model it talks to with the runner env, e.g. NVIDIA via Hermes:
 REPO_AUTOMATION_AGENT_RUNNER=hermes, HERMES_INFERENCE_PROVIDER=nvidia,
 HERMES_INFERENCE_MODEL=moonshotai/kimi-k3, NVIDIA_API_KEY=...
