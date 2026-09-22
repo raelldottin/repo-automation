@@ -141,9 +141,13 @@ class AdapterTests(unittest.TestCase):
             self.assertTrue(out_tar.is_file())
             with tarfile.open(out_tar, "r:gz") as tar:
                 names = tar.getnames()
+            # The tarball is not uploaded, so the manifest is the only evidence of what was
+            # graded - that the cell submitted something, and that .rpi stayed out of it.
+            manifest = (out_tar.parent / benchmark_adapter.SUBMISSION_MANIFEST_FILENAME).read_text(encoding="utf-8").split()
         self.assertIn("compile.sh", names)
         self.assertIn("main.c", names)
         self.assertNotIn(".git", names)
+        self.assertEqual(sorted(names), sorted(manifest))
         # The agent was invoked with the rendered prompt + the workspace as repo root.
         self.assertIn("--prompt-file", captured["command"])
         self.assertIn("--slice-id", captured["command"])

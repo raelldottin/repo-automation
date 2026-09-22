@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 from automation.benchmark import lanes as lanes_module
-from automation.benchmark.adapter import SupervisorAgentAdapter, build_context_bundle, build_queue_data, build_slice_record
+from automation.benchmark.adapter import (
+    SUBMISSION_MANIFEST_FILENAME,
+    SupervisorAgentAdapter,
+    build_context_bundle,
+    build_queue_data,
+    build_slice_record,
+)
 from automation.benchmark.instances import TaskSpec
 from automation.benchmark.scoring import EffectivenessReport, InstanceScore
 from automation.benchmark.jspace import JSpaceArtifact, JSpaceUnavailable
@@ -242,6 +248,10 @@ class LaneTreatmentTests(unittest.TestCase):
         self.assertFalse(any(name.startswith(RPI_DIR) for name in names))
         # Kept beside the submission for reproducibility.
         self.assertTrue((out_tar.parent / "rpi" / RESEARCH_ARTIFACT).is_file())
+        # The tarball is not uploaded; the manifest is how a finished run proves this.
+        manifest = (out_tar.parent / SUBMISSION_MANIFEST_FILENAME).read_text(encoding="utf-8").split()
+        self.assertIn("compile.sh", manifest)
+        self.assertFalse([name for name in manifest if name.startswith(RPI_DIR)])
 
     def test_missing_artifact_is_recorded_and_does_not_abort_the_lane(self) -> None:
         agent, result, _ = run_lane("C", agent=FakeAgent(write_artifacts=False))
