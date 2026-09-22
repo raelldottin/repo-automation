@@ -44,18 +44,26 @@ COMPACT_BUDGET_CHARS = 4000
 
 # The lane ceiling these phase budgets are written against; a different instance budget
 # scales them proportionally, so the profile below always describes a whole lane.
-LANE_CEILING_SECONDS = 2700
+LANE_CEILING_SECONDS = 3300
 # Fixed ceilings, not one fungible remainder. A single "remaining" counter let the first
 # phase eat the lane: in run 35650966066, lane D spent 1799 of 1800 seconds researching
 # and implement got one, so no multi-phase lane submitted anything. Ceilings also keep the
 # decomposition honest - C never reclaims the compaction slots D and E spend, so D - C is
 # the cost of compaction rather than compaction plus whatever C did with the spare time.
+#
+# Sized from run 35715428932, where the previous profile censored the treatments it was
+# meant to measure: research hit its 420s ceiling in all three multi-phase lanes, implement
+# hit its 1260s ceiling in two of three, and lane E was killed before it wrote compile.sh.
+# The phases that finished topped out near 229s (plan) and 202s (compaction), so those keep
+# a 300s ceiling with headroom; research and implement get ~43% more than the ceilings they
+# repeatedly hit. A phase kill stays a legitimate outcome - the point is that it should
+# report a treatment that ran out of road, not a budget that was never wide enough.
 PHASE_CEILING_SECONDS: dict[str, int] = {
-    "research": 420,
-    "research_compact": 360,
+    "research": 600,
+    "research_compact": 300,
     "plan": 300,
-    "plan_compact": 360,
-    "implement": 1260,
+    "plan_compact": 300,
+    "implement": 1800,
 }
 
 RESEARCH_ARTIFACT = "research.json"
@@ -406,7 +414,9 @@ class _BudgetedRun:
 def _scaled_ceilings(ceilings: Mapping[str, int], timeout_seconds: int) -> dict[str, int]:
     """Hold the profile's shape when the instance budget is not the ceiling it was written for."""
     scale = timeout_seconds / LANE_CEILING_SECONDS
-    return {phase: max(int(round(seconds * scale)), 1) for phase, seconds in ceilings.items()}
+    # Floor, not round: the ceilings sum to the whole lane, so rounding each one up can hand
+    # out a second more than the instance budget allows.
+    return {phase: max(int(seconds * scale), 1) for phase, seconds in ceilings.items()}
 
 
 # --------------------------------------------------------------------------------------

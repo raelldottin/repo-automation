@@ -666,3 +666,73 @@ class ProviderValidityTests(unittest.TestCase):
         delta = lanes_module.lane_deltas(summaries)[0]
         self.assertEqual(lanes_module.VALID, delta["status"])
         self.assertAlmostEqual(0.2, delta["mean_pass_fraction"])
+
+
+class MeasurementTests(unittest.TestCase):
+    """How a score was weighted, and whether the lane ran to a conclusion, travel with it.
+
+    Run 35715428932 produced both hazards at once: every multi-phase lane lost its research
+    phase to a ceiling, and re-weighting the same results by test branch swapped two lanes.
+    Either one turns an artefact into an apparent treatment effect if the report omits it.
+    """
+
+    def _summary(self, lane: str, phases: list[dict], reports: list[EffectivenessReport]) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            cell_dir = Path(tmp) / lane / "r1" / "inst-a"
+            cell_dir.mkdir(parents=True)
+            (cell_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "lane": lane,
+                        "returncode": 0,
+                        "strategy": {
+                            "seconds": 10.0,
+                            "agent_invocations": len(phases),
+                            "phase_failures": 0,
+                            "compaction": {},
+                            "phases": phases,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return lanes_module.summarize_lane(Path(tmp), lane, repeats=1, reports=reports)
+
+    def test_phases_killed_at_their_ceiling_are_named(self) -> None:
+        summary = self._summary(
+            "E",
+            [
+                {"phase": "research", "returncode": 124},
+                {"phase": "plan", "returncode": 0},
+                {"phase": "implement", "returncode": 124},
+            ],
+            [],
+        )
+        self.assertEqual(["implement", "research"], summary["measurement"]["censored_phases"])
+
+    def test_a_lane_that_ran_to_a_conclusion_names_nothing(self) -> None:
+        summary = self._summary("C", [{"phase": "implement", "returncode": 0}], [])
+        self.assertEqual([], summary["measurement"]["censored_phases"])
+
+    def test_both_weightings_of_the_same_results_reach_the_lane(self) -> None:
+        score = InstanceScore("i1", 102, 90, branch_pass_fractions=(0.9, 0.0), unique_tests=90)
+        summary = self._summary("D", [{"phase": "implement", "returncode": 0}], [EffectivenessReport((score,))])
+        self.assertAlmostEqual(0.8824, summary["primary"]["mean_pass_fraction"], places=4)
+        self.assertAlmostEqual(0.45, summary["measurement"]["branch_macro_pass_fraction"])
+        self.assertEqual(102, summary["measurement"]["executions"])
+        self.assertEqual(90, summary["measurement"]["unique_tests"])
+
+    def test_the_delta_carries_the_balanced_figure_beside_the_pooled_one(self) -> None:
+        def lane(name: str, pooled: float, macro: float) -> dict:
+            return {
+                "lane": name,
+                "provider_validity": lanes_module.VALID,
+                "primary": {"resolve_rate": 0.0, "near_resolve_rate": 0.0, "mean_pass_fraction": pooled},
+                "measurement": {"branch_macro_pass_fraction": macro, "executions": 1000, "unique_tests": 769},
+                "efficiency": {"agent_invocations": 5, "wall_clock_seconds": 100.0},
+            }
+
+        # B - A is negative pooled and positive balanced: the ordering is a weighting artefact.
+        delta = lanes_module.lane_deltas([lane("A", 0.833, 0.842), lane("B", 0.777, 0.830)])[0]
+        self.assertAlmostEqual(-0.056, delta["mean_pass_fraction"])
+        self.assertAlmostEqual(-0.012, delta["branch_macro_pass_fraction"])

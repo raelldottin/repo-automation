@@ -33,7 +33,7 @@ on:
       timeout:
         description: "Per-instance agent budget in seconds (split across a lane's phases by fixed ceilings)"
         type: string
-        default: "2700"
+        default: "3300"
       model:
         description: "Model id served by the NVIDIA endpoint"
         type: string
@@ -267,4 +267,5 @@ jobs:
             out/**/submission.files.txt
             out/**/rpi/*.json
             out/**/agent-sessions/*.json
+            out/**/agent-sessions/*.log
           if-no-files-found: warn
