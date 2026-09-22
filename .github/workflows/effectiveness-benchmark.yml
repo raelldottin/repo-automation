@@ -212,9 +212,9 @@ jobs:
         if: inputs.experiment != true
         run: |
           if [ "${{ inputs.run_all }}" = "false" ] && [ -n "${{ inputs.instances }}" ]; then
-            uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }}
+            uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }} --agent-env NVIDIA_API_KEY
           else
-            uv run python -m automation.benchmark all --run-dir out --all
+            uv run python -m automation.benchmark all --run-dir out --all --agent-env NVIDIA_API_KEY
           fi
 
       # Lane E administers the canonical J-Space skill from a pinned external checkout.
@@ -250,7 +250,7 @@ jobs:
           # repeats x timeout; keep it under this job's 360-minute cap.
           uv run python -m automation.benchmark lanes --run-dir out --eval \
             --lanes ${{ inputs.lanes }} --repeats ${{ inputs.repeats }} \
-            --timeout ${{ inputs.timeout }} $SELECTION
+            --agent-env NVIDIA_API_KEY --timeout ${{ inputs.timeout }} $SELECTION
 
       - name: Upload effectiveness report
         if: always()
