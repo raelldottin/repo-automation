@@ -82,9 +82,7 @@ def run_benchmark(
     return None
 
 
-def _build_adapter(
-    args: argparse.Namespace, env: Optional[Mapping[str, str]] = None
-) -> SupervisorAgentAdapter:
+def _build_adapter(args: argparse.Namespace, env: Optional[Mapping[str, str]] = None) -> SupervisorAgentAdapter:
     selected_env = _selected_agent_env(args.agent_env) if env is None else dict(env)
     return SupervisorAgentAdapter(
         repo_root=Path(args.repo_root),
