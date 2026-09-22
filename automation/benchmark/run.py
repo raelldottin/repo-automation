@@ -230,7 +230,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         report = run_benchmark(
             run_dir=args.run_dir,
             instances=_instances_from_args(args),
-            adapter=_build_adapter(args),
+            adapter=_build_adapter(args, agent_env),
             eval_runner=ProgramBenchEvalRunner(args.programbench_cmd, workers=args.workers, docker_cpus=args.docker_cpus),
         )
         assert report is not None
