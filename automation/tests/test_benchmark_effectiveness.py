@@ -176,6 +176,41 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("--prompt-file", captured["command"])
         self.assertIn("--slice-id", captured["command"])
 
+    def test_parent_environment_is_not_implicitly_forwarded_to_agent(self) -> None:
+        captured: dict[str, str] = {}
+
+        def fake_runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            captured.update(env)
+            return 0
+
+        with unittest.mock.patch.dict(os.environ, {"BENCHMARK_PARENT_SECRET": "do-not-leak"}, clear=False):
+            adapter = SupervisorAgentAdapter(repo_root=self.repo_root, runner=fake_runner)
+            with tempfile.TemporaryDirectory() as tmp:
+                adapter.produce_submission(self.task, Path(tmp) / "submission.tar.gz")
+
+        self.assertFalse("BENCHMARK_PARENT_SECRET" in captured, "ambient parent variable crossed into agent environment")
+
+    def test_preexisting_phase_artifact_directory_is_refused_and_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            out_dir = root / "out"
+            source = workspace / benchmark_adapter.RPI_DIR
+            destination = out_dir / "rpi"
+            source.mkdir(parents=True)
+            destination.mkdir(parents=True)
+            (source / "phase.json").write_text('{"phase": "new"}\n', encoding="utf-8")
+            sentinel = destination / "owner-sentinel.txt"
+            sentinel.write_bytes(b"owned-by-caller\n")
+            before = {entry.name: entry.read_bytes() for entry in destination.iterdir() if entry.is_file()}
+
+            with self.assertRaisesRegex(FileExistsError, "refusing to overwrite pre-existing phase artifact directory"):
+                benchmark_adapter._save_phase_artifacts(workspace, out_dir)
+
+            after = {entry.name: entry.read_bytes() for entry in destination.iterdir() if entry.is_file()}
+            self.assertEqual(before, after)
+            self.assertEqual(b"owned-by-caller\n", sentinel.read_bytes())
+
 
 class OrchestratorTests(unittest.TestCase):
     def test_run_benchmark_is_container_free_end_to_end(self) -> None:
