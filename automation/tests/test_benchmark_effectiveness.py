@@ -189,7 +189,7 @@ class AdapterTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 adapter.produce_submission(self.task, Path(tmp) / "submission.tar.gz")
 
-        self.assertNotIn("BENCHMARK_PARENT_SECRET", captured)
+        self.assertFalse("BENCHMARK_PARENT_SECRET" in captured, "ambient parent variable crossed into agent environment")
 
     def test_preexisting_phase_artifact_directory_is_refused_and_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
