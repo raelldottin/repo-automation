@@ -53,6 +53,31 @@ PROVENANCE_ENV_KEYS = (
 )
 _SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
 
+# Whether a cell's outcome is comparable at all. A provider that refused to serve produces a
+# low score for a reason that has nothing to do with the lane's treatment, and subtracting one
+# such cell from another reports an outage as an effect: run 35701448042 rendered a rate limit
+# as "D - C = -74.8% mean pass". Non-valid cells keep their score as a diagnostic and leave the
+# deltas.
+VALID = "valid"
+PROVIDER_DEGRADED = "provider_degraded"
+PROVIDER_UNAVAILABLE = "provider_unavailable"
+# Worst-first: one refused cell decides the lane.
+_VALIDITY_ORDER = (PROVIDER_UNAVAILABLE, PROVIDER_DEGRADED, VALID)
+
+# Hermes' two terminal lines for a call it gave up on, from agent/turn_recovery.py: the first
+# is the 429 path, the second the exhausted-transport path (5xx, connect/read timeouts). Both
+# mean the provider declined to answer.
+#
+# Read from the session's own log, never inferred from a missing usage report: a session killed
+# at its phase ceiling also writes no usage, and returncode 124 is an experiment outcome, not a
+# provider failure. Only an explicit line counts.
+_PROVIDER_FAILURE_MARKERS = (
+    ("rate_limit", "Rate limited after "),
+    ("unavailable", "API failed after "),
+)
+SESSION_LOG_SUFFIX = ".log"
+_EVIDENCE_CHARS = 200
+
 AdapterFactory = Callable[[str], AgentAdapter]
 
 
@@ -172,8 +197,41 @@ def _agent_sessions(instance_dir: Path) -> list[dict[str, Any]]:
                 session[key] = json.loads((sessions_dir / f"{stem}{suffix}").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 session[key] = None
+        session["provider_failure"] = _provider_failure(sessions_dir / f"{stem}{SESSION_LOG_SUFFIX}")
         sessions.append(session)
     return sessions
+
+
+def _provider_failure(log_path: Path) -> Optional[dict[str, str]]:
+    """The line where the provider refused this session, or None.
+
+    The log is kept on the runner rather than uploaded, so carry the sentence itself: a
+    classification nobody can check against its evidence is just an assertion.
+    """
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for kind, marker in _PROVIDER_FAILURE_MARKERS:
+        index = text.find(marker)
+        if index >= 0:
+            return {"kind": kind, "evidence": text[index:].splitlines()[0][:_EVIDENCE_CHARS]}
+    return None
+
+
+def classify_provider_validity(sessions: Sequence[dict[str, Any]]) -> str:
+    """Is this cell's outcome a treatment result, or a provider one?
+
+    ``valid``                every session was either served or ended for an experiment-local
+                             reason (its phase ceiling, a failed build, a bad submission).
+    ``provider_degraded``    some session was served, another was refused - the lane ran on
+                             part of its treatment.
+    ``provider_unavailable`` nothing was ever served and the provider is on record refusing.
+    """
+    if not any(session.get("provider_failure") for session in sessions):
+        return VALID
+    served = any((session.get("usage") or {}).get("model") for session in sessions)
+    return PROVIDER_DEGRADED if served else PROVIDER_UNAVAILABLE
 
 
 def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) -> dict[str, Any]:
@@ -184,6 +242,7 @@ def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) 
 
     result = adapter.produce_submission(task_spec(cell.instance_id), instance_dir / "submission.tar.gz")
 
+    sessions = _agent_sessions(instance_dir)
     provenance: dict[str, Any] = {
         "lane": cell.lane,
         "instance_id": cell.instance_id,
@@ -193,7 +252,8 @@ def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) 
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "returncode": result.returncode,
-        "agent_sessions": _agent_sessions(instance_dir),
+        "agent_sessions": sessions,
+        "provider_validity": classify_provider_validity(sessions),
         "strategy": result.strategy.to_dict() if result.strategy is not None else None,
     }
     (instance_dir / PROVENANCE_FILENAME).write_text(json.dumps(provenance, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -258,6 +318,13 @@ def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[Eff
         "repeats": len(reports),
         "attempts": len(provenance) - len(skipped),
         "skipped": len(skipped),
+        # Worst cell decides: one repeat the provider refused is enough to stop the lane from
+        # standing in a comparison, even if another repeat ran clean.
+        "provider_validity": min(
+            (record.get("provider_validity", VALID) for record in provenance),
+            key=_VALIDITY_ORDER.index,
+            default=VALID,
+        ),
         "jspace": jspace,
         "primary": {
             "resolve_rate": round(_mean(resolve_rates), 4),
@@ -292,10 +359,23 @@ def lane_deltas(summaries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     deltas = []
     for previous, current in zip(ordered, ordered[1:]):
         before, after = by_lane[previous], by_lane[current]
+        # Both sides have to be outcomes the provider actually produced. Subtracting a refused
+        # cell from a served one measures the outage, and does it in the units of the treatment.
+        if VALID != before.get("provider_validity", VALID) or VALID != after.get("provider_validity", VALID):
+            deltas.append(
+                {
+                    "comparison": f"{current} - {previous}",
+                    "treatment": LANE_TREATMENTS.get(current, ""),
+                    "status": "unavailable",
+                    "reason": "no provider-valid pair",
+                }
+            )
+            continue
         deltas.append(
             {
                 "comparison": f"{current} - {previous}",
                 "treatment": LANE_TREATMENTS.get(current, ""),
+                "status": VALID,
                 "resolve_rate": round(after["primary"]["resolve_rate"] - before["primary"]["resolve_rate"], 4),
                 "near_resolve_rate": round(after["primary"]["near_resolve_rate"] - before["primary"]["near_resolve_rate"], 4),
                 "mean_pass_fraction": round(after["primary"]["mean_pass_fraction"] - before["primary"]["mean_pass_fraction"], 4),
@@ -339,26 +419,52 @@ def build_comparison(run_dir: Path, lanes: Sequence[str], repeats: int) -> dict[
 
 def render_comparison_markdown(comparison: dict[str, Any]) -> str:
     lines = ["# Lane comparison", "", "## Primary outcome (ProgramBench)", ""]
-    lines.append("| lane | treatment | resolve | near | mean pass | stdev(resolve) | agent calls | wall s |")
-    lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
+    lines.append("| lane | treatment | validity | resolve | near | mean pass | stdev(resolve) | agent calls | wall s |")
+    lines.append("|---|---|---|---:|---:|---:|---:|---:|---:|")
     for summary in comparison["lanes"]:
         primary, efficiency, stability = summary["primary"], summary["efficiency"], summary["stability"]
         lines.append(
             f"| {summary['lane']} | {LANE_TREATMENTS.get(summary['lane'], '')} "
+            f"| {summary.get('provider_validity', VALID)} "
             f"| {primary['resolve_rate']:.1%} | {primary['near_resolve_rate']:.1%} "
             f"| {primary['mean_pass_fraction']:.1%} | {stability['resolve_rate_stdev']:.3f} "
             f"| {efficiency['agent_invocations']} | {efficiency['wall_clock_seconds']:.0f} |"
         )
 
+    invalid = [summary for summary in comparison["lanes"] if summary.get("provider_validity", VALID) != VALID]
+    if invalid:
+        lines += [
+            "",
+            "## Provider validity",
+            "",
+            "The provider refused to serve part or all of these lanes. Their scores are kept as",
+            "diagnostics and excluded from the deltas below: a rate limit is not a treatment.",
+            "",
+        ]
+        lines += [
+            f"- {summary['lane']}: {summary['provider_validity']} "
+            f"- diagnostic score {summary['primary']['mean_pass_fraction']:.1%}"
+            for summary in invalid
+        ]
+
     lines += ["", "## Marginal contribution of each treatment", ""]
-    lines.append("| comparison | treatment added | resolve | near | mean pass | agent calls | wall s |")
-    lines.append("|---|---|---:|---:|---:|---:|---:|")
-    for delta in comparison["deltas"]:
+    comparable = [delta for delta in comparison["deltas"] if delta.get("status", VALID) == VALID]
+    if comparable:
+        lines.append("| comparison | treatment added | resolve | near | mean pass | agent calls | wall s |")
+        lines.append("|---|---|---:|---:|---:|---:|---:|")
+    else:
+        lines.append("No comparison had a provider-valid pair; this run measures nothing.")
+    for delta in comparable:
         lines.append(
             f"| {delta['comparison']} | {delta['treatment']} | {delta['resolve_rate']:+.1%} "
             f"| {delta['near_resolve_rate']:+.1%} | {delta['mean_pass_fraction']:+.1%} "
             f"| {delta['agent_invocations']:+d} | {delta['wall_clock_seconds']:+.0f} |"
         )
+
+    excluded = [delta for delta in comparison["deltas"] if delta.get("status", VALID) != VALID]
+    if excluded:
+        lines += ["", "Comparisons with no provider-valid pair:", ""]
+        lines += [f"- {delta['comparison']}: {delta['status']} - reason: {delta['reason']}" for delta in excluded]
 
     failures = [
         (summary["lane"], summary["process"]["phase_failures"], summary["process"]["nonzero_returncodes"])
@@ -439,11 +545,15 @@ def run_experiment(
 __all__ = [
     "COMPARISON_FILENAME",
     "COMPARISON_MARKDOWN",
+    "PROVIDER_DEGRADED",
+    "PROVIDER_UNAVAILABLE",
+    "VALID",
     "Cell",
     "LANE_TREATMENTS",
     "PROVENANCE_FILENAME",
     "REPORT_FILENAME",
     "build_comparison",
+    "classify_provider_validity",
     "cell_dirs",
     "default_adapter_factory",
     "interleave",

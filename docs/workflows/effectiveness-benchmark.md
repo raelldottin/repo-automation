@@ -247,7 +247,7 @@ sessions each. Start with a few instances before spending money on the full matr
 out/<lane>/r<repeat>/<instance>/submission.tar.gz   graded artefact
 out/<lane>/r<repeat>/<instance>/run.json            provenance + process metrics
 out/<lane>/r<repeat>/<instance>/rpi/                phase artifacts (C–E)
-out/<lane>/r<repeat>/<instance>/agent-sessions/     per-session usage + controls
+out/<lane>/r<repeat>/<instance>/agent-sessions/     per-session usage + controls + log
 out/<lane>/r<repeat>/effectiveness-report.json      ProgramBench score for that cell
 out/lane-comparison.json | lane-comparison.md       the comparison
 ```
@@ -301,6 +301,34 @@ correctness.** A lane that saves context but loses resolve rate is worse.
 - **efficiency** — wall clock, agent invocations
 - **process** — phase failures, non-zero exits, compression ratios
 - **stability** — standard deviation across repeats
+
+### Provider validity
+
+A score only means something if the provider answered. Every cell is classified in
+`run.json` as `provider_validity`, and a lane takes its worst cell:
+
+| verdict | what happened |
+|---|---|
+| `valid` | every session was served, or ended for an experiment-local reason (its phase ceiling, a bad submission) |
+| `provider_degraded` | some session was served and another was refused |
+| `provider_unavailable` | nothing was ever served and the provider is on record refusing |
+
+A non-valid lane keeps its score as a *diagnostic* and is dropped from the deltas: both
+sides of a subtraction have to be outcomes the provider produced. Run 35701448042 is the
+case — NVIDIA rate-limited every attempt in lanes A, B, D and most of E, and the report
+rendered that as `D - C = -74.8% mean pass`.
+
+The verdict needs the provider on record, in the session's own log:
+
+```text
+❌ Rate limited after 3 retries — HTTP 429 ...   → rate_limit
+❌ API failed after 3 retries — Connection error  → unavailable
+```
+
+A missing usage report is **not** evidence. A session killed at its phase ceiling writes
+none either, and returncode 124 stays an experiment outcome. The logs are kept next to the
+session reports on the runner and are not uploaded; the matched line is copied into
+`run.json` so a verdict can be checked against what caused it.
 
 One repeat per cell is too noisy to interpret; use at least two while developing the
 instrumentation and at least three before believing a result.

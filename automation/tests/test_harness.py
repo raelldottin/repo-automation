@@ -520,6 +520,71 @@ class AutomationHarnessTests(unittest.TestCase):
             usage_arg = Path(args[args.index("--usage-file") + 1])
             self.assertEqual(controls[0].name.replace(".controls.json", ".usage.json"), usage_arg.name)
 
+    def test_agent_wrapper_keeps_the_session_output_beside_its_reports(self) -> None:
+        """Why a session failed is only ever printed; the usage report never says.
+
+        A provider that refuses to serve and an agent that does badly both end as a failed
+        turn with no model, and the benchmark has to tell those apart to keep a rate limit
+        out of a lane delta.
+        """
+        script_path = self.repo_root / "automation/supervisor/run_agent.sh"
+        refusal = "\u274c Rate limited after 3 retries \u2014 HTTP 429"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repo_root = temp_path / "repo"
+            (repo_root / ".git").mkdir(parents=True)
+            prompt_path = temp_path / "prompt.md"
+            prompt_path.write_text("rebuild it", encoding="utf-8")
+            context_path = temp_path / "context.json"
+            context_path.write_text("{}", encoding="utf-8")
+            bin_dir = temp_path / "bin"
+            bin_dir.mkdir()
+            self.write_fake_executable(
+                bin_dir / "hermes",
+                f"""#!/usr/bin/env bash
+printf '%s\\n' "{refusal}"
+printf 'on stderr\\n' >&2
+exit 7
+""",
+            )
+            usage_dir = temp_path / "sessions"
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+            env["REPO_AUTOMATION_AGENT_RUNNER"] = "hermes"
+            env["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(usage_dir)
+
+            result = subprocess.run(
+                [
+                    str(script_path),
+                    "--repo-root",
+                    str(repo_root),
+                    "--prompt-file",
+                    str(prompt_path),
+                    "--context-file",
+                    str(context_path),
+                    "--handoff-file",
+                    str(temp_path / "handoff.json"),
+                    "--slice-id",
+                    "slice-c:implement",
+                ],
+                cwd=self.repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            # The session's own exit status, not the tee's: a logging failure is not a phase
+            # failure, and a phase failure must not be swallowed into a clean exit.
+            self.assertEqual(7, result.returncode, result.stderr)
+            self.assertIn(refusal, result.stdout)  # the job log still streams it live
+            logs = sorted(usage_dir.glob("*.log"))
+            self.assertEqual(1, len(logs), f"expected one session log, got {logs}")
+            recorded = logs[0].read_text(encoding="utf-8")
+            self.assertIn(refusal, recorded)
+            self.assertIn("on stderr", recorded)  # stderr carries the failure, so it is kept
+            controls = sorted(usage_dir.glob("*.controls.json"))
+            self.assertEqual([logs[0].name.removesuffix(".log")], [c.name.removesuffix(".controls.json") for c in controls])
+
     def test_format_agent_command_shell_quotes_placeholder_values(self) -> None:
         formatted = format_agent_command(
             command_template=(

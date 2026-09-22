@@ -554,3 +554,115 @@ class AgentSessionProvenanceTests(unittest.TestCase):
         self.assertIsNone(killed["usage"])
         self.assertEqual({"runner": "hermes"}, killed["controls"])
         self.assertEqual({"api_calls": 2}, completed["usage"])
+
+
+class ProviderValidityTests(unittest.TestCase):
+    """A cell the provider refused is not a treatment result, and must not become a delta."""
+
+    RATE_LIMITED = (
+        "⏱️ Rate limited. Waiting 4.3s (attempt 2/3)...\n"
+        '❌ Rate limited after 3 retries — HTTP 429: {"status": 429, "title": "Too Many Requests"}\n'
+    )
+
+    def _cell(self, tmp: str, *sessions: tuple[str, Optional[str], str]) -> list[dict]:
+        """Write (stem, served model or None, log text) triples as one cell's session reports."""
+        directory = Path(tmp) / AGENT_SESSIONS_DIR
+        directory.mkdir(exist_ok=True)
+        for stem, model, log in sessions:
+            (directory / f"{stem}.controls.json").write_text('{"runner": "hermes"}', encoding="utf-8")
+            if model is not None:
+                (directory / f"{stem}.usage.json").write_text(
+                    json.dumps({"api_calls": 3, "model": model, "provider": "nvidia"}), encoding="utf-8"
+                )
+            (directory / f"{stem}.log").write_text(log, encoding="utf-8")
+        return lanes_module._agent_sessions(Path(tmp))
+
+    def test_a_refused_cell_that_was_never_served_is_provider_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = self._cell(tmp, ("s1", None, self.RATE_LIMITED))
+        self.assertEqual(lanes_module.PROVIDER_UNAVAILABLE, lanes_module.classify_provider_validity(sessions))
+        self.assertEqual("rate_limit", sessions[0]["provider_failure"]["kind"])
+        self.assertIn("429", sessions[0]["provider_failure"]["evidence"])
+
+    def test_a_cell_served_before_it_was_refused_is_provider_degraded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = self._cell(
+                tmp,
+                ("s1", "moonshotai/kimi-k3", "wrote cmatrix.c\n"),
+                ("s2", None, self.RATE_LIMITED),
+            )
+        self.assertEqual(lanes_module.PROVIDER_DEGRADED, lanes_module.classify_provider_validity(sessions))
+
+    def test_a_session_killed_at_its_budget_is_not_a_provider_failure(self) -> None:
+        # The exclusion needs the provider on record. A missing usage report only means the
+        # session was killed, and returncode 124 is an experiment outcome.
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = self._cell(tmp, ("s1", None, "reading the repository...\n"))
+        self.assertIsNone(sessions[0]["usage"])
+        self.assertIsNone(sessions[0]["provider_failure"])
+        self.assertEqual(lanes_module.VALID, lanes_module.classify_provider_validity(sessions))
+
+    def test_an_exhausted_transport_counts_as_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = self._cell(tmp, ("s1", None, "❌ API failed after 3 retries — Connection error.\n"))
+        self.assertEqual("unavailable", sessions[0]["provider_failure"]["kind"])
+        self.assertEqual(lanes_module.PROVIDER_UNAVAILABLE, lanes_module.classify_provider_validity(sessions))
+
+    def test_the_worst_repeat_decides_the_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for repeat, validity in ((1, lanes_module.VALID), (2, lanes_module.PROVIDER_UNAVAILABLE)):
+                cell_dir = Path(tmp) / "D" / f"r{repeat}" / "inst-a"
+                cell_dir.mkdir(parents=True)
+                (cell_dir / "run.json").write_text(
+                    json.dumps({"lane": "D", "returncode": 0, "provider_validity": validity, "strategy": None}),
+                    encoding="utf-8",
+                )
+            summary = lanes_module.summarize_lane(Path(tmp), "D", repeats=2, reports=[])
+        self.assertEqual(lanes_module.PROVIDER_UNAVAILABLE, summary["provider_validity"])
+
+    def test_deltas_skip_any_pair_with_a_refused_side(self) -> None:
+        def lane(name: str, validity: str, pass_fraction: float) -> dict:
+            return {
+                "lane": name,
+                "provider_validity": validity,
+                "primary": {"resolve_rate": 0.0, "near_resolve_rate": 0.0, "mean_pass_fraction": pass_fraction},
+                "efficiency": {"agent_invocations": 5, "wall_clock_seconds": 100.0},
+                "stability": {"resolve_rate_stdev": 0.0},
+                "process": {"phase_failures": 0, "nonzero_returncodes": 0},
+            }
+
+        summaries = [
+            lane("B", lanes_module.VALID, 0.1),
+            lane("C", lanes_module.PROVIDER_DEGRADED, 0.748),
+            lane("D", lanes_module.PROVIDER_UNAVAILABLE, 0.0),
+        ]
+        deltas = lanes_module.lane_deltas(summaries)
+        self.assertEqual(["unavailable", "unavailable"], [delta["status"] for delta in deltas])
+        self.assertEqual(["no provider-valid pair"] * 2, [delta["reason"] for delta in deltas])
+        self.assertNotIn("mean_pass_fraction", deltas[1])  # no -74.8% treatment effect
+
+        markdown = lanes_module.render_comparison_markdown(
+            {"lanes": summaries, "deltas": deltas, "note": "Primary metric is ProgramBench correctness."}
+        )
+        self.assertIn("C: provider_degraded - diagnostic score 74.8%", markdown)
+        self.assertIn("D: provider_unavailable - diagnostic score 0.0%", markdown)
+        self.assertIn("D - C: unavailable - reason: no provider-valid pair", markdown)
+
+    def test_two_valid_lanes_still_produce_a_delta(self) -> None:
+        summaries = [
+            {
+                "lane": "B",
+                "provider_validity": lanes_module.VALID,
+                "primary": {"resolve_rate": 0.2, "near_resolve_rate": 0.2, "mean_pass_fraction": 0.4},
+                "efficiency": {"agent_invocations": 2, "wall_clock_seconds": 100.0},
+            },
+            {
+                "lane": "C",
+                "provider_validity": lanes_module.VALID,
+                "primary": {"resolve_rate": 0.4, "near_resolve_rate": 0.4, "mean_pass_fraction": 0.6},
+                "efficiency": {"agent_invocations": 6, "wall_clock_seconds": 300.0},
+            },
+        ]
+        delta = lanes_module.lane_deltas(summaries)[0]
+        self.assertEqual(lanes_module.VALID, delta["status"])
+        self.assertAlmostEqual(0.2, delta["mean_pass_fraction"])

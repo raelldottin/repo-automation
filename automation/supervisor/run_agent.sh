@@ -240,6 +240,7 @@ case "$agent_runner" in
     fi
     cp "$hermes_config" "$HERMES_HOME/config.yaml"
     hermes_args=(--ignore-rules --in "$repo_root" --toolsets "$hermes_toolsets")
+    session_stem=""
     if [[ -n "${REPO_AUTOMATION_HERMES_USAGE_DIR:-}" ]]; then
       mkdir -p "$REPO_AUTOMATION_HERMES_USAGE_DIR"
       session_stem="$REPO_AUTOMATION_HERMES_USAGE_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -253,6 +254,20 @@ case "$agent_runner" in
         "${HERMES_INFERENCE_PROVIDER:-}" "${HERMES_INFERENCE_MODEL:-}" \
         "$slice_id" "$HERMES_HOME" "$TERMINAL_CWD" > "$session_stem.controls.json"
     fi
-    exec "$hermes_bin" "${hermes_args[@]}" --oneshot "$(cat "$prompt_file")"
+    if [[ -z "$session_stem" ]]; then
+      exec "$hermes_bin" "${hermes_args[@]}" --oneshot "$(cat "$prompt_file")"
+    fi
+    # Keep the session's own output beside its reports. The usage report says whether the
+    # session failed, never why: a provider that refuses to serve (429, exhausted retries)
+    # and an agent that simply did badly both land as a failed turn with no model. The
+    # caller needs that difference to tell a treatment effect from a provider outage, and
+    # the terminal line naming it is only ever printed. Teed, so the job log still streams
+    # live, and not exec'd, so the tee has flushed the last block before the caller reads.
+    set +e
+    "$hermes_bin" "${hermes_args[@]}" --oneshot "$(cat "$prompt_file")" 2>&1 | tee "$session_stem.log"
+    # The session's status, not the tee's: a logging failure is not a phase failure.
+    hermes_status=${PIPESTATUS[0]}
+    set -e
+    exit "$hermes_status"
     ;;
 esac
