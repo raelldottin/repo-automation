@@ -222,6 +222,12 @@ case "$agent_runner" in
     # handed: a benchmark cell then archives an empty workspace, scores compile_failed,
     # and the next cell inherits the last one's files from wherever the tools defaulted to.
     export TERMINAL_CWD="$repo_root"
+    # Hermes' stdout is a pipe here (see the tee below), so Python block-buffers it and a
+    # session killed at its phase ceiling died with its whole transcript still in the
+    # buffer: every timed-out cell of runs 35715428932 and 35736569601 archived a 0-byte
+    # log, which is the same file the provider-failure classifier reads for its evidence.
+    # Buffering only - prompts, model, tools, budgets and inference settings are untouched.
+    export PYTHONUNBUFFERED=1
     # Pin the toolset: the default CLI set hands the model delegate_task, memory,
     # session_search and the skills tools, so a session could spawn a second agent, keep
     # state for the next one, or load a skill of its own choosing - none of which is the

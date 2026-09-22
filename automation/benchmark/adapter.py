@@ -31,11 +31,22 @@ from typing import Callable, Mapping, Optional, Protocol
 from automation.context import build_context
 
 from .instances import TaskSpec
-from .strategies import RPI_DIR, ExecutionContext, ExecutionStrategy, SliceContextStrategy, StrategyResult
+from .strategies import (
+    AGENT_TIMEOUT_RETURNCODE,
+    RPI_DIR,
+    ExecutionContext,
+    ExecutionStrategy,
+    SliceContextStrategy,
+    StrategyResult,
+)
 
 DEFAULT_TIMEOUT_SECONDS = 1800
-# What timeout(1) reports, so the code means the same thing here as it does in a shell.
-AGENT_TIMEOUT_RETURNCODE = 124
+# How long a session gets to shut down after its budget kill, before the process group is
+# destroyed. A SIGKILL takes the session's buffered stdout with it: every phase killed at
+# its ceiling in runs 35715428932 and 35736569601 archived a 0-byte log, which is also the
+# evidence the provider-failure classifier reads. Short, because this is flush-and-exit
+# time, not working time - it is recorded separately and never charged to the phase.
+AGENT_TERMINATION_GRACE_SECONDS = 5
 # Allow the agent to touch the whole rebuild workspace.
 WORKSPACE_ALLOWED_PATH = "./"
 # Effectively unbounded diff budget: a from-scratch rebuild is not a bounded slice.
@@ -124,7 +135,15 @@ def _subprocess_runner(command: str, workspace: Path, env: Mapping[str, str], ti
         try:
             return agent.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(agent.pid, signal.SIGKILL)
+            # Ask before compelling. SIGTERM lets the session flush what it has written and
+            # the tee drain the pipe, so a censored phase still leaves its checkpointed
+            # artifact and a readable log; SIGKILL after the grace so a session that ignores
+            # the signal still cannot outlive its budget.
+            os.killpg(agent.pid, signal.SIGTERM)
+            try:
+                agent.wait(timeout=AGENT_TERMINATION_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                os.killpg(agent.pid, signal.SIGKILL)
             return AGENT_TIMEOUT_RETURNCODE
 
 

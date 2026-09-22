@@ -55,9 +55,10 @@ class FakeAgent:
     itself, so the double exercises the same command plumbing every lane shares.
     """
 
-    def __init__(self, write_artifacts: bool = True, returncode: int = 0) -> None:
+    def __init__(self, write_artifacts: bool = True, returncode: int = 0, withhold: tuple[str, ...] = ()) -> None:
         self.write_artifacts = write_artifacts
         self.returncode = returncode
+        self.withhold = withhold
         self.sessions: list[dict] = []
 
     def __call__(self, command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
@@ -124,7 +125,7 @@ class FakeAgent:
                 },
             ),
         }
-        if phase not in payloads:
+        if phase not in payloads or phase in self.withhold:
             return
         filename, data = payloads[phase]
         target = workspace / RPI_DIR
@@ -256,14 +257,66 @@ class LaneTreatmentTests(unittest.TestCase):
         self.assertIn("compile.sh", manifest)
         self.assertFalse([name for name in manifest if name.startswith(RPI_DIR)])
 
-    def test_missing_artifact_is_recorded_and_does_not_abort_the_lane(self) -> None:
+
+class RequiredArtifactTests(unittest.TestCase):
+    """A phase that owes the next one an artifact either delivers it or ends the lane.
+
+    Every multi-phase cell of runs 35715428932 and 35736569601 lost research.json, and the
+    harness handed the plan phase a stub it had written itself. The lanes scored, so the
+    matrix reported a treatment effect for treatments that were never administered.
+    """
+
+    def test_a_missing_research_artifact_stops_the_lane_instead_of_faking_the_handoff(self) -> None:
         agent, result, _ = run_lane("C", agent=FakeAgent(write_artifacts=False))
-        self.assertEqual(["research", "plan", "implement"], agent.phases())
+        # Above all, no implement session: what it would have built from was harness fiction.
+        self.assertEqual(["research"], agent.phases())
         assert result.strategy is not None
-        self.assertEqual(2, result.strategy.phase_failures)
-        research_phase = result.strategy.phases[0]
-        self.assertFalse(research_phase.artifact_valid)
-        self.assertIn("artifact missing or unparseable", research_phase.artifact_errors)
+        recorded = result.strategy.to_dict()
+        self.assertEqual("invalid", recorded["treatment_validity"])
+        self.assertEqual("required_phase_artifact_missing", recorded["treatment_invalid_reason"])
+        self.assertEqual("research", recorded["treatment_invalid_phase"])
+        self.assertEqual("treatment_invalid", recorded["phases"][0]["state"])
+        self.assertIn("artifact missing or unparseable", result.strategy.phases[0].artifact_errors)
+
+    def test_a_missing_plan_artifact_stops_the_lane_before_implementing(self) -> None:
+        agent, result, _ = run_lane("C", agent=FakeAgent(withhold=("plan",)))
+        self.assertEqual(["research", "plan"], agent.phases())
+        assert result.strategy is not None
+        recorded = result.strategy.to_dict()
+        self.assertEqual("invalid", recorded["treatment_validity"])
+        self.assertEqual("plan", recorded["treatment_invalid_phase"])
+
+    def test_a_lane_that_delivered_every_artifact_reads_as_administered(self) -> None:
+        for lane in ("A", "B", "C", "D"):
+            with self.subTest(lane=lane):
+                _, result, _ = run_lane(lane)
+                assert result.strategy is not None
+                self.assertEqual("valid", result.strategy.to_dict()["treatment_validity"])
+
+    def test_a_phase_killed_at_its_ceiling_that_checkpointed_is_censored_not_invalid(self) -> None:
+        """Censoring is administrative; the lane still ran what it claims to have run."""
+        agent, result, _ = run_lane("D", agent=FakeAgent(returncode=124))
+        self.assertEqual(["research", "research_compact", "plan", "plan_compact", "implement"], agent.phases())
+        assert result.strategy is not None
+        recorded = result.strategy.to_dict()
+        self.assertEqual("valid", recorded["treatment_validity"])
+        self.assertEqual({"censored"}, {phase["state"] for phase in recorded["phases"]})
+
+    def test_a_compaction_that_never_landed_is_not_lane_d(self) -> None:
+        _, result, _ = run_lane("D", agent=FakeAgent(withhold=("research_compact",)))
+        assert result.strategy is not None
+        recorded = result.strategy.to_dict()
+        self.assertEqual("invalid", recorded["treatment_validity"])
+        self.assertEqual("research_compact", recorded["treatment_invalid_phase"])
+
+    def test_the_prompt_asks_for_a_checkpoint_now_rather_than_a_hand_in_later(self) -> None:
+        agent, _, _ = run_lane("C")
+        for phase in ("research", "plan"):
+            with self.subTest(phase=phase):
+                prompt = agent.prompt_for(phase)
+                self.assertIn("immediately, as a schema-valid initial checkpoint", prompt)
+                self.assertIn("stopped at any moment", prompt)
+                self.assertNotIn("Write the file before you finish", prompt)
 
 
 class BudgetTests(unittest.TestCase):
@@ -713,6 +766,19 @@ class MeasurementTests(unittest.TestCase):
     def test_a_lane_that_ran_to_a_conclusion_names_nothing(self) -> None:
         summary = self._summary("C", [{"phase": "implement", "returncode": 0}], [])
         self.assertEqual([], summary["measurement"]["censored_phases"])
+        self.assertEqual([], summary["measurement"]["invalid_phases"])
+        self.assertEqual(lanes_module.TREATMENT_VALID, summary["treatment_validity"])
+
+    def test_a_phase_that_wrote_no_artifact_is_not_reported_as_merely_censored(self) -> None:
+        summary = self._summary("C", [{"phase": "research", "returncode": 124, "artifact_valid": False}], [])
+        self.assertEqual([], summary["measurement"]["censored_phases"])
+        self.assertEqual(["research"], summary["measurement"]["invalid_phases"])
+        self.assertEqual(lanes_module.TREATMENT_INVALID, summary["treatment_validity"])
+
+    def test_a_censored_phase_that_checkpointed_keeps_the_lane_comparable(self) -> None:
+        summary = self._summary("C", [{"phase": "research", "returncode": 124, "artifact_valid": True}], [])
+        self.assertEqual(["research"], summary["measurement"]["censored_phases"])
+        self.assertEqual(lanes_module.TREATMENT_VALID, summary["treatment_validity"])
 
     def test_both_weightings_of_the_same_results_reach_the_lane(self) -> None:
         score = InstanceScore("i1", 102, 90, branch_pass_fractions=(0.9, 0.0), unique_tests=90)
@@ -736,3 +802,30 @@ class MeasurementTests(unittest.TestCase):
         delta = lanes_module.lane_deltas([lane("A", 0.833, 0.842), lane("B", 0.777, 0.830)])[0]
         self.assertAlmostEqual(-0.056, delta["mean_pass_fraction"])
         self.assertAlmostEqual(-0.012, delta["branch_macro_pass_fraction"])
+
+    def test_a_lane_that_never_administered_its_treatment_leaves_the_deltas(self) -> None:
+        def lane(name: str, treatment_validity: str, invalid_phases: list[str]) -> dict:
+            return {
+                "lane": name,
+                "provider_validity": lanes_module.VALID,
+                "treatment_validity": treatment_validity,
+                "primary": {"resolve_rate": 0.0, "near_resolve_rate": 0.0, "mean_pass_fraction": 0.767},
+                "measurement": {"branch_macro_pass_fraction": 0.754, "invalid_phases": invalid_phases},
+                "efficiency": {"agent_invocations": 3, "wall_clock_seconds": 100.0},
+                "stability": {"resolve_rate_stdev": 0.0},
+                "process": {"phase_failures": 1, "nonzero_returncodes": 0},
+            }
+
+        summaries = [
+            lane("B", lanes_module.TREATMENT_VALID, []),
+            lane("C", lanes_module.TREATMENT_INVALID, ["research"]),
+        ]
+        delta = lanes_module.lane_deltas(summaries)[0]
+        self.assertEqual("unavailable", delta["status"])
+        self.assertIn("not administered", delta["reason"])
+        self.assertNotIn("mean_pass_fraction", delta)  # no C - B effect from a lane that stopped
+
+        markdown = lanes_module.render_comparison_markdown(
+            {"lanes": summaries, "deltas": [delta], "note": "Primary metric is ProgramBench correctness."}
+        )
+        self.assertIn("C: no artifact from research - diagnostic score 76.7%", markdown)

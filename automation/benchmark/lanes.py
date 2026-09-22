@@ -27,13 +27,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
-from .adapter import AGENT_SESSIONS_DIR, AGENT_TIMEOUT_RETURNCODE, AgentAdapter, SupervisorAgentAdapter
+from .adapter import AGENT_SESSIONS_DIR, AgentAdapter, SupervisorAgentAdapter
 from .evalrunner import EvalRunner
 from .instances import task_spec
 from .jspace import JSpaceUnavailable
 from .run import REPORT_FILENAME, score_and_write
 from .scoring import EffectivenessReport
-from .strategies import ALL_LANES, build_strategy
+from .strategies import (
+    ALL_LANES,
+    PHASE_CENSORED,
+    PHASE_TREATMENT_INVALID,
+    TREATMENT_INVALID,
+    TREATMENT_VALID,
+    build_strategy,
+    phase_state,
+)
 
 PROVENANCE_FILENAME = "run.json"
 COMPARISON_FILENAME = "lane-comparison.json"
@@ -243,6 +251,7 @@ def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) 
     result = adapter.produce_submission(task_spec(cell.instance_id), instance_dir / "submission.tar.gz")
 
     sessions = _agent_sessions(instance_dir)
+    strategy = result.strategy.to_dict() if result.strategy is not None else None
     provenance: dict[str, Any] = {
         "lane": cell.lane,
         "instance_id": cell.instance_id,
@@ -254,7 +263,11 @@ def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) 
         "returncode": result.returncode,
         "agent_sessions": sessions,
         "provider_validity": classify_provider_validity(sessions),
-        "strategy": result.strategy.to_dict() if result.strategy is not None else None,
+        # Two separate questions about the same cell: whether the provider served it, and
+        # whether the lane administered its own treatment. Either one being no is enough to
+        # keep the cell out of the deltas, for different reasons.
+        "treatment_validity": strategy.get("treatment_validity", TREATMENT_VALID) if strategy else TREATMENT_VALID,
+        "strategy": strategy,
     }
     (instance_dir / PROVENANCE_FILENAME).write_text(json.dumps(provenance, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return provenance
@@ -313,6 +326,16 @@ def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[Eff
         for key, value in (strategy.get("compaction") or {}).items()
         if key.endswith("_compression_ratio") and value is not None
     ]
+    # Read back from the phases rather than from the lane's own verdict, so an artifact
+    # directory scored after the fact classifies the same way the run did.
+    phase_states = [
+        (phase.get("phase"), phase_state(phase.get("returncode"), phase.get("artifact_valid")))
+        for strategy in strategies
+        for phase in strategy.get("phases") or []
+    ]
+    not_administered = any(state == PHASE_TREATMENT_INVALID for _, state in phase_states) or any(
+        record.get("treatment_validity", TREATMENT_VALID) == TREATMENT_INVALID for record in provenance
+    )
 
     return {
         "lane": lane,
@@ -326,6 +349,10 @@ def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[Eff
             key=_VALIDITY_ORDER.index,
             default=VALID,
         ),
+        # A required phase artifact that never arrived means the lane after it ran on
+        # something other than its treatment. Like a refused cell, it keeps its score as a
+        # diagnostic and leaves the comparison.
+        "treatment_validity": TREATMENT_INVALID if not_administered else TREATMENT_VALID,
         "jspace": jspace,
         "primary": {
             "resolve_rate": round(_mean(resolve_rates), 4),
@@ -340,12 +367,10 @@ def summarize_lane(run_dir: Path, lane: str, repeats: int, reports: Sequence[Eff
             "branch_macro_pass_fraction": round(_mean(macro_fractions), 4),
             "executions": sum(report.executions for report in reports),
             "unique_tests": sum(report.unique_tests for report in reports),
-            "censored_phases": sorted(
-                phase["phase"]
-                for strategy in strategies
-                for phase in strategy.get("phases") or []
-                if phase.get("returncode") == AGENT_TIMEOUT_RETURNCODE
-            ),
+            # Administration and validity, kept apart: a phase killed at its ceiling ran and
+            # ran out of road, a phase with no artifact never handed the next one anything.
+            "censored_phases": sorted(name for name, state in phase_states if state == PHASE_CENSORED),
+            "invalid_phases": sorted(name for name, state in phase_states if state == PHASE_TREATMENT_INVALID),
         },
         "efficiency": {
             "wall_clock_seconds": round(sum(strategy["seconds"] for strategy in strategies), 3),
@@ -368,6 +393,21 @@ def _macro(summary: dict[str, Any]) -> float:
     return (summary.get("measurement") or {}).get("branch_macro_pass_fraction", 0.0)
 
 
+def _exclusion_reason(before: dict[str, Any], after: dict[str, Any]) -> Optional[str]:
+    """Why this pair cannot be subtracted, or None if it can.
+
+    Both sides have to be outcomes the provider actually produced, under treatments the
+    lanes actually administered. Subtracting a refused cell from a served one measures the
+    outage; subtracting a cell that never got its research artifact measures the gap.
+    """
+    pair = (before, after)
+    if any(summary.get("provider_validity", VALID) != VALID for summary in pair):
+        return "no provider-valid pair"
+    if any(summary.get("treatment_validity", TREATMENT_VALID) != TREATMENT_VALID for summary in pair):
+        return "required phase artifact missing: the treatment was not administered"
+    return None
+
+
 def lane_deltas(summaries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """Marginal contribution of each treatment: B-A, C-B, D-C, E-D.
 
@@ -379,15 +419,14 @@ def lane_deltas(summaries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     deltas = []
     for previous, current in zip(ordered, ordered[1:]):
         before, after = by_lane[previous], by_lane[current]
-        # Both sides have to be outcomes the provider actually produced. Subtracting a refused
-        # cell from a served one measures the outage, and does it in the units of the treatment.
-        if VALID != before.get("provider_validity", VALID) or VALID != after.get("provider_validity", VALID):
+        reason = _exclusion_reason(before, after)
+        if reason:
             deltas.append(
                 {
                     "comparison": f"{current} - {previous}",
                     "treatment": LANE_TREATMENTS.get(current, ""),
                     "status": "unavailable",
-                    "reason": "no provider-valid pair",
+                    "reason": reason,
                 }
             )
             continue
@@ -443,20 +482,22 @@ def build_comparison(run_dir: Path, lanes: Sequence[str], repeats: int) -> dict[
 def render_comparison_markdown(comparison: dict[str, Any]) -> str:
     lines = ["# Lane comparison", "", "## Primary outcome (ProgramBench)", ""]
     lines.append(
-        "| lane | treatment | validity | resolve | near | mean pass | macro pass "
-        "| executions | censored | stdev(resolve) | agent calls | wall s |"
+        "| lane | treatment | provider | administered | resolve | near | mean pass | macro pass "
+        "| executions | censored | no artifact | stdev(resolve) | agent calls | wall s |"
     )
-    lines.append("|---|---|---|---:|---:|---:|---:|---:|---|---:|---:|---:|")
+    lines.append("|---|---|---|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|")
     for summary in comparison["lanes"]:
         primary, efficiency, stability = summary["primary"], summary["efficiency"], summary["stability"]
         measurement = summary.get("measurement") or {}
         censored = "+".join(sorted(set(measurement.get("censored_phases") or []))) or "-"
+        no_artifact = "+".join(sorted(set(measurement.get("invalid_phases") or []))) or "-"
         lines.append(
             f"| {summary['lane']} | {LANE_TREATMENTS.get(summary['lane'], '')} "
             f"| {summary.get('provider_validity', VALID)} "
+            f"| {summary.get('treatment_validity', TREATMENT_VALID)} "
             f"| {primary['resolve_rate']:.1%} | {primary['near_resolve_rate']:.1%} "
             f"| {primary['mean_pass_fraction']:.1%} | {measurement.get('branch_macro_pass_fraction', 0.0):.1%} "
-            f"| {measurement.get('executions', 0)} | {censored} "
+            f"| {measurement.get('executions', 0)} | {censored} | {no_artifact} "
             f"| {stability['resolve_rate_stdev']:.3f} "
             f"| {efficiency['agent_invocations']} | {efficiency['wall_clock_seconds']:.0f} |"
         )
@@ -466,7 +507,9 @@ def render_comparison_markdown(comparison: dict[str, Any]) -> str:
         "outcome. `macro pass` weights every branch equally over the same results: where the two",
         "disagree, the lane ordering depends on how often each branch happened to run rather than",
         "on the submission. `censored` names the phases killed at their ceiling - a censored lane",
-        "reports its budget as much as its treatment.",
+        "reports its budget as much as its treatment. `no artifact` names the phases that owed",
+        "the next one a typed artifact and produced none: those lanes ran something, but not the",
+        "treatment their name claims, so `administered` reads invalid and they leave the deltas.",
     ]
 
     invalid = [summary for summary in comparison["lanes"] if summary.get("provider_validity", VALID) != VALID]
@@ -485,13 +528,33 @@ def render_comparison_markdown(comparison: dict[str, Any]) -> str:
             for summary in invalid
         ]
 
+    unadministered = [
+        summary for summary in comparison["lanes"] if summary.get("treatment_validity", TREATMENT_VALID) != TREATMENT_VALID
+    ]
+    if unadministered:
+        lines += [
+            "",
+            "## Treatment validity",
+            "",
+            "A required phase artifact never arrived in these lanes, so the phases after it had",
+            "no handoff to work from and the lane stopped. Their scores are kept as diagnostics",
+            "and excluded from the deltas below: this is an unrun treatment, not a weak one.",
+            "",
+        ]
+        lines += [
+            f"- {summary['lane']}: no artifact from "
+            f"{'+'.join(sorted(set((summary.get('measurement') or {}).get('invalid_phases') or []))) or 'a required phase'}"
+            f" - diagnostic score {summary['primary']['mean_pass_fraction']:.1%}"
+            for summary in unadministered
+        ]
+
     lines += ["", "## Marginal contribution of each treatment", ""]
     comparable = [delta for delta in comparison["deltas"] if delta.get("status", VALID) == VALID]
     if comparable:
         lines.append("| comparison | treatment added | resolve | near | mean pass | macro pass | agent calls | wall s |")
         lines.append("|---|---|---:|---:|---:|---:|---:|---:|")
     else:
-        lines.append("No comparison had a provider-valid pair; this run measures nothing.")
+        lines.append("No comparison had a valid pair on both sides; this run measures nothing.")
     for delta in comparable:
         lines.append(
             f"| {delta['comparison']} | {delta['treatment']} | {delta['resolve_rate']:+.1%} "
@@ -502,7 +565,7 @@ def render_comparison_markdown(comparison: dict[str, Any]) -> str:
 
     excluded = [delta for delta in comparison["deltas"] if delta.get("status", VALID) != VALID]
     if excluded:
-        lines += ["", "Comparisons with no provider-valid pair:", ""]
+        lines += ["", "Comparisons excluded:", ""]
         lines += [f"- {delta['comparison']}: {delta['status']} - reason: {delta['reason']}" for delta in excluded]
 
     failures = [
@@ -586,6 +649,8 @@ __all__ = [
     "COMPARISON_MARKDOWN",
     "PROVIDER_DEGRADED",
     "PROVIDER_UNAVAILABLE",
+    "TREATMENT_INVALID",
+    "TREATMENT_VALID",
     "VALID",
     "Cell",
     "LANE_TREATMENTS",
