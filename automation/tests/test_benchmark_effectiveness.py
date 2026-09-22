@@ -177,7 +177,6 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("--prompt-file", captured["command"])
         self.assertIn("--slice-id", captured["command"])
 
-
     def test_parent_environment_is_not_implicitly_forwarded_to_agent(self) -> None:
         captured: dict[str, str] = {}
 
@@ -212,7 +211,6 @@ class AdapterTests(unittest.TestCase):
             after = {entry.name: entry.read_bytes() for entry in destination.iterdir() if entry.is_file()}
             self.assertEqual(before, after)
             self.assertEqual(b"owned-by-caller\n", sentinel.read_bytes())
-
 
     def test_required_benign_launcher_environment_survives(self) -> None:
         with unittest.mock.patch.dict(
