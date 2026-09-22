@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import tarfile
 import tempfile
@@ -175,6 +176,144 @@ class AdapterTests(unittest.TestCase):
         # The agent was invoked with the rendered prompt + the workspace as repo root.
         self.assertIn("--prompt-file", captured["command"])
         self.assertIn("--slice-id", captured["command"])
+
+    def test_parent_environment_is_not_implicitly_forwarded_to_agent(self) -> None:
+        captured: dict[str, str] = {}
+
+        def fake_runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            captured.update(env)
+            return 0
+
+        with unittest.mock.patch.dict(os.environ, {"BENCHMARK_PARENT_SECRET": "do-not-leak"}, clear=False):
+            adapter = SupervisorAgentAdapter(repo_root=self.repo_root, runner=fake_runner)
+            with tempfile.TemporaryDirectory() as tmp:
+                adapter.produce_submission(self.task, Path(tmp) / "submission.tar.gz")
+
+        self.assertFalse("BENCHMARK_PARENT_SECRET" in captured, "ambient parent variable crossed into agent environment")
+
+    def test_preexisting_phase_artifact_directory_is_refused_and_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            out_dir = root / "out"
+            source = workspace / benchmark_adapter.RPI_DIR
+            destination = out_dir / "rpi"
+            source.mkdir(parents=True)
+            destination.mkdir(parents=True)
+            (source / "phase.json").write_text('{"phase": "new"}\n', encoding="utf-8")
+            sentinel = destination / "owner-sentinel.txt"
+            sentinel.write_bytes(b"owned-by-caller\n")
+            before = {entry.name: entry.read_bytes() for entry in destination.iterdir() if entry.is_file()}
+
+            with self.assertRaisesRegex(FileExistsError, "refusing to overwrite pre-existing phase artifact directory"):
+                benchmark_adapter._save_phase_artifacts(workspace, out_dir)
+
+            after = {entry.name: entry.read_bytes() for entry in destination.iterdir() if entry.is_file()}
+            self.assertEqual(before, after)
+            self.assertEqual(b"owned-by-caller\n", sentinel.read_bytes())
+
+    def test_required_benign_launcher_environment_survives(self) -> None:
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "PATH": "/sentinel/bin",
+                "HOME": "/sentinel/home",
+                "LANG": "C.UTF-8",
+                "HERMES_INFERENCE_PROVIDER": "nvidia",
+                "BENCHMARK_PARENT_SECRET": "must-not-cross",
+            },
+            clear=True,
+        ):
+            environment = SupervisorAgentAdapter(repo_root=self.repo_root)._run_environment()
+
+        self.assertEqual("/sentinel/bin", environment["PATH"])
+        self.assertEqual("/sentinel/home", environment["HOME"])
+        self.assertEqual("C.UTF-8", environment["LANG"])
+        self.assertEqual("nvidia", environment["HERMES_INFERENCE_PROVIDER"])
+        self.assertNotIn("BENCHMARK_PARENT_SECRET", environment)
+
+    def test_explicit_agent_environment_is_forwarded(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            environment = SupervisorAgentAdapter(
+                repo_root=self.repo_root,
+                env={"OPENAI_API_KEY": "explicit-test-token"},
+            )._run_environment()
+
+        self.assertEqual("explicit-test-token", environment["OPENAI_API_KEY"])
+
+    def test_explicit_agent_environment_overrides_inherited_benign_value(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"PATH": "parent-path"}, clear=True):
+            environment = SupervisorAgentAdapter(
+                repo_root=self.repo_root,
+                env={"PATH": "explicit-path"},
+            )._run_environment()
+
+        self.assertEqual("explicit-path", environment["PATH"])
+
+    def test_agent_env_cli_selects_exact_parent_variable(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {"OPENAI_API_KEY": "cli-test-token"}, clear=True):
+            args = benchmark_run.build_parser().parse_args(["run", "--run-dir", "out", "--agent-env", "OPENAI_API_KEY"])
+            adapter = benchmark_run._build_adapter(args)
+
+        self.assertEqual("cli-test-token", adapter._run_environment()["OPENAI_API_KEY"])
+
+    def test_agent_env_cli_refuses_missing_variable_before_agent_execution(self) -> None:
+        stderr = io.StringIO()
+        with (
+            unittest.mock.patch.dict(os.environ, {}, clear=True),
+            unittest.mock.patch.object(benchmark_run, "produce_submissions") as produce_submissions,
+            contextlib.redirect_stderr(stderr),
+        ):
+            returncode = benchmark_run.main(["run", "--run-dir", "out", "--agent-env", "DOES_NOT_EXIST"])
+
+        self.assertEqual(2, returncode)
+        produce_submissions.assert_not_called()
+        self.assertIn("DOES_NOT_EXIST", stderr.getvalue())
+        self.assertNotIn("=", stderr.getvalue())
+
+    def test_agent_env_cli_rejects_malformed_names(self) -> None:
+        for value in ("A=B", "FOO-BAR", "$(evil)"):
+            with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    benchmark_run.build_parser().parse_args(["run", "--run-dir", "out", "--agent-env", value])
+            self.assertEqual(2, raised.exception.code)
+
+    def test_fresh_phase_artifact_directory_copies_successfully(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            out_dir = root / "out"
+            source = workspace / benchmark_adapter.RPI_DIR
+            source.mkdir(parents=True)
+            out_dir.mkdir()
+            (source / "phase.json").write_bytes(b"phase-data\n")
+
+            benchmark_adapter._save_phase_artifacts(workspace, out_dir)
+
+            self.assertEqual(b"phase-data\n", (out_dir / "rpi" / "phase.json").read_bytes())
+
+    def test_copy_failure_cleans_only_destination_owned_by_current_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            out_dir = root / "out"
+            source = workspace / benchmark_adapter.RPI_DIR
+            source.mkdir(parents=True)
+            out_dir.mkdir()
+            (source / "phase.json").write_bytes(b"phase-data\n")
+            destination = out_dir / "rpi"
+
+            with (
+                unittest.mock.patch.object(
+                    benchmark_adapter.shutil,
+                    "copytree",
+                    side_effect=OSError("injected copy failure"),
+                ),
+                self.assertRaisesRegex(OSError, "injected copy failure"),
+            ):
+                benchmark_adapter._save_phase_artifacts(workspace, out_dir)
+
+            self.assertFalse(destination.exists())
 
 
 class OrchestratorTests(unittest.TestCase):

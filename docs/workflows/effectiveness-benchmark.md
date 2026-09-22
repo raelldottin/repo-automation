@@ -53,6 +53,12 @@ export HERMES_INFERENCE_MODEL=moonshotai/kimi-k3
 export NVIDIA_API_KEY="$NVIDIA_API_KEY"
 ```
 
+The adapter does not copy the parent process environment wholesale. Launcher variables on
+its audited exact-name allowlist are inherited, but credentials or other agent-specific
+configuration cross the boundary only when the benchmark invocation names them with
+`--agent-env NAME`. The value stays in the environment rather than appearing in the
+command line. A requested name that is absent fails before the agent launches.
+
 The wrapper reproduces the deployed Hermes posture and then subtracts what would
 contaminate a lane. It deliberately does **not** pass `--safe-mode`. That flag sets three
 independent controls at once, and one of them — `HERMES_IGNORE_USER_CONFIG` — discards
@@ -124,8 +130,11 @@ two different models.
 
 ```shell
 uv pip install programbench
-uv run python -m automation.benchmark all --run-dir out --all          # full set
-uv run python -m automation.benchmark all --run-dir out --instances abishekvashok__cmatrix.5c082c6
+uv run python -m automation.benchmark all --run-dir out --all \\
+  --agent-env NVIDIA_API_KEY                                             # full set
+uv run python -m automation.benchmark all --run-dir out \\
+  --instances abishekvashok__cmatrix.5c082c6 \\
+  --agent-env NVIDIA_API_KEY
 ```
 
 > On Apple Silicon the cleanroom images run only under slow amd64 emulation; prefer an
