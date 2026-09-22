@@ -252,9 +252,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_agent_env_cli_selects_exact_parent_variable(self) -> None:
         with unittest.mock.patch.dict(os.environ, {"OPENAI_API_KEY": "cli-test-token"}, clear=True):
-            args = benchmark_run.build_parser().parse_args(
-                ["run", "--run-dir", "out", "--agent-env", "OPENAI_API_KEY"]
-            )
+            args = benchmark_run.build_parser().parse_args(["run", "--run-dir", "out", "--agent-env", "OPENAI_API_KEY"])
             adapter = benchmark_run._build_adapter(args)
 
         self.assertEqual("cli-test-token", adapter._run_environment()["OPENAI_API_KEY"])
@@ -266,9 +264,7 @@ class AdapterTests(unittest.TestCase):
             unittest.mock.patch.object(benchmark_run, "produce_submissions") as produce_submissions,
             contextlib.redirect_stderr(stderr),
         ):
-            returncode = benchmark_run.main(
-                ["run", "--run-dir", "out", "--agent-env", "DOES_NOT_EXIST"]
-            )
+            returncode = benchmark_run.main(["run", "--run-dir", "out", "--agent-env", "DOES_NOT_EXIST"])
 
         self.assertEqual(2, returncode)
         produce_submissions.assert_not_called()
@@ -279,9 +275,7 @@ class AdapterTests(unittest.TestCase):
         for value in ("A=B", "FOO-BAR", "$(evil)"):
             with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as raised:
-                    benchmark_run.build_parser().parse_args(
-                        ["run", "--run-dir", "out", "--agent-env", value]
-                    )
+                    benchmark_run.build_parser().parse_args(["run", "--run-dir", "out", "--agent-env", value])
             self.assertEqual(2, raised.exception.code)
 
     def test_fresh_phase_artifact_directory_copies_successfully(self) -> None:
