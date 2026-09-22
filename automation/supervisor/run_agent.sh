@@ -222,11 +222,12 @@ case "$agent_runner" in
     # handed: a benchmark cell then archives an empty workspace, scores compile_failed,
     # and the next cell inherits the last one's files from wherever the tools defaulted to.
     export TERMINAL_CWD="$repo_root"
-    # Hermes' stdout is a pipe here (see the tee below), so Python block-buffers it and a
-    # session killed at its phase ceiling died with its whole transcript still in the
-    # buffer: every timed-out cell of runs 35715428932 and 35736569601 archived a 0-byte
-    # log, which is the same file the provider-failure classifier reads for its evidence.
-    # Buffering only - prompts, model, tools, budgets and inference settings are untouched.
+    # Harmless, and kept for that reason alone - it does not make a killed session
+    # readable. Under --oneshot, Hermes' own hermes_cli/oneshot.py redirects stdout AND
+    # stderr to /dev/null for the whole turn and writes the final response to the real
+    # stdout only after the turn returns, so a session killed at its phase ceiling archives
+    # a 0-byte log whatever the buffering is. That is what runs 35715428932, 35736569601
+    # and 35788842735 recorded. The stream-json transport below is the way to see inside.
     export PYTHONUNBUFFERED=1
     # Pin the toolset: the default CLI set hands the model delegate_task, memory,
     # session_search and the skills tools, so a session could spawn a second agent, keep
@@ -239,6 +240,20 @@ case "$agent_runner" in
     # ponytail: left for the OS to reap, like the workspace dirs the adapter makes.
     HERMES_HOME="$(mktemp -d "${TMPDIR:-/tmp}/repo-automation-hermes-XXXXXX")"
     export HERMES_HOME
+    # Diagnostic transport, not a benchmark setting. --oneshot is what every A-E run has
+    # been measured on and stays the default; stream-json routes through `hermes chat`
+    # instead, which is a different execution path in the agent, so a session produced this
+    # way answers "what did the turn do before it died" and is never a lane result.
+    hermes_transport="${REPO_AUTOMATION_HERMES_TRANSPORT:-oneshot}"
+    case "$hermes_transport" in
+      oneshot | stream-json) ;;
+      *)
+        echo "Unsupported REPO_AUTOMATION_HERMES_TRANSPORT: $hermes_transport" >&2
+        echo "Expected one of: oneshot, stream-json." >&2
+        exit 64
+        ;;
+    esac
+
     hermes_config="$script_dir/hermes-benchmark.yaml"
     if [[ ! -f "$hermes_config" ]]; then
       echo "Hermes benchmark config not found: $hermes_config" >&2
@@ -246,22 +261,48 @@ case "$agent_runner" in
     fi
     cp "$hermes_config" "$HERMES_HOME/config.yaml"
     hermes_args=(--ignore-rules --in "$repo_root" --toolsets "$hermes_toolsets")
+    if [[ "$hermes_transport" == "stream-json" ]]; then
+      # `chat` is the only path that carries the JSONL emitter; --format implies --quiet and
+      # requires -q, so the prompt moves off --oneshot onto --query.
+      hermes_args=(chat "${hermes_args[@]}" --format stream-json)
+      hermes_prompt_flag="--query"
+    else
+      hermes_prompt_flag="--oneshot"
+    fi
     session_stem=""
     if [[ -n "${REPO_AUTOMATION_HERMES_USAGE_DIR:-}" ]]; then
       mkdir -p "$REPO_AUTOMATION_HERMES_USAGE_DIR"
       session_stem="$REPO_AUTOMATION_HERMES_USAGE_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$$"
-      hermes_args+=(--usage-file "$session_stem.usage.json")
+      # --usage-file is documented as having no effect outside -z/--oneshot, so the
+      # stream-json transport gets no usage report rather than an empty one that would read
+      # like a session which spent nothing. The controls below record which path ran, so a
+      # missing usage report on a probe is a stated property and not an unexplained gap.
+      if [[ "$hermes_transport" == "oneshot" ]]; then
+        hermes_args+=(--usage-file "$session_stem.usage.json")
+      fi
       # The usage report says what the session spent; it does not say what the session was
       # allowed to do. Record the controls beside it, from the same variables that set them,
       # and hash the config so a cell states exactly which posture produced it.
       config_sha="$(sha256_of "$hermes_config")"
-      printf '{"runner":"hermes","hermes_revision":"%s","config_profile":"kanban-benchmark-v1","config_sha256":"%s","safe_mode_env":true,"ignore_rules":true,"ignore_user_config":false,"toolsets":["terminal","file","code_execution","todo"],"provider":"%s","model":"%s","slice_id":"%s","hermes_home":"%s","terminal_cwd":"%s"}\n' \
-        "${HERMES_REVISION:-unknown}" "$config_sha" \
+      printf '{"runner":"hermes","hermes_revision":"%s","config_profile":"kanban-benchmark-v1","config_sha256":"%s","safe_mode_env":true,"ignore_rules":true,"ignore_user_config":false,"toolsets":["terminal","file","code_execution","todo"],"transport":"%s","provider":"%s","model":"%s","slice_id":"%s","hermes_home":"%s","terminal_cwd":"%s"}\n' \
+        "${HERMES_REVISION:-unknown}" "$config_sha" "$hermes_transport" \
         "${HERMES_INFERENCE_PROVIDER:-}" "${HERMES_INFERENCE_MODEL:-}" \
         "$slice_id" "$HERMES_HOME" "$TERMINAL_CWD" > "$session_stem.controls.json"
     fi
     if [[ -z "$session_stem" ]]; then
-      exec "$hermes_bin" "${hermes_args[@]}" --oneshot "$(cat "$prompt_file")"
+      exec "$hermes_bin" "${hermes_args[@]}" "$hermes_prompt_flag" "$(cat "$prompt_file")"
+    fi
+    if [[ "$hermes_transport" == "stream-json" ]]; then
+      # stdout is the event stream and stderr is diagnostics plus the session id, so they go
+      # to separate files: the JSONL stays byte for byte what Hermes emitted, and .log stays
+      # the file the provider-failure classifier reads. The emitter flushes every line, so
+      # unlike --oneshot a turn killed at its ceiling leaves everything it did up to then.
+      set +e
+      "$hermes_bin" "${hermes_args[@]}" "$hermes_prompt_flag" "$(cat "$prompt_file")" \
+        2> "$session_stem.log" | tee "$session_stem.stream.jsonl"
+      hermes_status=${PIPESTATUS[0]}
+      set -e
+      exit "$hermes_status"
     fi
     # Keep the session's own output beside its reports. The usage report says whether the
     # session failed, never why: a provider that refuses to serve (429, exhausted retries)

@@ -415,6 +415,21 @@ def compose_prompt(*sections: str, jspace: Optional[JSpaceArtifact] = None) -> s
     return "\n\n".join(blocks) + "\n"
 
 
+def research_prompt(task: TaskSpec, jspace: Optional[JSpaceArtifact] = None) -> str:
+    """The research phase's prompt, byte for byte.
+
+    A diagnostic that asks what the research session did has to ask it the same question a
+    lane does; composing a near-copy somewhere else would measure the near-copy.
+    """
+    return compose_prompt(
+        f"# Research: {task.repository}",
+        envelope(task),
+        _RESEARCH_BODY,
+        artifact_instruction(RESEARCH_SPEC),
+        jspace=jspace,
+    )
+
+
 # --------------------------------------------------------------------------------------
 # Session plumbing shared by every lane
 # --------------------------------------------------------------------------------------
@@ -665,14 +680,8 @@ class RpiStrategy:
         run = _BudgetedRun(ctx, ceilings=PHASE_CEILING_SECONDS)
         compaction_stats: dict[str, Any] = {}
 
-        research_prompt = compose_prompt(
-            f"# Research: {ctx.task.repository}",
-            envelope(ctx.task),
-            _RESEARCH_BODY,
-            artifact_instruction(RESEARCH_SPEC),
-            jspace=self.jspace,
-        )
-        research_result = run.phase("research", research_prompt, {"objective": ctx.task.objective})
+        prompt = research_prompt(ctx.task, self.jspace)
+        research_result = run.phase("research", prompt, {"objective": ctx.task.objective})
         research = self._validate(research_result, RESEARCH_SPEC, ctx.workspace, RESEARCH_ARTIFACT)
         if not research_result.artifact_valid:
             return self._not_administered(run, compaction_stats)
