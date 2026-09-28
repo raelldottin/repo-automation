@@ -36,7 +36,6 @@ _DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
-# The same shape unanchored, to name a malformed argument by the part that is a variable name.
 def resolve_agent_env(names: Optional[Sequence[str]]) -> dict[str, str]:
     """Copy exactly the named launcher variables through to the agent session.
 

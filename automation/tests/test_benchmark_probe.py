@@ -401,6 +401,63 @@ class ProbeArtifactLinkTests(unittest.TestCase):
             self.assertEqual(["host-file.json"], record["rpi"]["skipped_symlinks"])
             self.assertEqual(["research.json"], record["rpi"]["copied"])
 
+    def test_a_symlinked_rpi_directory_is_not_followed_at_all(self) -> None:
+        """The guard one level up.
+
+        ``Path.is_dir()`` follows links, so gating the copy on it and then checking each
+        entry leaves the whole container untrusted: an agent that links `.rpi` itself gets
+        every entry of the target copied, each one a real file with is_symlink() False.
+        Strictly more reach than the single-entry case, and invisible to a test that builds
+        `.rpi` as a real directory.
+        """
+        from automation.benchmark.probe import run_probe
+
+        with tempfile.TemporaryDirectory() as raw:
+            host = Path(raw) / "outside"
+            host.mkdir()
+            (host / "id_rsa").write_text("host sentinel, not agent evidence\n", encoding="utf-8")
+            out = Path(raw) / "probe"
+
+            def runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+                (workspace / ".rpi").symlink_to(host, target_is_directory=True)
+                Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+                return 0
+
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+
+            self.assertFalse((out / "rpi" / "id_rsa").exists(), "a linked artifact container was followed")
+            self.assertFalse((out / "rpi").exists(), "a linked artifact container produced a run directory")
+            self.assertEqual("host sentinel, not agent evidence\n", (host / "id_rsa").read_text(encoding="utf-8"))
+            # Recorded, for the same reason an entry-level skip is: silence reads as "the
+            # agent wrote nothing", which is the question the probe exists to answer.
+            self.assertTrue(record["rpi"]["container_skipped"])
+
+    def test_a_subdirectory_is_skipped_rather_than_destroying_the_collected_evidence(self) -> None:
+        """One predicate covers this and the link case.
+
+        read_bytes() on a directory raised mid-loop and the BaseException handler then
+        removed the destination - so a session could delete its own collected evidence by
+        leaving a directory in `.rpi`, which is the failure skip-rather-than-refuse exists
+        to prevent.
+        """
+        from automation.benchmark.probe import run_probe
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+
+            def runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+                rpi = workspace / ".rpi"
+                (rpi / "nested").mkdir(parents=True)
+                (rpi / "research.json").write_text("{}", encoding="utf-8")
+                Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+                return 0
+
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+
+            self.assertTrue((out / "rpi" / "research.json").is_file(), "the real artifact was lost with the directory")
+            self.assertFalse((out / "rpi" / "nested").exists())
+            self.assertEqual(["nested"], record["rpi"]["skipped_non_files"])
+
     def test_a_run_with_no_links_records_an_empty_skip_list(self) -> None:
         from automation.benchmark.probe import run_probe
 
@@ -415,6 +472,8 @@ class ProbeArtifactLinkTests(unittest.TestCase):
             out = Path(raw) / "probe"
             record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
             self.assertEqual([], record["rpi"]["skipped_symlinks"])
+            self.assertEqual([], record["rpi"]["skipped_non_files"])
+            self.assertFalse(record["rpi"]["container_skipped"])
 
 
 class ProbeOutputOwnershipTests(unittest.TestCase):

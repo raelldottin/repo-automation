@@ -406,12 +406,20 @@ that already holds either is left byte-for-byte alone and the probe stops before
 phase budget, so a second probe into a directory that already answered the question cannot
 destroy the answer it was run to re-check.
 
-Symlinks in the agent's `.rpi` are **skipped, not followed**, and each skip is named in
-`probe.json` under `rpi.skipped_symlinks` and printed in the summary. The probe collects what
-a session produced; dereferencing a link the session left would hand an evidence collector
-read authority over the whole host filesystem, which is not what it is for. Skipping rather
-than refusing keeps a session from halting its own diagnostic by leaving a link, and naming
-the skip keeps it from reading as "the agent wrote nothing".
+Symlinks in the agent's `.rpi` are **skipped, not followed** - including a `.rpi` that is
+itself a symlink, which is checked before the directory is read at all. `Path.is_dir()`
+follows links, so gating only on it and then filtering entries leaves the container
+unguarded: every entry of the link target arrives as a real file and no per-entry check ever
+sees a link. Entries that are not regular files are skipped too, which is the same rule and
+also stops a directory in `.rpi` from aborting the copy and taking the already-collected
+artifacts with it.
+
+Each skip is named in `probe.json` under `rpi.skipped_symlinks`, `rpi.skipped_non_files` and
+`rpi.container_skipped`, and printed in the summary. The probe collects what a session
+produced; dereferencing a link the session left would hand an evidence collector read
+authority over the whole host filesystem, which is not what it is for. Skipping rather than
+refusing keeps a session from halting its own diagnostic by leaving a link or a directory,
+and naming the skip keeps it from reading as "the agent wrote nothing".
 
 ### The phase artifact contract
 

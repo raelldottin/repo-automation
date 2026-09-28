@@ -170,8 +170,14 @@ def run_probe(
     data, text = read_artifact(workspace, RESEARCH_ARTIFACT)
     copied: list[str] = []
     skipped_symlinks: list[str] = []
+    skipped_non_files: list[str] = []
     rpi_source = workspace / RPI_DIR
-    if rpi_source.is_dir():
+    # `.rpi` is agent-created, container included. `is_dir()` follows links, so a session that
+    # makes `.rpi` itself a link gets every entry of the target copied out as a real file -
+    # the per-entry guard below never sees a symlink. Reach over the whole host filesystem is
+    # not authority an evidence collector needs, at either level.
+    container_skipped = rpi_source.is_symlink()
+    if rpi_source.is_dir() and not container_skipped:
         destination = out_dir / PROBE_RPI_DIRNAME
         try:
             destination.mkdir(parents=True, exist_ok=False)
@@ -180,12 +186,16 @@ def run_probe(
             raise FileExistsError(f"refusing to overwrite pre-existing probe output: {destination}") from None
         try:
             for artifact in sorted(rpi_source.iterdir()):
-                # `.rpi` is agent-created. Following a link out of it would give an evidence
-                # collector read authority over the whole host filesystem, which is not what
-                # it is for. Skipped rather than refused: refusing would let a session halt
-                # its own diagnostic by leaving a symlink.
+                # Skipped rather than refused, both here and above: refusing would let a
+                # session halt its own diagnostic by leaving a link or a directory behind.
                 if artifact.is_symlink():
                     skipped_symlinks.append(artifact.name)
+                    continue
+                if not artifact.is_file():
+                    # read_bytes() on a directory raised mid-loop, and the cleanup below then
+                    # removed everything already collected - a session could destroy its own
+                    # evidence with one `mkdir`.
+                    skipped_non_files.append(artifact.name)
                     continue
                 destination.joinpath(artifact.name).write_bytes(artifact.read_bytes())
                 copied.append(artifact.name)
@@ -204,9 +214,14 @@ def run_probe(
         "budget_seconds": budget_seconds,
         "prompt_chars": len(prompt),
         "phase_result": result.to_dict(),
-        # A skipped link reads as a finding about the session; a silent omission would
-        # read as "the agent wrote nothing", which is the question the probe exists to answer.
-        "rpi": {"copied": copied, "skipped_symlinks": skipped_symlinks},
+        # A skip reads as a finding about the session; a silent omission would read as
+        # "the agent wrote nothing", which is the question the probe exists to answer.
+        "rpi": {
+            "copied": copied,
+            "skipped_symlinks": skipped_symlinks,
+            "skipped_non_files": skipped_non_files,
+            "container_skipped": container_skipped,
+        },
         "artifact": {
             "filename": RESEARCH_ARTIFACT,
             "present": data is not None,
@@ -243,11 +258,15 @@ def summarize(record: dict[str, Any]) -> str:
         f"artifact      {'present' if artifact['present'] else 'ABSENT'}"
         f" ({artifact['chars']} chars, schema {artifact['schema_errors'] or 'valid'})",
     ]
-    if record["rpi"]["skipped_symlinks"]:
-        # Printed, not just recorded: this is the line that stops a reader concluding the
-        # agent wrote nothing when it wrote a link the probe declined to follow.
-        skipped = ", ".join(record["rpi"]["skipped_symlinks"])
-        lines.append(f"skipped links {skipped} (symlinks in {RPI_DIR}, not followed)")
+    rpi = record["rpi"]
+    # Printed, not just recorded: these are the lines that stop a reader concluding the agent
+    # wrote nothing when it wrote something the probe declined to follow.
+    if rpi["container_skipped"]:
+        lines.append(f"skipped links {RPI_DIR} itself is a symlink, so nothing under it was collected")
+    if rpi["skipped_symlinks"]:
+        lines.append(f"skipped links {', '.join(rpi['skipped_symlinks'])} (symlinks in {RPI_DIR}, not followed)")
+    if rpi["skipped_non_files"]:
+        lines.append(f"skipped dirs  {', '.join(rpi['skipped_non_files'])} (not regular files in {RPI_DIR})")
     mentions = stream["artifact_mentions"]
     named = f"{len(mentions)} events name {RESEARCH_ARTIFACT}" if mentions else "none"
     lines.append(f"write attempt {named}")

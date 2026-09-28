@@ -502,11 +502,11 @@ class AgentEnvSelectionTests(unittest.TestCase):
                     benchmark_run.resolve_agent_env([argument])
                 self.assertNotIn("sentinel-value", str(refusal.exception))
 
-    # Every shape of argument the resolver refuses. The property is one sentence - none of
-    # what the caller supplied comes back - and it is asserted over the table rather than per
-    # branch, because a per-branch test cannot fail for a branch nobody thought of. That is
-    # exactly how the same leak survived two slices in two adjacent branches of one function.
-    REFUSED_ARGUMENTS = (
+    # Every shape of argument the resolver refuses, grouped by the branch that refuses it.
+    # The property is asserted over the tables rather than per branch, because a per-branch
+    # test cannot fail for a branch nobody thought of - which is exactly how the same leak
+    # survived two slices in two adjacent branches of one function.
+    MALFORMED_ARGUMENTS = (
         "sk_live_abc123 NVIDIA_API_KEY",  # credential first: no "=" to truncate at
         "NVIDIA_API_KEY=sk_live_abc123",  # credential after the separator
         "NVIDIA_API_KEY sk_live_abc123",  # credential after a space
@@ -515,28 +515,47 @@ class AgentEnvSelectionTests(unittest.TestCase):
         "NVIDIA_API_KEY\nsk_live_abc123",
         "$(sk_live_abc123)",  # nothing recoverable at all
         "=sk_live_abc123",
-        "2sk_live_abc123",  # leading digit, so the recoverable prefix is empty
-        "sk_live_abc123",  # a valid name by shape, merely unset: the other branch
+        "2sk_live_abc123",  # leading digit, so any recoverable prefix is empty
         "",
     )
+    # Valid names by shape, refused one branch later for being unset.
+    UNSET_ARGUMENTS = (
+        "sk_live_abc123",
+        "SENTINEL_ABSENT_VARIABLE",
+        "a",
+    )
 
-    def test_no_refusal_reflects_any_part_of_what_the_caller_supplied(self) -> None:
-        """The contract property, over every branch at once.
+    def _refusal_for(self, argument: str) -> str:
+        with unittest.mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(SystemExit) as refusal:
+                benchmark_run.resolve_agent_env([argument])
+        return str(refusal.exception)
 
-        Cases are identified by index, never by content: a test that proves an argument is
-        not echoed must not echo it to report a failure.
+    def test_a_refusal_is_a_function_of_branch_and_position_only(self) -> None:
+        """The contract property, stated as what the diagnostic is allowed to depend on.
+
+        Asserting "no substring of the argument appears" needs a gram length, reports false
+        leaks on ordinary words like ``environment``, and passes vacuously on a short
+        argument. Byte-identity across different arguments refused the same way admits none
+        of that: any dependence on content at all makes two messages differ.
         """
-        for index, argument in enumerate(self.REFUSED_ARGUMENTS):
-            with self.subTest(case=index):
-                with self.assertRaises(SystemExit) as refusal:
-                    benchmark_run.resolve_agent_env([argument])
-                message = str(refusal.exception)
-                runs = {argument[at : at + 4] for at in range(len(argument) - 3)}
-                for run_of_four in runs:
-                    self.assertFalse(
-                        run_of_four in message,
-                        f"the refusal for case {index} reflected 4 characters of the supplied argument",
-                    )
+        for table, branch in ((self.MALFORMED_ARGUMENTS, "malformed"), (self.UNSET_ARGUMENTS, "unset")):
+            with self.subTest(branch=branch):
+                messages = {self._refusal_for(argument) for argument in table}
+                self.assertEqual(
+                    1,
+                    len(messages),
+                    f"the {branch} refusal varies with the argument, so it carries caller-supplied content",
+                )
+
+    def test_a_refusal_does_not_carry_an_obviously_supplied_credential(self) -> None:
+        # The property above already implies this; it is kept because it is the sentence a
+        # reader checks the property against.
+        # Cases are identified by index: a test proving an argument is not echoed must not
+        # echo it to report a failure.
+        for case, argument in enumerate(self.MALFORMED_ARGUMENTS + self.UNSET_ARGUMENTS):
+            with self.subTest(case=case):
+                self.assertFalse("sk_live_abc123" in self._refusal_for(argument), "the refusal echoed the supplied argument")
 
     def test_a_refusal_still_says_which_argument_it_refused(self) -> None:
         # Echoing nothing must not mean saying nothing: an operator has their own command
