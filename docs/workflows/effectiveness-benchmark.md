@@ -262,6 +262,22 @@ under one receipt:
  "containers": [{"task_id": "default", "...": "..."}]}
 ```
 
+The witness also *removes* what a killed session left behind. A cell killed at its budget
+ceiling takes Hermes's own cleanup with it, so the container it was working in survives,
+along with whatever its last tool call started inside — a compile still burning the
+runner's CPU while the next phase is measured on it. At the exit of **each** agent
+invocation, not at the end of the lane, the witness issues `docker rm -f` against the
+container ids **it saw**, never against a `hermes-agent=1` query: a broad sweep would also
+take containers that were present before the cell and containers another cell is using.
+Both facts survive in the record, since `removed_after_exit` is the only direct evidence
+of `docker_persist_across_processes: false` there is:
+
+| Hermes | `removed_after_exit` | `cleanup_attempted` | `removed_after_cleanup` |
+| --- | --- | --- | --- |
+| exited normally | `true` | `false` | `null` |
+| was budget-killed | `false` | `true` | `true` |
+| left something unremovable | `false` | `true` | `false` → **cell refused** |
+
 Every container, not the first: Hermes builds one backend per `task_id`, and there are
 three kinds. The system prompt's own probe gets `prompt-backend-probe`. The CLI parent's
 tool calls get `default`. Every tool call *inside an agent turn* gets a session-scoped id,
