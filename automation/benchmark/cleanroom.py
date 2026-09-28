@@ -132,10 +132,19 @@ def _subprocess_docker(argv: list[str]) -> tuple[int, str]:
 
 
 def _checked(run: DockerRun, argv: list[str]) -> str:
+    """Run a docker command that answers with one value, and return that value.
+
+    The last non-empty line, not the whole output: ``docker create`` pulls the image on a
+    cache miss and writes every layer's progress to stderr, which this captures alongside
+    the container id. Run 36414921665 passed that entire pull log on as a container id and
+    the daemon answered the next call with a 404 - on the runner, where the image is never
+    already present, i.e. every time.
+    """
     returncode, output = run(argv)
     if returncode != 0:
         raise CleanroomError(f"{' '.join(argv[:3])} failed (rc {returncode}): {output.strip()}")
-    return output.strip()
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
 
 
 def _is_documentation(entry: Path) -> bool:

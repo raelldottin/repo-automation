@@ -44,10 +44,12 @@ class FakeDocker:
         probe: str = HEALTHY_PROBE,
         network_mode: str = "none",
         executable: bool = True,
+        pull_noise: str = "Unable to find image locally\nlatest: Pulling from programbench/x\n",
     ) -> None:
         self.contents = contents
         self.probe = probe
         self.network_mode = network_mode
+        self.pull_noise = pull_noise
         self.executable = executable
         self.calls: list[list[str]] = []
         self._workspace: Path | None = None
@@ -55,7 +57,10 @@ class FakeDocker:
     def __call__(self, argv: list[str]) -> tuple[int, str]:
         self.calls.append(argv)
         if argv[1] == "create":
-            return 0, "probe-container" if "--network=none" in argv else "copy-container"
+            container = "probe-container" if "--network=none" in argv else "copy-container"
+            # What a cache miss looks like: `docker create` pulls, and the pull's progress
+            # arrives on stderr in front of the container id.
+            return 0, f"{self.pull_noise}{container}\n"
         if argv[1] == "cp":
             destination = Path(argv[3])
             for name, body in self.contents.items():
@@ -118,6 +123,16 @@ class PrepareTests(unittest.TestCase):
             # specification the model is allowed to read.
             self.assertEqual([".git", "README.md", "doc", "executable"], receipt.workspace_entries)
             self.assertTrue(receipt.git_worktree)
+
+    def test_a_pull_on_the_way_in_is_not_mistaken_for_the_container_id(self) -> None:
+        # Run 36414921665: the image is never cached on a fresh runner, so `docker create`
+        # pulled, and the pull log was passed on as the container id. Every later call
+        # addressed a container that does not exist.
+        docker = FakeDocker(contents=cleanroom_contents())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.prepare(docker, Path(temp_dir) / "ws")
+        self.assertEqual("copy-container:/workspace/.", docker.call("cp")[2])
+        self.assertEqual("probe-container", docker.call("inspect")[-1])
 
     def test_the_probe_runs_air_gapped_in_the_same_image_and_the_same_workspace(self) -> None:
         docker = FakeDocker(contents=cleanroom_contents())
