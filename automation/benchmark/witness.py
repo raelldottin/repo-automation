@@ -14,6 +14,10 @@ system prompt's own probe gets ``prompt-backend-probe``, and the terminal, file 
 code_execution tools the model calls get ``default``. First-container-wins recorded the
 probe's and hid the one that matters.
 
+One thing it does rather than records: a container it saw that is still listed once the
+session is gone gets removed by id, because a budget kill leaves Hermes no chance to. See
+``_reap``.
+
 What is never recorded: the container's environment. The inspect format below does not ask
 for ``.Config.Env``, so the provider key cannot reach this process, let alone the artifact.
 """
@@ -206,6 +210,9 @@ class SandboxWitness:
             "labels": labels,
             "existed_in_baseline": False,
             "removed_after_exit": None,
+            "cleanup_attempted": False,
+            "removed_by_harness": False,
+            "removed_after_cleanup": None,
             "violations": [],
         }
         violations = _violations(record, self._image_id, self._workspace)
@@ -233,8 +240,46 @@ class SandboxWitness:
             return
         remaining = _hermes_containers(self._run)
         for record in self.containers:
-            record["removed_after_exit"] = record["container_id"] not in remaining
+            # Answered once, at the exit of the invocation that made it. One witness spans
+            # every phase of a lane, and a later phase must not re-answer an earlier
+            # phase's question - least of all to say "gone" about a container this reaped.
+            if record["removed_after_exit"] is None:
+                record["removed_after_exit"] = record["container_id"] not in remaining
+        self._reap()
         self._flush()
+
+    def _reap(self) -> None:
+        """Remove what a killed session left behind - and only what this witness saw.
+
+        A cell killed at its budget ceiling takes Hermes's own cleanup down with it, so the
+        container it was working in survives, along with whatever its last tool call started
+        inside. A fresh session id keeps the next cell from attaching to it, so this is not
+        contamination; it is a compile running on the runner's CPU while the next phase is
+        being measured on it.
+
+        The target list is this witness's own container ids, never a `hermes-agent=1` query:
+        a broad sweep would also take containers that were here before the cell and
+        containers another cell is still using. `removed_after_exit` keeps its original
+        reading - the runtime proof of `docker_persist_across_processes: false` is a fact
+        about Hermes, and rewriting it to say the harness cleaned up would erase it.
+        """
+        leaked = [record for record in self.containers if not record["removed_after_exit"] and not record["cleanup_attempted"]]
+        if not leaked:
+            return
+        for record in leaked:
+            record["cleanup_attempted"] = True
+            try:
+                returncode, _, _ = self._run(["docker", "rm", "-f", str(record["container_id"])])
+            except OSError:
+                returncode = 1
+            record["removed_by_harness"] = returncode == 0
+        remaining = _hermes_containers(self._run)
+        for record in leaked:
+            record["removed_after_cleanup"] = record["container_id"] not in remaining
+            if not record["removed_after_cleanup"]:
+                # Refused rather than carried forward: the next phase would be measured
+                # against a runner this one is still using.
+                self.violations.append(f"the container {record['container_id']} outlived its session and could not be removed")
 
     def _flush(self) -> None:
         self._sessions_dir.mkdir(parents=True, exist_ok=True)

@@ -27,10 +27,13 @@ SESSION_TASK_ID = "32c58fde-13c6-4448-bbb5-b90482b19290"
 class FakeDocker:
     """A Docker whose container list the test changes while the session 'runs'."""
 
-    def __init__(self, *, containers: list[str], inspect: dict) -> None:
+    def __init__(self, *, containers: list[str], inspect: dict, unremovable: tuple[str, ...] = ()) -> None:
         self.containers = containers
         # One record per container id, or one record for whatever is asked about.
         self.inspect = inspect
+        # Containers `docker rm -f` cannot get rid of: a wedged runtime, a shutting-down
+        # daemon. The cell has to notice rather than hand the next phase a busy runner.
+        self.unremovable = unremovable
         self.calls: list[list[str]] = []
 
     def __call__(self, argv: list[str]) -> tuple[int, str, str]:
@@ -40,6 +43,12 @@ class FakeDocker:
         if argv[1] == "inspect":
             record = self.inspect.get(argv[-1], self.inspect) if self.inspect else {}
             return 0, json.dumps(record) + "\n", ""
+        if argv[1] == "rm":
+            container = argv[-1]
+            if container in self.unremovable:
+                return 1, "", f"Error response from daemon: cannot remove {container}\n"
+            self.containers.remove(container)
+            return 0, f"{container}\n", ""
         raise AssertionError(f"unexpected docker call: {argv}")
 
 
@@ -193,19 +202,112 @@ class WitnessTests(unittest.TestCase):
             self.assertFalse(receipt["session_backend_verified"])
             self.assertEqual(["the agent's container has nothing mounted at /workspace"], witness.violations)
 
-    def test_a_container_that_outlives_its_process_is_recorded_as_still_reusable(self) -> None:
-        # The runtime reading of `docker_persist_across_processes: false`: a container the
-        # daemon still lists is one the next process attaches to by label.
+    def test_a_container_that_outlives_its_process_is_reaped_without_losing_that_it_did(self) -> None:
+        # Two facts, both kept. `removed_after_exit` is the runtime reading of
+        # `docker_persist_across_processes: false` - a container the daemon still lists is
+        # one the next process attaches to by label - and rewriting it to say the harness
+        # tidied up would erase the only direct evidence there is.
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
             workspace.mkdir()
             docker = FakeDocker(containers=[], inspect=inspected(workspace))
 
-            self.watch(docker, workspace, sessions, removes=False)
+            witness = self.watch(docker, workspace, sessions, removes=False)
 
             receipt = self.written(sessions)
             self.assertFalse(receipt["default_backend_removed_after_exit"])
-            self.assertFalse(receipt["containers"][0]["removed_after_exit"])
+            self.assertEqual(
+                {
+                    "removed_after_exit": False,
+                    "cleanup_attempted": True,
+                    "removed_by_harness": True,
+                    "removed_after_cleanup": True,
+                },
+                {
+                    key: receipt["containers"][0][key]
+                    for key in ("removed_after_exit", "cleanup_attempted", "removed_by_harness", "removed_after_cleanup")
+                },
+            )
+            self.assertEqual([["docker", "rm", "-f", CONTAINER]], [c for c in docker.calls if c[1] == "rm"])
+            self.assertEqual([], witness.violations)
+            self.assertEqual([], docker.containers)
+
+    def test_a_phase_is_reaped_at_its_own_exit_not_at_the_end_of_the_lane(self) -> None:
+        # C-E run several agent invocations through one witness. A timed-out Research
+        # container left running while Plan is measured on the same runner is the thing the
+        # reap exists to stop, so it happens per invocation - and the second invocation must
+        # not re-answer whether the first one's container outlived it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(
+                containers=[],
+                inspect={
+                    CONTAINER: inspected(workspace),
+                    SESSION_CONTAINER: inspected(workspace, container=SESSION_CONTAINER, task_id=SESSION_TASK_ID),
+                },
+            )
+            witness = SandboxWitness(sessions, workspace, IMAGE, IMAGE_ID, run=docker, poll_seconds=0.01)
+
+            def phase(container: str):
+                def session(command, workspace_arg, env, timeout) -> int:
+                    docker.containers.append(container)
+                    return 0
+
+                return witness.wrap(session)
+
+            phase(CONTAINER)("hermes", workspace, {}, 300)
+            self.assertEqual([], docker.containers, "the first phase's container is still running during the second")
+            phase(SESSION_CONTAINER)("hermes", workspace, {}, 300)
+
+            records = {record["container_id"]: record for record in self.written(sessions)["containers"]}
+            self.assertEqual([False, False], [records[c]["removed_after_exit"] for c in (CONTAINER, SESSION_CONTAINER)])
+            self.assertEqual([True, True], [records[c]["removed_after_cleanup"] for c in (CONTAINER, SESSION_CONTAINER)])
+            self.assertEqual(2, len([call for call in docker.calls if call[1] == "rm"]))
+            self.assertEqual([], witness.violations)
+
+    def test_a_container_the_harness_cannot_remove_refuses_the_cell(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(containers=[], inspect=inspected(workspace), unremovable=(CONTAINER,))
+
+            witness = self.watch(docker, workspace, sessions, removes=False)
+
+            receipt = self.written(sessions)
+            record = receipt["containers"][0]
+            self.assertTrue(record["cleanup_attempted"])
+            self.assertFalse(record["removed_by_harness"])
+            self.assertFalse(record["removed_after_cleanup"])
+            self.assertEqual([f"the container {CONTAINER} outlived its session and could not be removed"], witness.violations)
+
+    def test_a_session_that_ended_cleanly_is_not_reaped(self) -> None:
+        # Hermes removed its own container, so there is nothing to clean up and the receipt
+        # should not claim the harness did anything.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(containers=[], inspect=inspected(workspace))
+
+            self.watch(docker, workspace, sessions, removes=True)
+
+            record = self.written(sessions)["containers"][0]
+            self.assertTrue(record["removed_after_exit"])
+            self.assertFalse(record["cleanup_attempted"])
+            self.assertIsNone(record["removed_after_cleanup"])
+
+    def test_containers_that_were_here_before_the_cell_are_never_reaped(self) -> None:
+        # The reap works off this witness's own ids. A `hermes-agent=1` sweep would also
+        # take a container another cell is still working in.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(containers=[PROBE_CONTAINER], inspect=inspected(workspace))
+
+            self.watch(docker, workspace, sessions, removes=False)
+
+            self.assertEqual([["docker", "rm", "-f", CONTAINER]], [c for c in docker.calls if c[1] == "rm"])
+            self.assertIn(PROBE_CONTAINER, docker.containers)
 
     def test_the_container_environment_is_never_asked_for(self) -> None:
         # The provider key lives in the agent's environment. The witness reads the container
