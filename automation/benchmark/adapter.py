@@ -27,7 +27,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Optional, Protocol
+from typing import Any, Callable, Mapping, Optional, Protocol
 
 from automation.context import build_context
 
@@ -155,9 +155,23 @@ def build_context_bundle(queue_data: dict, slice_record: dict) -> dict:
     }
 
 
+SUPERVISOR_SCRIPT = "automation/supervisor/run_agent.sh"
+# The no-model default-backend probe: its witness receipt and its log are named for it
+# rather than for a session, because it is not one.
+SANDBOX_PROBE_STEM = "sandbox-probe"
+# One container start and one `docker exec`. Generous for that, and short enough that a
+# wedged daemon does not eat the cell it is protecting.
+SANDBOX_PROBE_TIMEOUT_SECONDS = 300
+
+
+def _observed_task_ids(observation: Mapping[str, Any]) -> str:
+    containers = observation.get("containers") or []
+    return ", ".join(str(record.get("task_id")) for record in containers) or "none"
+
+
 def _default_command_template(repo_root: Path) -> str:
     """run_agent.sh referenced by absolute path: the agent's cwd is the workspace."""
-    script = repo_root / "automation/supervisor/run_agent.sh"
+    script = repo_root / SUPERVISOR_SCRIPT
     return (
         f"{shlex.quote(str(script))} --repo-root {{repo_root}} --prompt-file {{prompt_file}} "
         "--context-file {context_file} --handoff-file {handoff_file} --slice-id {slice_id}"
@@ -300,6 +314,42 @@ class SupervisorAgentAdapter:
             environment.update(self._env)
         return environment
 
+    def _probe_sandbox(
+        self, workspace: Path, environment: Mapping[str, str], sessions_dir: Path, receipt: CleanroomReceipt
+    ) -> None:
+        """Prove the tools' default backend is the cleanroom, before spending the budget.
+
+        The preflight proves the image, and the witness proves whichever containers a
+        session happens to create - but the container that serves the model's terminal,
+        file and code_execution calls is created by the model's first tool call, and a cell
+        that times out before that one leaves the question open. This asks it directly: one
+        terminal call at ``task_id=None``, through the same composed config and the same
+        sandbox image the next invocation gets, with no model in the loop.
+
+        Refusing here costs a container start. Refusing after the session costs the budget.
+        """
+        witness = SandboxWitness(sessions_dir, workspace, receipt.image, receipt.image_id, stem=SANDBOX_PROBE_STEM)
+        script = shlex.quote(str(self._repo_root / SUPERVISOR_SCRIPT))
+        command = f"{script} --repo-root {shlex.quote(str(workspace))} --sandbox-probe"
+        with witness.watching():
+            returncode = self._runner(command, workspace, environment, SANDBOX_PROBE_TIMEOUT_SECONDS)
+        failures = list(witness.violations)
+        if returncode != 0:
+            failures.append(f"the default-backend probe exited {returncode}; see {SANDBOX_PROBE_STEM}.log")
+        observation = witness.receipt
+        if not observation["default_backend_verified"]:
+            failures.append(
+                "no sound `hermes-task-id=default` container was observed, so the backend the "
+                f"model's tools would have used is unproved (task ids seen: {_observed_task_ids(observation)})"
+            )
+        elif not observation["default_backend_removed_after_exit"]:
+            # `docker_persist_across_processes: false` read off the daemon rather than off
+            # the config file: a container still listed is a container the next process
+            # attaches to, carrying the last cell's mounts into this one.
+            failures.append("the default backend container outlived the process that made it; the next session would reuse it")
+        if failures:
+            raise CleanroomError("the agent's sandbox was not the cleanroom it was given:\n  - " + "\n  - ".join(failures))
+
     def produce_submission(self, task: TaskSpec, out_tar: Path) -> SubmissionResult:
         out_tar = Path(out_tar)
 
@@ -321,6 +371,14 @@ class SupervisorAgentAdapter:
         # when the copy starts, and the Git worktree the harness needs is the one-commit
         # repository the image already ships. Creating either here would make the cell's
         # environment partly the harness's invention rather than ProgramBench's.
+        # Beside the submission, never inside it: one usage + controls report per agent
+        # session, so a result says which model answered and what it was allowed to do.
+        # Absolute, because the agent runs with the workspace as its working directory and
+        # --run-dir is usually relative: a relative path here wrote the reports into the
+        # workspace, which archived them into the submission and left run.json with none.
+        sessions_dir = (out_tar.parent / AGENT_SESSIONS_DIR).resolve()
+        environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(sessions_dir)
+
         receipt = None
         if self._cleanroom:
             receipt = prepare_cleanroom(task.instance_id, workspace, task.repository)
@@ -329,13 +387,7 @@ class SupervisorAgentAdapter:
             (out_tar.parent / CLEANROOM_RECEIPT_FILENAME).write_text(
                 json.dumps(receipt.to_dict(), indent=2) + "\n", encoding="utf-8"
             )
-        # Beside the submission, never inside it: one usage + controls report per agent
-        # session, so a result says which model answered and what it was allowed to do.
-        # Absolute, because the agent runs with the workspace as its working directory and
-        # --run-dir is usually relative: a relative path here wrote the reports into the
-        # workspace, which archived them into the submission and left run.json with none.
-        sessions_dir = (out_tar.parent / AGENT_SESSIONS_DIR).resolve()
-        environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(sessions_dir)
+            self._probe_sandbox(workspace, environment, sessions_dir, receipt)
 
         # The preflight proves the image; this proves the container the agent's tools were
         # actually given, from outside, while the session still holds it. Reuse of a

@@ -123,6 +123,50 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(["inst-a", "inst-b"], [s.instance_id for s in report.instances])
 
 
+class StubWitness:
+    """A witness with a fixed verdict, for tests about what the adapter does with one."""
+
+    def __init__(self, *, violations: tuple[str, ...] = (), receipt: dict | None = None) -> None:
+        self.violations = list(violations)
+        self.receipt = receipt or {
+            "observed": True,
+            "default_backend_verified": True,
+            "default_backend_removed_after_exit": True,
+            "containers": [{"task_id": "default"}],
+        }
+
+    @contextlib.contextmanager
+    def watching(self):
+        yield
+
+    def wrap(self, runner):
+        return runner
+
+
+def stub_witnesses(*stubs: StubWitness):
+    """Hand out the stubs in order: the probe's witness first, then the session's."""
+    queue = list(stubs)
+
+    def make(*_: object, **__: object) -> StubWitness:
+        return queue.pop(0)
+
+    return make
+
+
+def _fake_prepare(instance_id: str, workspace: Path, repository: str, **_: object) -> cleanroom.CleanroomReceipt:
+    (workspace / "executable").write_bytes(b"ELF")
+    (workspace / ".git").mkdir()
+    return cleanroom.CleanroomReceipt(
+        instance_id=instance_id,
+        image=cleanroom.image_for(instance_id),
+        image_id="sha256:d1ge57",
+        network_mode="none",
+        reference_executable=True,
+        workspace_writable=True,
+        git_worktree=True,
+    )
+
+
 class AdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[2]
@@ -215,13 +259,18 @@ class AdapterTests(unittest.TestCase):
             )
 
         adapter = SupervisorAgentAdapter(repo_root=self.repo_root, runner=fake_runner, cleanroom=True)
+        # Both the pre-budget probe and the session get a witness; neither is what this
+        # test is about, and there is no Docker daemon behind a fake runner to watch.
         with unittest.mock.patch.object(benchmark_adapter, "prepare_cleanroom", fake_prepare):
-            with tempfile.TemporaryDirectory() as tmp:
-                out_tar = Path(tmp) / "submission.tar.gz"
-                result = adapter.produce_submission(self.task, out_tar)
-                with tarfile.open(out_tar, "r:gz") as tar:
-                    names = tar.getnames()
-                receipt = json.loads((out_tar.parent / benchmark_adapter.CLEANROOM_RECEIPT_FILENAME).read_text(encoding="utf-8"))
+            with unittest.mock.patch.object(benchmark_adapter, "SandboxWitness", stub_witnesses(StubWitness(), StubWitness())):
+                with tempfile.TemporaryDirectory() as tmp:
+                    out_tar = Path(tmp) / "submission.tar.gz"
+                    result = adapter.produce_submission(self.task, out_tar)
+                    with tarfile.open(out_tar, "r:gz") as tar:
+                        names = tar.getnames()
+                    receipt = json.loads(
+                        (out_tar.parent / benchmark_adapter.CLEANROOM_RECEIPT_FILENAME).read_text(encoding="utf-8")
+                    )
 
         self.assertEqual(f"{self.task.instance_id} {self.task.repository}", captured["prepared"])
         # Nothing of the harness's own was in the workspace when the cleanroom was built:
@@ -243,33 +292,69 @@ class AdapterTests(unittest.TestCase):
         # The preflight proves the image; the witness proves the container the agent's tools
         # were handed. A cell that passed the first and failed the second is not a
         # ProgramBench inference result either, so it is refused rather than scored.
-        class ViolatedWitness:
-            def __init__(self, *_: object, **__: object) -> None:
-                self.violations = ["the agent's container is on NetworkMode='bridge', not 'none'"]
+        bridged = StubWitness(violations=("the agent's container is on NetworkMode='bridge', not 'none'",))
+        refusal = self.refused_cleanroom_cell(stub_witnesses(StubWitness(), bridged))
+        self.assertIn("NetworkMode='bridge'", refusal)
 
-            def wrap(self, runner):
-                return runner
+    def test_a_cell_whose_default_backend_was_never_observed_is_refused_before_the_budget(self) -> None:
+        # The container serving terminal, file and code_execution is the one keyed
+        # `default`. A run that only ever built the system prompt's own probe backend has
+        # not shown where the model's tools would have run, and the timed-out session that
+        # would otherwise be the only evidence costs the whole cell to learn that.
+        unproved = StubWitness(
+            receipt={
+                "observed": True,
+                "default_backend_verified": False,
+                "default_backend_removed_after_exit": None,
+                "containers": [{"task_id": "prompt-backend-probe"}],
+            }
+        )
+        refusal = self.refused_cleanroom_cell(stub_witnesses(unproved))
+        self.assertIn("`hermes-task-id=default`", refusal)
+        self.assertIn("prompt-backend-probe", refusal)
 
-        def fake_prepare(instance_id: str, workspace: Path, repository: str, **_: object):
-            (workspace / "executable").write_bytes(b"ELF")
-            (workspace / ".git").mkdir()
-            return cleanroom.CleanroomReceipt(
-                instance_id=instance_id,
-                image=cleanroom.image_for(instance_id),
-                image_id="sha256:d1ge57",
-                network_mode="none",
-                reference_executable=True,
-                workspace_writable=True,
-                git_worktree=True,
-            )
+    def test_a_default_backend_that_outlives_its_process_is_refused(self) -> None:
+        # `docker_persist_across_processes: false` read off the daemon instead of off the
+        # config file: a container still listed after its process exits is one the next
+        # cell attaches to, carrying this cell's mounts into it.
+        persisted = StubWitness(
+            receipt={
+                "observed": True,
+                "default_backend_verified": True,
+                "default_backend_removed_after_exit": False,
+                "containers": [{"task_id": "default"}],
+            }
+        )
+        refusal = self.refused_cleanroom_cell(stub_witnesses(persisted))
+        self.assertIn("outlived the process that made it", refusal)
 
+    def test_the_probe_runs_before_the_agent_session(self) -> None:
+        # Spending the budget first and asking afterwards is the failure mode this exists
+        # to remove: the answer arrives when there is nothing left to do about it.
+        commands: list[str] = []
+
+        def fake_runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            commands.append(command)
+            return 0
+
+        adapter = SupervisorAgentAdapter(repo_root=self.repo_root, runner=fake_runner, cleanroom=True)
+        with unittest.mock.patch.object(benchmark_adapter, "prepare_cleanroom", _fake_prepare):
+            with unittest.mock.patch.object(benchmark_adapter, "SandboxWitness", stub_witnesses(StubWitness(), StubWitness())):
+                with tempfile.TemporaryDirectory() as tmp:
+                    adapter.produce_submission(self.task, Path(tmp) / "submission.tar.gz")
+
+        self.assertIn("--sandbox-probe", commands[0])
+        self.assertIn("--prompt-file", commands[1])
+
+    def refused_cleanroom_cell(self, witness_factory) -> str:
+        """Run one cleanroom cell against a stubbed witness and return why it was refused."""
         adapter = SupervisorAgentAdapter(repo_root=self.repo_root, runner=lambda *_: 0, cleanroom=True)
-        with unittest.mock.patch.object(benchmark_adapter, "prepare_cleanroom", fake_prepare):
-            with unittest.mock.patch.object(benchmark_adapter, "SandboxWitness", ViolatedWitness):
+        with unittest.mock.patch.object(benchmark_adapter, "prepare_cleanroom", _fake_prepare):
+            with unittest.mock.patch.object(benchmark_adapter, "SandboxWitness", witness_factory):
                 with tempfile.TemporaryDirectory() as tmp:
                     with self.assertRaises(cleanroom.CleanroomError) as refusal:
                         adapter.produce_submission(self.task, Path(tmp) / "submission.tar.gz")
-        self.assertIn("NetworkMode='bridge'", str(refusal.exception))
+        return str(refusal.exception)
 
 
 class OrchestratorTests(unittest.TestCase):

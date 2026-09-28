@@ -249,20 +249,51 @@ pinned `DEFAULT_CONFIG` but honoured through `TERMINAL_CONFIG_ENV_MAP`, which th
 config check now knows about.
 
 Configured is still not proved, so a **sandbox witness** watches from outside while the
-session runs. It baselines the `hermes-agent=1` containers before the cell, polls for one
-that appears during it, and the moment it does writes `agent-sessions/<session>.sandbox.json`:
-container id, creation time, requested image, actual image id, `NetworkMode`, the
-`/workspace` mount's source and rw flag, Hermes's own labels, and `existed_in_baseline`.
-Written mid-session on purpose — a cell killed at its budget ceiling takes its process
-group with it, and the container is gone once it exits. The container's environment is
-never inspected, so the provider key cannot reach the receipt.
+session runs. It baselines the `hermes-agent=1` containers before the cell, polls for
+every container that appears during it, and the moment one does writes
+`agent-sessions/<session>.sandbox.json`. One record per container — task id, container id,
+creation time, requested image, actual image id, `NetworkMode`, the `/workspace` mount's
+source and rw flag, Hermes's own labels, `existed_in_baseline`, and `removed_after_exit` —
+under one receipt:
 
-A cleanroom cell is refused, exactly like a failed preflight, when the observed container
-runs another image, is not `NetworkMode=none`, has `/workspace` mounted from somewhere
-other than that cell's workspace or mounted read-only, or when no container appeared while
-one of Hermes's was already present — the shape of a reused container. A session that
-simply never called a tool creates none, which is a fact about the model's turn rather than
-the sandbox: that records `{"observed": false}` and scores normally.
+```json
+{"observed": true, "default_backend_verified": true, "default_backend_removed_after_exit": true,
+ "existing_containers": [], "containers": [{"task_id": "default", "...": "..."}]}
+```
+
+Every container, not the first: Hermes builds one backend per `task_id`, and the system
+prompt's own `prompt-backend-probe` container appears before the `default` one that serves
+the model's terminal, file and code_execution calls. Written mid-session on purpose — a
+cell killed at its budget ceiling takes its process group with it, and the container is
+gone once it exits. The container's environment is never inspected, so the provider key
+cannot reach the receipt.
+
+The `default` backend is created by the model's *first tool call*, so a cell that spends
+its budget before making one proves nothing about it. A **pre-budget default-backend
+probe** asks directly instead, with no model in the loop: `run_agent.sh --sandbox-probe`
+composes the same `HERMES_HOME/config.yaml`, exports the same `TERMINAL_CWD` and the same
+sandbox image the session will get, then runs, under Hermes's own interpreter,
+`apply_terminal_config_to_env()` followed by
+`terminal_tool("pwd && test -x ./executable && test -f README.md", task_id=None)`. Going
+through the config file is the point: that bridge is where
+`docker_persist_across_processes` takes effect, and `task_id=None` is what every ordinary
+tool call resolves to. Its receipt and output land in `agent-sessions/sandbox-probe.sandbox.json`
+and `agent-sessions/sandbox-probe.log`.
+
+The cell is refused before the budget is spent unless that probe exits 0 and the witness
+saw a `hermes-task-id=default` container with the cleanroom image id, `NetworkMode=none`,
+`/workspace` bound rw from this cell's own `pb-*` workspace, and `existed_in_baseline:
+false` — and unless that container is **gone** from `docker ps -a --filter
+label=hermes-agent=1` once the probe process exits. That last check is the runtime reading
+of `docker_persist_across_processes: false`: a container the daemon still lists is one the
+next process attaches to by label, whatever the config file says.
+
+The same refusal applies to the session's own witness: a container running another image,
+not `NetworkMode=none`, with `/workspace` from somewhere other than that cell's workspace
+or mounted read-only, or no container at all while one of Hermes's was already present —
+the shape of a reused container. A session that simply never called a tool creates none,
+which is a fact about the model's turn rather than the sandbox: that records
+`{"observed": false}` and scores normally.
 
 Credentials stay host-side: `NVIDIA_API_KEY` is read by the Hermes process, which runs
 *outside* the sandbox, and `docker_forward_env: []` / `docker_env: {}` keep the container's
