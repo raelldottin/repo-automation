@@ -245,7 +245,8 @@ jobs:
             echo "::error::The probe needs one instance id in the instances input." >&2
             exit 1
           fi
-          uv run python -m automation.benchmark.probe --instance "$instance" --out-dir out/probe | tee /tmp/probe.txt
+          uv run python -m automation.benchmark.probe --instance "$instance" --out-dir out/probe \
+            --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL | tee /tmp/probe.txt
           printf '```\n%s\n```\n' "$(cat /tmp/probe.txt)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Provision the pinned J-Space checkout
