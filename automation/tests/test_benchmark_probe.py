@@ -16,7 +16,10 @@ import os
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
+from collections.abc import Callable
 from pathlib import Path
+from typing import Optional
 
 from automation.benchmark.adapter import AGENT_SESSIONS_DIR, _default_command_template, _subprocess_runner
 from automation.benchmark.instances import TaskSpec, task_spec
@@ -256,6 +259,23 @@ class ProbeRecordTests(unittest.TestCase):
             self.assertTrue((out / PROBE_FILENAME).is_file())
             self.assertTrue((out / "rpi" / "research.json").is_file())
 
+    def test_artifact_mentions_are_attributed_to_the_event_that_named_them(self) -> None:
+        """timeline() drops text events; zipping it against the unfiltered list misaligns both.
+
+        Every entry after the first text delta was attributed to the wrong event, so the probe
+        reported the wrong time and the wrong tool for the write attempt it exists to find.
+        """
+        events = [
+            {"type": "system", "subtype": "init", "timestamp": 0},
+            {"type": "text", "timestamp": 1000},
+            {"type": "tool_use", "name": "shell", "input": {"command": "ls"}, "timestamp": 2000},
+            {"type": "tool_use", "name": "file_write", "input": {"path": ".rpi/research.json"}, "timestamp": 3000},
+        ]
+        mentions = artifact_mentions(events)
+        self.assertEqual(1, len(mentions))
+        self.assertEqual("file_write", mentions[0]["name"])
+        self.assertEqual(3.0, mentions[0]["at_seconds"])
+
     def test_a_truncated_last_line_does_not_lose_the_stream(self) -> None:
         """A session killed mid-write leaves a partial line; the rest is still evidence."""
         from automation.benchmark.probe import _events
@@ -268,3 +288,174 @@ class ProbeRecordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProbeEnvironmentIsolationTests(unittest.TestCase):
+    """The probe launches an agent against an untrusted repository, through shell=True.
+
+    It inherited the launcher environment wholesale - the boundary
+    ``audited_inherited_environment()`` exists to hold on the adapter path, absent one file
+    over. What a lane refuses to hand an agent, a diagnostic does not get to hand it either.
+    """
+
+    INSTANCE = "abishekvashok__cmatrix.5c082c6"
+    SENTINEL = "PROBE_LEAK_SENTINEL_NOT_A_REAL_SECRET"
+
+    def _capturing_runner(self, captured: dict):
+        def runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+            captured["env"] = dict(env)
+            artifact = workspace / ".rpi" / "research.json"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("{}", encoding="utf-8")
+            sessions = Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"])
+            sessions.mkdir(parents=True, exist_ok=True)
+            return 0
+
+        return runner
+
+    def _probe_environment(self, probe_env=None) -> dict:
+        from automation.benchmark.probe import run_probe
+
+        captured: dict = {}
+        with tempfile.TemporaryDirectory() as raw:
+            run_probe(
+                self.INSTANCE,
+                Path(raw) / "probe",
+                repo_root=REPO_ROOT,
+                budget_seconds=30,
+                runner=self._capturing_runner(captured),
+                env=probe_env,
+            )
+        return captured["env"]
+
+    def test_a_parent_only_variable_does_not_reach_the_probe_session(self) -> None:
+        with unittest.mock.patch.dict(os.environ, {self.SENTINEL: "sentinel-value"}):
+            environment = self._probe_environment()
+        # Never assertNotIn: it would render the whole environment into the failure report.
+        self.assertFalse(self.SENTINEL in environment, f"{self.SENTINEL} reached the probe session")
+
+    def test_an_explicitly_selected_variable_reaches_the_probe_session(self) -> None:
+        environment = self._probe_environment({self.SENTINEL: "sentinel-value"})
+        self.assertEqual("sentinel-value", environment.get(self.SENTINEL))
+
+    def test_the_probe_still_carries_what_the_runner_reads(self) -> None:
+        environment = self._probe_environment()
+        self.assertIn("PATH", environment)
+        self.assertEqual("stream-json", environment["REPO_AUTOMATION_HERMES_TRANSPORT"])
+
+    def test_the_cli_selects_launcher_variables_by_name(self) -> None:
+        from automation.benchmark import probe as probe_module
+
+        args = probe_module.build_parser().parse_args(
+            ["--instance", self.INSTANCE, "--out-dir", "out", "--agent-env", self.SENTINEL]
+        )
+        self.assertEqual([self.SENTINEL], args.agent_env)
+
+
+class ProbeOutputOwnershipTests(unittest.TestCase):
+    """The probe claims what it writes. It used to wipe a directory it had never created."""
+
+    INSTANCE = "abishekvashok__cmatrix.5c082c6"
+
+    def _runner(self, calls: list, squats: Optional[Callable[[], None]] = None):
+        """A phase that produces the artifact, and optionally claims an output mid-run.
+
+        ``squats`` is the race the pre-flight refusal cannot see: a path that did not exist
+        when the probe checked, and does by the time the probe writes.
+        """
+
+        def runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+            calls.append(workspace)
+            artifact = workspace / ".rpi" / "research.json"
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("{}", encoding="utf-8")
+            Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+            if squats is not None:
+                squats()
+            return 0
+
+        return runner
+
+    def _run(self, out_dir: Path, calls: Optional[list] = None, squats: Optional[Callable[[], None]] = None):
+        from automation.benchmark.probe import run_probe
+
+        return run_probe(
+            self.INSTANCE,
+            out_dir,
+            repo_root=REPO_ROOT,
+            budget_seconds=30,
+            runner=self._runner(calls if calls is not None else [], squats),
+        )
+
+    def test_a_pre_existing_artifact_directory_is_refused_and_left_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            nested = out / "rpi" / "earlier-run"
+            nested.mkdir(parents=True)
+            (nested / "phase-1.json").write_text("first attempt\n", encoding="utf-8")
+            sentinel = out / "rpi" / "owner-sentinel.txt"
+            sentinel.write_text("first attempt\n", encoding="utf-8")
+
+            calls: list = []
+            with self.assertRaises(FileExistsError) as refusal:
+                self._run(out, calls)
+
+            self.assertIn("refusing to overwrite", str(refusal.exception))
+            # Refused before launch: a probe that runs the phase first has already spent the
+            # budget the refusal exists to save.
+            self.assertEqual([], calls)
+            # Byte-for-byte and structurally unchanged: unlink() used to raise IsADirectoryError
+            # on the subdirectory, after it had already destroyed the file beside it.
+            self.assertEqual("first attempt\n", sentinel.read_text(encoding="utf-8"))
+            self.assertEqual("first attempt\n", (nested / "phase-1.json").read_text(encoding="utf-8"))
+
+    def test_a_pre_existing_probe_record_is_refused_not_overwritten(self) -> None:
+        from automation.benchmark.probe import PROBE_FILENAME
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            out.mkdir(parents=True)
+            record = out / PROBE_FILENAME
+            record.write_text("first attempt\n", encoding="utf-8")
+            calls: list = []
+            with self.assertRaises(FileExistsError) as refusal:
+                self._run(out, calls)
+            self.assertIn("refusing to overwrite", str(refusal.exception))
+            self.assertEqual("first attempt\n", record.read_text(encoding="utf-8"))
+            self.assertEqual([], calls)
+
+    def test_an_artifact_directory_that_appears_mid_run_is_still_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+
+            def squat() -> None:
+                (out / "rpi").mkdir(parents=True)
+                (out / "rpi" / "other-run.json").write_text("not mine\n", encoding="utf-8")
+
+            with self.assertRaises(FileExistsError) as refusal:
+                self._run(out, squats=squat)
+            self.assertIn("refusing to overwrite", str(refusal.exception))
+            self.assertEqual("not mine\n", (out / "rpi" / "other-run.json").read_text(encoding="utf-8"))
+
+    def test_a_probe_record_that_appears_mid_run_is_still_refused(self) -> None:
+        from automation.benchmark.probe import PROBE_FILENAME
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+
+            def squat() -> None:
+                (out / PROBE_FILENAME).write_text("not mine\n", encoding="utf-8")
+
+            with self.assertRaises(FileExistsError) as refusal:
+                self._run(out, squats=squat)
+            self.assertIn("refusing to overwrite", str(refusal.exception))
+            self.assertEqual("not mine\n", (out / PROBE_FILENAME).read_text(encoding="utf-8"))
+
+    def test_a_probe_into_an_empty_run_directory_writes_both(self) -> None:
+        from automation.benchmark.probe import PROBE_FILENAME
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            self._run(out)
+            self.assertTrue((out / PROBE_FILENAME).is_file())
+            self.assertTrue((out / "rpi" / "research.json").is_file())

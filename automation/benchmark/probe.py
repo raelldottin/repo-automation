@@ -19,16 +19,23 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
-from .adapter import AGENT_SESSIONS_DIR, CommandRunner, _default_command_template, _subprocess_runner
+from .adapter import (
+    AGENT_SESSIONS_DIR,
+    CommandRunner,
+    _default_command_template,
+    _subprocess_runner,
+    audited_inherited_environment,
+)
 from .instances import task_spec
 from .lanes import _agent_sessions
+from .run import resolve_agent_env
 from .strategies import (
     PHASE_CEILING_SECONDS,
     RESEARCH_ARTIFACT,
@@ -42,6 +49,8 @@ from .strategies import (
 
 STREAM_JSON_SUFFIX = ".stream.jsonl"
 PROBE_FILENAME = "probe.json"
+# Where the workspace's .rpi artifacts are kept once they belong to the run directory.
+PROBE_RPI_DIRNAME = "rpi"
 # The phase the campaign is stuck on, at the ceiling the campaign gives it.
 PROBE_PHASE = "research"
 PROBE_BUDGET_SECONDS = PHASE_CEILING_SECONDS[PROBE_PHASE]
@@ -68,6 +77,11 @@ def _events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def _is_text(event: dict[str, Any]) -> bool:
+    """The one place the skip rule lives: two readings of it is what misaligned the timeline."""
+    return event.get("type") == "text"
+
+
 def timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Tool activity in order, with the offset from the first event.
 
@@ -81,7 +95,7 @@ def timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deltas = 0
     for event in events:
         kind = event.get("type")
-        if kind == "text":
+        if _is_text(event):
             deltas += 1
             continue
         entry = {
@@ -98,7 +112,14 @@ def timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def artifact_mentions(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Every event naming the required artifact - the write attempt, or its absence."""
-    return [entry for entry, event in zip(timeline(events), events) if RESEARCH_ARTIFACT in json.dumps(event)]
+    named = [event for event in events if not _is_text(event)]
+    return [entry for entry, event in zip(timeline(events), named) if RESEARCH_ARTIFACT in json.dumps(event)]
+
+
+def _refuse_pre_existing(path: Path) -> None:
+    """Ownership is established by creation: what this run did not make, it does not clear."""
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite pre-existing probe output: {path}")
 
 
 def run_probe(
@@ -114,6 +135,8 @@ def run_probe(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     task = task_spec(instance_id)
+    _refuse_pre_existing(out_dir / PROBE_RPI_DIRNAME)
+    _refuse_pre_existing(out_dir / PROBE_FILENAME)
 
     # Same workspace construction as a cell: an agent that finds a different repo shape
     # answers a different question.
@@ -122,7 +145,10 @@ def run_probe(
     control_dir = Path(tempfile.mkdtemp(prefix=f"pb-probe-control-{task.instance_id}-"))
 
     sessions_dir = (out_dir / AGENT_SESSIONS_DIR).resolve()
-    environment = dict(os.environ)
+    # A diagnostic reaches the same agent through the same shell as a lane, so it inherits
+    # what a lane inherits and nothing else. Explicit `env` is the caller's own authorization
+    # and is not filtered through that boundary.
+    environment = audited_inherited_environment()
     if env:
         environment.update(env)
     environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(sessions_dir)
@@ -144,13 +170,18 @@ def run_probe(
     data, text = read_artifact(workspace, RESEARCH_ARTIFACT)
     rpi_source = workspace / RPI_DIR
     if rpi_source.is_dir():
-        destination = out_dir / "rpi"
-        if destination.exists():
-            for stale in destination.iterdir():
-                stale.unlink()
-        destination.mkdir(parents=True, exist_ok=True)
-        for artifact in rpi_source.iterdir():
-            destination.joinpath(artifact.name).write_bytes(artifact.read_bytes())
+        destination = out_dir / PROBE_RPI_DIRNAME
+        try:
+            destination.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            # Appeared after the pre-flight refusal looked: someone else's, either way.
+            raise FileExistsError(f"refusing to overwrite pre-existing probe output: {destination}") from None
+        try:
+            for artifact in rpi_source.iterdir():
+                destination.joinpath(artifact.name).write_bytes(artifact.read_bytes())
+        except BaseException:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
 
     sessions = _agent_sessions(out_dir)
     streams = sorted(sessions_dir.glob(f"*{STREAM_JSON_SUFFIX}"))
@@ -178,7 +209,13 @@ def run_probe(
         },
         "agent_sessions": sessions,
     }
-    (out_dir / PROBE_FILENAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    # "x": a record written between the pre-flight refusal and here is still someone else's.
+    record_path = out_dir / PROBE_FILENAME
+    try:
+        with record_path.open("x", encoding="utf-8") as record_file:
+            record_file.write(json.dumps(record, indent=2) + "\n")
+    except FileExistsError:
+        raise FileExistsError(f"refusing to overwrite pre-existing probe output: {record_path}") from None
     return record
 
 
@@ -205,7 +242,7 @@ def summarize(record: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m automation.benchmark.probe",
         description=__doc__,
@@ -220,9 +257,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=PROBE_BUDGET_SECONDS,
         help=f"Phase ceiling in seconds (default: {PROBE_BUDGET_SECONDS}, the lane's own).",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--agent-env",
+        action="append",
+        metavar="VARIABLE_NAME",
+        default=[],
+        help="Forward this launcher variable to the probe session. Repeatable. Name only, never NAME=value.",
+    )
+    return parser
 
-    record = run_probe(args.instance, args.out_dir, repo_root=args.repo_root, budget_seconds=args.budget)
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    record = run_probe(
+        args.instance,
+        args.out_dir,
+        repo_root=args.repo_root,
+        budget_seconds=args.budget,
+        env=resolve_agent_env(args.agent_env),
+    )
     print(summarize(record))
     return 0
 

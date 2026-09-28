@@ -484,7 +484,16 @@ class AgentEnvSelectionTests(unittest.TestCase):
     def test_a_variable_that_is_not_set_is_refused_before_the_agent_launches(self) -> None:
         with self.assertRaises(SystemExit) as refusal:
             benchmark_run.resolve_agent_env(["SENTINEL_ABSENT_VARIABLE"])
-        self.assertIn("SENTINEL_ABSENT_VARIABLE", str(refusal.exception))
+        self.assertIn("not set", str(refusal.exception))
+
+    def test_a_missing_variable_is_refused_without_reflecting_what_was_supplied(self) -> None:
+        # A token made only of [A-Za-z0-9_] satisfies _ENV_NAME, so a caller who passes the
+        # value where the name belongs gets it reflected into the refusal and any log holding
+        # it - the leak --agent-env takes names to avoid, one branch past the shape check.
+        token = "sk_live_sentinelvalue_0123456789"
+        with self.assertRaises(SystemExit) as refusal:
+            benchmark_run.resolve_agent_env([token])
+        self.assertFalse(token in str(refusal.exception), "the refusal reflected the supplied argument")
 
     def test_an_argument_carrying_a_value_is_rejected_without_echoing_it(self) -> None:
         for argument in ("SENTINEL_KEY=sentinel-value", "FOO-BAR", "$(evil)", "", "2FAST"):

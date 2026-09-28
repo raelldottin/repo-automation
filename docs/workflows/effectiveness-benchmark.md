@@ -94,8 +94,10 @@ readable in any process listing on the host, and in CI it lands in the job log. 
 argument is refused by its leading variable-name prefix only, so the refusal never repeats
 whatever followed it back into the terminal or the log. A name that is not set in the
 environment is refused before the first agent launches, because a run that reached the
-provider unauthenticated would score the outage as a lane effect. The flag is
-repeatable and applies to `run`, `all` and `lanes`; in `lanes` every lane gets the same
+provider unauthenticated would score the outage as a lane effect; that refusal names the
+argument by its **position**, never by what was supplied, because a credential pasted where
+a name belongs is still a valid name to the syntax check. The flag is
+repeatable and applies to `run`, `all`, `lanes` and `probe`; in `lanes` every lane gets the same
 selection, so what a lane can reach is not one of the things that varies between lanes.
 
 Programmatic callers pass the same thing as `SupervisorAgentAdapter(env=...)`. That mapping
@@ -377,15 +379,29 @@ is refused with exit 64 rather than silently falling back.
 
 ```shell
 uv run python -m automation.benchmark.probe \
-  --instance abishekvashok__cmatrix.5c082c6 --out-dir out/probe
+  --instance abishekvashok__cmatrix.5c082c6 --out-dir out/probe \
+  --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
 ```
+
+The probe reaches the same agent through the same shell as a lane, so it inherits the same
+audited set of launcher variables and takes the rest one name at a time through the same
+`--agent-env` resolver — a diagnostic does not get to hand an agent what a lane may not.
+Being a diagnostic is why it needs the flag at all: with nothing selected it reaches the
+provider unauthenticated.
 
 One research phase at the lane's own 600-second ceiling. `out/probe/probe.json` holds the
 phase result, the artifact and its schema errors, the tool-event timeline with offsets from
-the first event, and every event naming `research.json`; the printed summary answers what
+the first event, and every event naming `research.json` at the offset of the event that
+named it; the printed summary answers what
 the model did first, whether it ever called a tool to write the artifact, when, and what the
 tool said back. In CI it is the `probe` input on the workflow, which reuses the same Hermes
 install and config-verification preflight and skips the matrix and eval entirely.
+
+`out/probe/probe.json` and `out/probe/rpi/` are the probe's own outputs under the same
+ownership rule as a phase artifact directory: it creates them or it refuses. A run directory
+that already holds either is left byte-for-byte alone and the probe stops before spending the
+phase budget, so a second probe into a directory that already answered the question cannot
+destroy the answer it was run to re-check.
 
 ### The phase artifact contract
 

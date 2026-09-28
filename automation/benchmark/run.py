@@ -54,7 +54,7 @@ def resolve_agent_env(names: Optional[Sequence[str]]) -> dict[str, str]:
     and it is cheaper to fail now than after the first cell has spent its budget.
     """
     selected: dict[str, str] = {}
-    for name in names or ():
+    for position, name in enumerate(names or (), start=1):
         if not _ENV_NAME.match(name):
             recoverable = _ENV_NAME_PREFIX.match(name)
             subject = f"{recoverable.group()!r} is followed by" if recoverable else "the argument contains"
@@ -63,7 +63,12 @@ def resolve_agent_env(names: Optional[Sequence[str]]) -> dict[str, str]:
                 "pass the name and set the variable in the environment."
             )
         if name not in os.environ:
-            raise SystemExit(f"--agent-env {name} is not set in this environment; the agent was not launched.")
+            # A credential value pasted where a name belongs still matches _ENV_NAME, so the
+            # refusal names the argument by position and never echoes what was supplied.
+            raise SystemExit(
+                f"--agent-env argument {position} names a variable that is not set in this "
+                "environment; the agent was not launched."
+            )
         selected[name] = os.environ[name]
     return selected
 
