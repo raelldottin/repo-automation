@@ -31,8 +31,9 @@ from typing import Callable, Mapping, Optional, Protocol
 
 from automation.context import build_context
 
-from .cleanroom import CleanroomReceipt
+from .cleanroom import CleanroomError, CleanroomReceipt
 from .cleanroom import prepare as prepare_cleanroom
+from .witness import SandboxWitness
 from .instances import TaskSpec
 from .strategies import (
     AGENT_TIMEOUT_RETURNCODE,
@@ -333,7 +334,18 @@ class SupervisorAgentAdapter:
         # Absolute, because the agent runs with the workspace as its working directory and
         # --run-dir is usually relative: a relative path here wrote the reports into the
         # workspace, which archived them into the submission and left run.json with none.
-        environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str((out_tar.parent / AGENT_SESSIONS_DIR).resolve())
+        sessions_dir = (out_tar.parent / AGENT_SESSIONS_DIR).resolve()
+        environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(sessions_dir)
+
+        # The preflight proves the image; this proves the container the agent's tools were
+        # actually given, from outside, while the session still holds it. Reuse of a
+        # container from an earlier process is the failure it exists for: nothing in the
+        # receipt, the config or the session's own output would show it.
+        runner = self._runner
+        witness = None
+        if self._cleanroom and receipt is not None:
+            witness = SandboxWitness(sessions_dir, workspace, receipt.image, receipt.image_id)
+            runner = witness.wrap(self._runner)
 
         strategy_result = self._strategy.execute(
             ExecutionContext(
@@ -344,9 +356,16 @@ class SupervisorAgentAdapter:
                 command_template=self._template,
                 env=environment,
                 timeout_seconds=self._timeout,
-                runner=self._runner,
+                runner=runner,
             )
         )
+        if witness is not None and witness.violations:
+            # Same refusal as a failed preflight, for the same reason: what ran was not a
+            # ProgramBench cleanroom, so its score is not a ProgramBench result. The
+            # witness receipts are already on disk beside the submission path.
+            raise CleanroomError(
+                "the agent's sandbox was not the cleanroom it was given:\n  - " + "\n  - ".join(witness.violations)
+            )
 
         _save_phase_artifacts(workspace, out_tar.parent)
         _archive_workspace(workspace, out_tar)

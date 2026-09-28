@@ -239,6 +239,38 @@ class AdapterTests(unittest.TestCase):
         assert result.cleanroom is not None
         self.assertEqual("sha256:d1ge57", result.cleanroom.image_id)
 
+    def test_a_cell_whose_agent_got_the_wrong_container_is_refused_like_a_failed_preflight(self) -> None:
+        # The preflight proves the image; the witness proves the container the agent's tools
+        # were handed. A cell that passed the first and failed the second is not a
+        # ProgramBench inference result either, so it is refused rather than scored.
+        class ViolatedWitness:
+            def __init__(self, *_: object, **__: object) -> None:
+                self.violations = ["the agent's container is on NetworkMode='bridge', not 'none'"]
+
+            def wrap(self, runner):
+                return runner
+
+        def fake_prepare(instance_id: str, workspace: Path, repository: str, **_: object):
+            (workspace / "executable").write_bytes(b"ELF")
+            (workspace / ".git").mkdir()
+            return cleanroom.CleanroomReceipt(
+                instance_id=instance_id,
+                image=cleanroom.image_for(instance_id),
+                image_id="sha256:d1ge57",
+                network_mode="none",
+                reference_executable=True,
+                workspace_writable=True,
+                git_worktree=True,
+            )
+
+        adapter = SupervisorAgentAdapter(repo_root=self.repo_root, runner=lambda *_: 0, cleanroom=True)
+        with unittest.mock.patch.object(benchmark_adapter, "prepare_cleanroom", fake_prepare):
+            with unittest.mock.patch.object(benchmark_adapter, "SandboxWitness", ViolatedWitness):
+                with tempfile.TemporaryDirectory() as tmp:
+                    with self.assertRaises(cleanroom.CleanroomError) as refusal:
+                        adapter.produce_submission(self.task, Path(tmp) / "submission.tar.gz")
+        self.assertIn("NetworkMode='bridge'", str(refusal.exception))
+
 
 class OrchestratorTests(unittest.TestCase):
     def test_run_benchmark_is_container_free_end_to_end(self) -> None:

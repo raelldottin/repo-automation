@@ -248,6 +248,22 @@ holding the previous instance's image and workspace mount. The key is absent fro
 pinned `DEFAULT_CONFIG` but honoured through `TERMINAL_CONFIG_ENV_MAP`, which the CI
 config check now knows about.
 
+Configured is still not proved, so a **sandbox witness** watches from outside while the
+session runs. It baselines the `hermes-agent=1` containers before the cell, polls for one
+that appears during it, and the moment it does writes `agent-sessions/<session>.sandbox.json`:
+container id, creation time, requested image, actual image id, `NetworkMode`, the
+`/workspace` mount's source and rw flag, Hermes's own labels, and `existed_in_baseline`.
+Written mid-session on purpose — a cell killed at its budget ceiling takes its process
+group with it, and the container is gone once it exits. The container's environment is
+never inspected, so the provider key cannot reach the receipt.
+
+A cleanroom cell is refused, exactly like a failed preflight, when the observed container
+runs another image, is not `NetworkMode=none`, has `/workspace` mounted from somewhere
+other than that cell's workspace or mounted read-only, or when no container appeared while
+one of Hermes's was already present — the shape of a reused container. A session that
+simply never called a tool creates none, which is a fact about the model's turn rather than
+the sandbox: that records `{"observed": false}` and scores normally.
+
 Credentials stay host-side: `NVIDIA_API_KEY` is read by the Hermes process, which runs
 *outside* the sandbox, and `docker_forward_env: []` / `docker_env: {}` keep the container's
 environment empty of it. The controls receipt records `credentials_forwarded: []` for this
@@ -393,7 +409,7 @@ sessions each. Start with a few instances before spending money on the full matr
 out/<lane>/r<repeat>/<instance>/submission.tar.gz   graded artefact
 out/<lane>/r<repeat>/<instance>/run.json            provenance + process metrics
 out/<lane>/r<repeat>/<instance>/rpi/                phase artifacts (C–E)
-out/<lane>/r<repeat>/<instance>/agent-sessions/     per-session usage + controls + log
+out/<lane>/r<repeat>/<instance>/agent-sessions/     per-session usage + controls + log + sandbox
 out/probe/probe.json | probe/agent-sessions/*.stream.jsonl   diagnostic only, not a cell
 out/<lane>/r<repeat>/effectiveness-report.json      ProgramBench score for that cell
 out/lane-comparison.json | lane-comparison.md       the comparison
