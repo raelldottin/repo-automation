@@ -34,6 +34,8 @@ from .strategies import ALL_LANES
 REPORT_FILENAME = "effectiveness-report.json"
 _DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# The same shape unanchored, to name a malformed argument by the part that is a variable name.
+_ENV_NAME_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def resolve_agent_env(names: Optional[Sequence[str]]) -> dict[str, str]:
@@ -45,15 +47,19 @@ def resolve_agent_env(names: Optional[Sequence[str]]) -> dict[str, str]:
 
     Names only. ``--agent-env NAME=value`` would put credential material in argv, where every
     process listing on the host can read it, so an argument carrying a value is refused and
-    only the part before the ``=`` is ever echoed back. A name that is not set is refused too:
+    only its leading variable-name prefix is ever echoed back - splitting on ``=`` was not
+    enough, because ``--agent-env "NAME value"`` has no ``=`` and put the value straight into
+    the refusal, and thence into any log holding it. A name that is not set is refused too:
     a run that reached the provider unauthenticated would score the outage as a lane effect,
     and it is cheaper to fail now than after the first cell has spent its budget.
     """
     selected: dict[str, str] = {}
     for name in names or ():
         if not _ENV_NAME.match(name):
+            recoverable = _ENV_NAME_PREFIX.match(name)
+            subject = f"{recoverable.group()!r} is followed by" if recoverable else "the argument contains"
             raise SystemExit(
-                f"--agent-env takes a variable name, not {name.split('=', 1)[0]!r}: "
+                f"--agent-env takes a variable name; {subject} unsupported characters: "
                 "pass the name and set the variable in the environment."
             )
         if name not in os.environ:

@@ -194,16 +194,41 @@ SUBMISSION_MANIFEST_FILENAME = "submission.files.txt"
 
 def _archive_workspace(workspace: Path, out_tar: Path) -> None:
     out_tar.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(out_tar, "w:gz") as tar:
-        for entry in sorted(workspace.iterdir()):
-            if entry.name in EXCLUDED_FROM_SUBMISSION:
-                continue
-            tar.add(entry, arcname=entry.name)
-        members = tar.getnames()
-    # The tarball itself is too large to keep, so the graded contents are unprovable after
-    # the job ends: whether the cell submitted anything, and whether a lane's own phase
-    # artifacts leaked into what was scored. List what went in, next to what came out.
-    out_tar.with_name(SUBMISSION_MANIFEST_FILENAME).write_text("".join(f"{name}\n" for name in members), encoding="utf-8")
+    manifest = out_tar.with_name(SUBMISSION_MANIFEST_FILENAME)
+    # touch(exist_ok=False), for the reason _save_phase_artifacts uses mkdir(exist_ok=False)
+    # below: creating the path is the single operation that decides who owns it. These two
+    # writes used to truncate unconditionally, so a rerun into a run directory holding a
+    # finished cell overwrote the graded submission and the record of what was graded - the
+    # same destruction the .rpi copy beside them refuses. Both paths are claimed before either
+    # is written, so refusing the second does not strand a submission from the first.
+    claimed: list[Path] = []
+    try:
+        for path in (out_tar, manifest):
+            try:
+                path.touch(exist_ok=False)
+            except FileExistsError as collision:
+                raise FileExistsError(f"refusing to overwrite pre-existing submission output: {path}") from collision
+            claimed.append(path)
+        with tarfile.open(out_tar, "w:gz") as tar:
+            for entry in sorted(workspace.iterdir()):
+                if entry.name in EXCLUDED_FROM_SUBMISSION:
+                    continue
+                tar.add(entry, arcname=entry.name)
+            members = tar.getnames()
+        # The tarball itself is too large to keep, so the graded contents are unprovable after
+        # the job ends: whether the cell submitted anything, and whether a lane's own phase
+        # artifacts leaked into what was scored. List what went in, next to what came out.
+        # ponytail: one name per line, so a workspace filename containing a newline reads as two
+        # entries. Nothing decides anything from this file - two tests split() it and CI uploads
+        # it as evidence - so it stays plainly readable rather than escaped. Escape it when
+        # something starts parsing it.
+        manifest.write_text("".join(f"{name}\n" for name in members), encoding="utf-8")
+    except BaseException:
+        # Only ever the paths this call created, and only because it created them: a
+        # half-written submission reads as a complete one.
+        for path in claimed:
+            path.unlink(missing_ok=True)
+        raise
 
 
 def _save_phase_artifacts(workspace: Path, out_dir: Path) -> None:

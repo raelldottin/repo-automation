@@ -410,6 +410,64 @@ class PhaseArtifactOwnershipTests(unittest.TestCase):
             self.assertFalse((out_dir / "rpi").exists())
 
 
+class SubmissionOwnershipTests(unittest.TestCase):
+    """The archive claims its output paths; it never takes one over.
+
+    The rule ``PhaseArtifactOwnershipTests`` pins for the ``.rpi`` copy, one function over.
+    ``_archive_workspace`` truncated whatever tarball and manifest already sat at the output
+    path, so a rerun into a finished cell's run directory destroyed the graded artifact and the
+    record of what was graded - while the phase artifacts beside them were refused.
+    """
+
+    def _workspace(self, tmp: Path) -> Path:
+        workspace = tmp / "workspace"
+        workspace.mkdir()
+        (workspace / "main.c").write_text("int main(void){return 0;}\n", encoding="utf-8")
+        return workspace
+
+    def test_an_archive_is_written_into_a_run_directory_it_owns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_tar = Path(tmp) / "out" / "submission.tar.gz"
+            benchmark_adapter._archive_workspace(self._workspace(Path(tmp)), out_tar)
+            with tarfile.open(out_tar, "r:gz") as tar:
+                self.assertEqual(["main.c"], tar.getnames())
+            manifest = out_tar.with_name(benchmark_adapter.SUBMISSION_MANIFEST_FILENAME)
+            self.assertEqual("main.c\n", manifest.read_text(encoding="utf-8"))
+
+    def test_a_pre_existing_submission_is_refused_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_tar = Path(tmp) / "out" / "submission.tar.gz"
+            out_tar.parent.mkdir(parents=True)
+            out_tar.write_bytes(b"first attempt\n")
+            with self.assertRaises(FileExistsError) as refusal:
+                benchmark_adapter._archive_workspace(self._workspace(Path(tmp)), out_tar)
+            self.assertIn("refusing to overwrite", str(refusal.exception))
+            self.assertEqual(b"first attempt\n", out_tar.read_bytes())
+
+    def test_a_pre_existing_manifest_is_refused_and_no_submission_is_left_behind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_tar = Path(tmp) / "out" / "submission.tar.gz"
+            out_tar.parent.mkdir(parents=True)
+            manifest = out_tar.with_name(benchmark_adapter.SUBMISSION_MANIFEST_FILENAME)
+            manifest.write_text("first attempt\n", encoding="utf-8")
+            with self.assertRaises(FileExistsError) as refusal:
+                benchmark_adapter._archive_workspace(self._workspace(Path(tmp)), out_tar)
+            self.assertIn("refusing to overwrite", str(refusal.exception))
+            self.assertEqual("first attempt\n", manifest.read_text(encoding="utf-8"))
+            # Claiming the manifest before writing the tarball is what keeps a refused rerun
+            # from leaving a submission that looks finished next to someone else's manifest.
+            self.assertFalse(out_tar.exists())
+
+    def test_a_failed_archive_removes_only_what_this_call_created(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_tar = Path(tmp) / "out" / "submission.tar.gz"
+            with unittest.mock.patch.object(tarfile.TarFile, "add", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    benchmark_adapter._archive_workspace(self._workspace(Path(tmp)), out_tar)
+            self.assertFalse(out_tar.exists())
+            self.assertFalse(out_tar.with_name(benchmark_adapter.SUBMISSION_MANIFEST_FILENAME).exists())
+
+
 class AgentEnvSelectionTests(unittest.TestCase):
     """``--agent-env`` names a launcher variable to forward. It never carries the value.
 
@@ -434,6 +492,25 @@ class AgentEnvSelectionTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as refusal:
                     benchmark_run.resolve_agent_env([argument])
                 self.assertNotIn("sentinel-value", str(refusal.exception))
+
+    def test_a_malformed_argument_is_named_by_its_prefix_never_quoted_whole(self) -> None:
+        # Splitting on "=" only truncates arguments that contain one. A value separated by a
+        # space survived into the refusal, and thence into whatever log holds it - which is the
+        # leak --agent-env takes names for in the first place.
+        for argument in ("NVIDIA_API_KEY sentinel-value", "NVIDIA_API_KEY\tsentinel-value", "NVIDIA_API_KEY:sentinel-value"):
+            with self.subTest(argument=argument):
+                with self.assertRaises(SystemExit) as refusal:
+                    benchmark_run.resolve_agent_env([argument])
+                message = str(refusal.exception)
+                self.assertFalse("sentinel-value" in message, "the refusal echoed the supplied value")
+                self.assertIn("NVIDIA_API_KEY", message)
+
+    def test_an_argument_with_no_recoverable_name_is_refused_without_quoting_it(self) -> None:
+        for argument in ("$(sentinel-value)", "=sentinel-value", "", "2sentinel-value"):
+            with self.subTest(argument=argument):
+                with self.assertRaises(SystemExit) as refusal:
+                    benchmark_run.resolve_agent_env([argument])
+                self.assertFalse("sentinel-value" in str(refusal.exception), "the refusal echoed the supplied argument")
 
     def test_the_cli_forwards_the_selection_to_the_adapter(self) -> None:
         args = benchmark_run.build_parser().parse_args(["run", "--run-dir", "out", "--agent-env", "SENTINEL_PROVIDER_KEY"])

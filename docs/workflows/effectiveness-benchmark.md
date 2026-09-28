@@ -90,9 +90,11 @@ Anything else a session needs is authorized one name at a time:
 ```
 
 `--agent-env` takes a **variable name**, never `NAME=value` — a value on the command line is
-readable in any process listing on the host, and in CI it lands in the job log. A name that
-is not set in the environment is refused before the first agent launches, because a run that
-reached the provider unauthenticated would score the outage as a lane effect. The flag is
+readable in any process listing on the host, and in CI it lands in the job log. A malformed
+argument is refused by its leading variable-name prefix only, so the refusal never repeats
+whatever followed it back into the terminal or the log. A name that is not set in the
+environment is refused before the first agent launches, because a run that reached the
+provider unauthenticated would score the outage as a lane effect. The flag is
 repeatable and applies to `run`, `all` and `lanes`; in `lanes` every lane gets the same
 selection, so what a lane can reach is not one of the things that varies between lanes.
 
@@ -414,10 +416,19 @@ replacing it: if one already exists the run stops with
 refusing to overwrite pre-existing phase artifact directory: out/.../rpi
 ```
 
+`submission.tar.gz` and `submission.files.txt` follow the same rule and stop the same way:
+
+```text
+refusing to overwrite pre-existing submission output: out/.../submission.tar.gz
+```
+
+Both paths are claimed before either is written, so a refused re-run leaves neither a stray
+submission nor a half-written manifest.
+
 Re-running into a populated run directory used to delete what was there first — the evidence
 of the attempt under investigation, destroyed by the attempt investigating it. Point
-`--run-dir` somewhere new, or move the old artifacts aside deliberately. A copy that fails
-part-way removes only the directory that call created, never one it found.
+`--run-dir` somewhere new, or move the old output aside deliberately. A write that fails
+part-way removes only what that call created, never what it found.
 
 ### Reading the comparison
 
