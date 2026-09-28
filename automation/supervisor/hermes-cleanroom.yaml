@@ -1,0 +1,40 @@
+# Hermes terminal posture for ProgramBench cleanroom inference.
+#
+# Appended to the benchmark profile by run_agent.sh, and only when the adapter names a
+# sandbox image - a local cell keeps the local backend. `docker_image` is appended after
+# this file because it is per-instance (programbench/<instance>:task_cleanroom_v6).
+#
+# Every key here is checked against the pinned revision's DEFAULT_CONFIG by the same
+# workflow step that checks hermes-benchmark.yaml. Hermes ignores keys it does not know,
+# and a silently ignored `docker_network` is an agent with internet access.
+terminal:
+  # One container per session, entered by `docker exec`. At the pinned revision the
+  # terminal, file and code_execution tools all route through it, so the three tool
+  # families the benchmark hands the model share one cleanroom workspace by construction.
+  backend: docker
+  # false = `--network=none`. This is the ProgramBench inference contract: the agent must
+  # rebuild from the reference executable and the bundled documentation, and an agent that
+  # can reach the upstream repository is answering a different question. Hermes also
+  # refuses to attach to an existing networked container while this is false, so the
+  # control cannot decay into a reused bridge container between cells.
+  docker_network: false
+  # TERMINAL_CWD is the cell's workspace, already holding everything the cleanroom image
+  # ships in /workspace. Hermes bind-mounts it at /workspace and remaps the session cwd to
+  # match. Without this Hermes mounts its own /workspace - a tmpfs here, since the
+  # container is not persistent - which would hide the reference ./executable and the
+  # bundled documentation behind an empty directory.
+  docker_mount_cwd_to_workspace: true
+  # No sandbox directory reused between sessions: a lane that measures what compaction
+  # drops is worthless if the next phase can read the last phase's leftovers.
+  container_persistent: false
+  # Nothing from the host environment enters the container. NVIDIA_API_KEY stays in the
+  # Hermes process, which is outside the sandbox; the model-facing tools never see it.
+  # Both are already the shipped defaults - stated here because they are controls under
+  # test, and a default that changes upstream would otherwise change the experiment.
+  docker_forward_env: []
+  docker_env: {}
+  # 0 = omit the flag, i.e. whatever the host has. Hermes' own defaults are 1 CPU and 5 GB,
+  # and a from-scratch rebuild metered at one core is measuring the cgroup, not the lane.
+  # ProgramBench's own baseline harness gives its containers 20 CPUs and 60 GB.
+  container_cpu: 0
+  container_memory: 0

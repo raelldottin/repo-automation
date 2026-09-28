@@ -145,6 +145,7 @@ def default_adapter_factory(
     agent_command_template: Optional[str] = None,
     timeout_seconds: int = 1800,
     env: Optional[Mapping[str, str]] = None,
+    cleanroom: bool = False,
 ) -> AdapterFactory:
     """Build one adapter per lane; everything except the strategy is held fixed.
 
@@ -159,6 +160,7 @@ def default_adapter_factory(
             timeout_seconds=timeout_seconds,
             env=env,
             strategy=build_strategy(lane),
+            cleanroom=cleanroom,
         )
 
     return factory
@@ -273,6 +275,10 @@ def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) 
         # whether the lane administered its own treatment. Either one being no is enough to
         # keep the cell out of the deltas, for different reasons.
         "treatment_validity": strategy.get("treatment_validity", TREATMENT_VALID) if strategy else TREATMENT_VALID,
+        # What the agent's sandbox was observed to be, or null when the cell ran on the
+        # local filesystem: the difference decides whether the cell is a ProgramBench
+        # inference result at all, so it belongs in the cell's own provenance.
+        "cleanroom": result.cleanroom.to_dict() if result.cleanroom is not None else None,
         "strategy": strategy,
     }
     (instance_dir / PROVENANCE_FILENAME).write_text(json.dumps(provenance, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

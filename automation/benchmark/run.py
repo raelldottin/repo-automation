@@ -110,6 +110,7 @@ def _build_adapter(args: argparse.Namespace) -> SupervisorAgentAdapter:
         agent_command_template=args.agent_cmd,
         timeout_seconds=args.timeout,
         env=resolve_agent_env(args.agent_env),
+        cleanroom=args.cleanroom,
     )
 
 
@@ -134,6 +135,15 @@ def _add_adapter_args(parser: argparse.ArgumentParser) -> None:
         metavar="VARIABLE_NAME",
         default=[],
         help="Forward this launcher variable to the agent session. Repeatable. Name only, never NAME=value.",
+    )
+    parser.add_argument(
+        "--cleanroom",
+        action="store_true",
+        help=(
+            "Run inference inside ProgramBench's own cleanroom image: the reference ./executable and "
+            "its bundled documentation in the workspace, model-facing tools air-gapped. Needs Docker "
+            "and an x86_64 host, and refuses to run if the environment fails its preflight."
+        ),
     )
 
 
@@ -222,6 +232,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     agent_command_template=args.agent_cmd,
                     timeout_seconds=args.timeout,
                     env=resolve_agent_env(args.agent_env),
+                    cleanroom=args.cleanroom,
                 ),
                 repo_root=Path(args.repo_root),
                 lanes=args.lanes,

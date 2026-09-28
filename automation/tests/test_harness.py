@@ -503,7 +503,13 @@ class AutomationHarnessTests(unittest.TestCase):
             controls = sorted(usage_dir.glob("*.controls.json"))
             self.assertEqual(1, len(controls), f"expected one controls report, got {controls}")
             recorded = json.loads(controls[0].read_text(encoding="utf-8"))
-            self.assertEqual(["terminal", "file", "code_execution", "todo"], recorded["toolsets"])
+            self.assertEqual(["terminal", "file", "code_execution", "todo"], recorded["requested_toolsets"])
+            # Requested, not effective: this transport never reports back which tools the
+            # session was actually served, and restating the request as a confirmation is
+            # how a controls receipt starts lying.
+            self.assertIsNone(recorded["effective_tools"])
+            self.assertEqual([], recorded["refused_tools"])
+            self.assertEqual("local", recorded["sandbox"]["backend"])
             self.assertTrue(recorded["safe_mode_env"])
             self.assertTrue(recorded["ignore_rules"])
             # The claim the whole revision turns on: the config profile was not discarded.
@@ -519,6 +525,87 @@ class AutomationHarnessTests(unittest.TestCase):
             # The usage report and the controls that qualify it name the same session.
             usage_arg = Path(args[args.index("--usage-file") + 1])
             self.assertEqual(controls[0].name.replace(".controls.json", ".usage.json"), usage_arg.name)
+
+    def test_agent_wrapper_runs_the_tools_inside_the_cleanroom_image_when_given_one(self) -> None:
+        """A named sandbox image moves the model-facing tools into it, and says so.
+
+        Run 35799016896's research session spent 48 seconds cloning the upstream repository
+        it was supposed to rebuild from observation. Nothing in the harness stopped it,
+        because the tools ran on the runner's own filesystem with the runner's network.
+        """
+        script_path = self.repo_root / "automation/supervisor/run_agent.sh"
+        image = "programbench/abishekvashok_1776_cmatrix.5c082c6:task_cleanroom_v6"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            repo_root = temp_path / "repo"
+            (repo_root / ".git").mkdir(parents=True)
+            prompt_path = temp_path / "prompt.md"
+            prompt_path.write_text("rebuild it", encoding="utf-8")
+            context_path = temp_path / "context.json"
+            context_path.write_text("{}", encoding="utf-8")
+            bin_dir = temp_path / "bin"
+            bin_dir.mkdir()
+            self.write_fake_executable(
+                bin_dir / "hermes", '#!/usr/bin/env bash\nprintf \'home:%s\\n\' "$HERMES_HOME" > "$CAPTURE_FILE"\n'
+            )
+            self.write_fake_executable(bin_dir / "docker", "#!/usr/bin/env bash\nprintf 'sha256:c0ffee\\n'\n")
+            usage_dir = temp_path / "sessions"
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+            env["CAPTURE_FILE"] = str(temp_path / "capture.txt")
+            env["REPO_AUTOMATION_AGENT_RUNNER"] = "hermes"
+            env["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(usage_dir)
+            env["REPO_AUTOMATION_HERMES_SANDBOX_IMAGE"] = image
+
+            result = subprocess.run(
+                [
+                    str(script_path),
+                    "--repo-root",
+                    str(repo_root),
+                    "--prompt-file",
+                    str(prompt_path),
+                    "--context-file",
+                    str(context_path),
+                    "--handoff-file",
+                    str(temp_path / "handoff.json"),
+                    "--slice-id",
+                    "slice-cleanroom",
+                ],
+                cwd=self.repo_root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+
+            home = Path((temp_path / "capture.txt").read_text(encoding="utf-8").strip().removeprefix("home:"))
+            effective = (home / "config.yaml").read_text(encoding="utf-8")
+            # The deployed posture, still first, with the sandbox appended rather than
+            # substituted: a cleanroom cell and a local cell differ in one block.
+            profile = (self.repo_root / "automation/supervisor/hermes-benchmark.yaml").read_text(encoding="utf-8")
+            self.assertTrue(effective.startswith(profile))
+            self.assertIn("backend: docker", effective)
+            self.assertIn("docker_network: false", effective)
+            self.assertIn("docker_mount_cwd_to_workspace: true", effective)
+            self.assertIn(f'docker_image: "{image}"', effective)
+            # The key that keeps NVIDIA_API_KEY in the Hermes process and out of the
+            # container the model's commands run in.
+            self.assertIn("docker_forward_env: []", effective)
+
+            controls = json.loads(sorted(usage_dir.glob("*.controls.json"))[0].read_text(encoding="utf-8"))
+            self.assertEqual("docker", controls["sandbox"]["backend"])
+            self.assertEqual(image, controls["sandbox"]["image"])
+            self.assertEqual("sha256:c0ffee", controls["sandbox"]["image_id"])
+            self.assertEqual("none", controls["sandbox"]["network"])
+            self.assertEqual("/workspace", controls["sandbox"]["workspace"])
+            self.assertEqual([], controls["sandbox"]["credentials_forwarded"])
+            # The hash has to describe the file Hermes loaded. Hashing the template would
+            # report the local posture for a run that was not local.
+            self.assertEqual(
+                hashlib.sha256((home / "config.yaml").read_bytes()).hexdigest(),
+                controls["config_sha256"],
+            )
+            self.assertNotEqual(hashlib.sha256(profile.encode()).hexdigest(), controls["config_sha256"])
 
     def test_agent_wrapper_keeps_the_session_output_beside_its_reports(self) -> None:
         """Why a session failed is only ever printed; the usage report never says.
