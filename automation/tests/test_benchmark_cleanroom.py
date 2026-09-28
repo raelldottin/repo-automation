@@ -26,6 +26,7 @@ REPOSITORY = "abishekvashok/cmatrix"
 # workspace, and four egress attempts that each got nowhere.
 HEALTHY_PROBE = """reference_executable=yes
 workspace_writable=yes
+git_worktree=yes
 egress=yes|6|curl -sS -m 5 https://github.com
 egress=no||wget -q -T 5 -O - https://github.com
 egress=yes|128|git ls-remote https://github.com/abishekvashok/cmatrix.git
@@ -79,7 +80,14 @@ class FakeDocker:
 
 
 def cleanroom_contents() -> dict[str, str]:
-    return {"executable": "ELF", "README.md": "cmatrix - terminal rain", "doc/cmatrix.1": ".TH CMATRIX 1"}
+    # `.git` is part of what the official image ships: its /workspace is a one-commit
+    # repository, built by cloning upstream and then replacing the history wholesale.
+    return {
+        "executable": "ELF",
+        "README.md": "cmatrix - terminal rain",
+        "doc/cmatrix.1": ".TH CMATRIX 1",
+        ".git/HEAD": "ref: refs/heads/master\n",
+    }
 
 
 class ImageNamingTests(unittest.TestCase):
@@ -108,7 +116,8 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual("none", receipt.network_mode)
             # The whole image workspace, not a curated subset: what the image ships is the
             # specification the model is allowed to read.
-            self.assertEqual(["README.md", "doc", "executable"], receipt.workspace_entries)
+            self.assertEqual([".git", "README.md", "doc", "executable"], receipt.workspace_entries)
+            self.assertTrue(receipt.git_worktree)
 
     def test_the_probe_runs_air_gapped_in_the_same_image_and_the_same_workspace(self) -> None:
         docker = FakeDocker(contents=cleanroom_contents())
@@ -159,7 +168,7 @@ class PrepareTests(unittest.TestCase):
 
     def test_a_workspace_without_the_reference_binary_is_refused(self) -> None:
         docker = FakeDocker(
-            contents={"README.md": "docs only"},
+            contents={"README.md": "docs only", ".git/HEAD": "ref: x\n"},
             probe=HEALTHY_PROBE.replace("reference_executable=yes", "reference_executable=no"),
             executable=False,
         )
@@ -168,15 +177,39 @@ class PrepareTests(unittest.TestCase):
                 self.prepare(docker, Path(temp_dir) / "ws")
         self.assertIn("no executable reference", str(refusal.exception))
 
+    def test_the_harness_never_creates_the_workspace_it_is_supposed_to_be_measuring(self) -> None:
+        # A `git init` here, or a leftover from an earlier cell, would make the cell's
+        # environment partly the harness's invention. run_agent.sh needs a worktree; the
+        # image ships one, and that is the only one a cleanroom cell may run on.
+        docker = FakeDocker(contents=cleanroom_contents())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "ws"
+            workspace.mkdir()
+            (workspace / ".git").mkdir()
+            with self.assertRaises(CleanroomError) as refusal:
+                self.prepare(docker, workspace)
+        self.assertIn("is not empty", str(refusal.exception))
+        self.assertEqual([], [argv for argv in docker.calls if argv[1] == "cp"])
+
+    def test_an_image_that_ships_no_worktree_is_refused_rather_than_git_inited(self) -> None:
+        docker = FakeDocker(
+            contents={"executable": "ELF", "README.md": "docs"},
+            probe=HEALTHY_PROBE.replace("git_worktree=yes", "git_worktree=no"),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaises(CleanroomError) as refusal:
+                self.prepare(docker, Path(temp_dir) / "ws")
+        self.assertIn("ships no Git worktree", str(refusal.exception))
+
     def test_a_workspace_without_documentation_is_refused_and_says_what_it_found(self) -> None:
         # The task is "rebuild from the executable and the bundled documentation". Half of
         # that being absent changes the task, so it stops the run instead of scoring it.
-        docker = FakeDocker(contents={"executable": "ELF", "data.bin": "\0"})
+        docker = FakeDocker(contents={"executable": "ELF", "data.bin": "\0", ".git/HEAD": "ref: x\n"})
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaises(CleanroomError) as refusal:
                 self.prepare(docker, Path(temp_dir) / "ws")
         self.assertIn("no bundled documentation", str(refusal.exception))
-        self.assertIn("data.bin, executable", str(refusal.exception))
+        self.assertIn(".git, data.bin, executable", str(refusal.exception))
 
     def test_a_refused_cleanroom_still_reports_everything_it_observed(self) -> None:
         docker = FakeDocker(contents=cleanroom_contents(), network_mode="bridge")

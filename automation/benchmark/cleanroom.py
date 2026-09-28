@@ -14,6 +14,7 @@ started with the same image and the same ``--network=none`` the agent's tools ge
     reference executable   ``test -x ./executable`` inside the container
     documentation          what the image actually bundles, listed, never assumed
     writable workspace     create, read back, delete
+    git worktree           shipped by the image (a one-commit repository), never created here
     no egress              curl / wget / git / getent must each fail, or be absent
 
 A check that cannot run is a failure, not a pass. The whole point is that the receipt
@@ -76,6 +77,7 @@ class CleanroomReceipt:
     network_mode: str = ""
     reference_executable: bool = False
     workspace_writable: bool = False
+    git_worktree: bool = False
     workspace_entries: list[str] = field(default_factory=list)
     documentation: list[str] = field(default_factory=list)
     egress_probes: list[dict[str, object]] = field(default_factory=list)
@@ -94,6 +96,12 @@ class CleanroomReceipt:
             )
         if not self.workspace_writable:
             failures.append(f"{WORKSPACE_DIR} is not writable by the tools that have to rebuild in it")
+        if not self.git_worktree:
+            # The image builds its workspace as a one-commit repository, and run_agent.sh
+            # requires a Git checkout at the repo root. The harness will not `git init`
+            # the inference workspace to paper over an image that ships none: that would
+            # be the harness inventing environment it is supposed to be measuring.
+            failures.append(f"the image ships no Git worktree at {WORKSPACE_DIR}; the harness does not create one")
         reached = [probe["command"] for probe in self.egress_probes if probe.get("returncode") == 0]
         if reached:
             failures.append(f"network egress succeeded from inside the sandbox: {reached}")
@@ -148,6 +156,7 @@ _PROBE_SCRIPT = r"""
 set -u
 cd {workspace} || exit 70
 if [ -x ./{executable} ]; then echo "reference_executable=yes"; else echo "reference_executable=no"; fi
+if [ -d .git ]; then echo "git_worktree=yes"; else echo "git_worktree=no"; fi
 probe=".cleanroom-write-probe"
 if echo ok > "$probe" && [ "$(cat "$probe")" = ok ] && rm -f "$probe" && [ ! -e "$probe" ]; then
   echo "workspace_writable=yes"
@@ -179,6 +188,8 @@ def _parse_probe(output: str, receipt: CleanroomReceipt) -> None:
             receipt.reference_executable = value == "yes"
         elif key == "workspace_writable":
             receipt.workspace_writable = value == "yes"
+        elif key == "git_worktree":
+            receipt.git_worktree = value == "yes"
         elif key == "egress":
             present, _, rest = value.partition("|")
             returncode, _, command = rest.partition("|")
@@ -205,6 +216,12 @@ def materialize(instance_id: str, workspace: Path, *, run: Optional[DockerRun] =
     image = image_for(instance_id)
     workspace = Path(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
+    # Nothing of the harness's own may already be here. The cell workspace has to be what
+    # the image ships and only that, so anything pre-existing - a `git init`, a leftover
+    # from a previous cell - is refused rather than merged into.
+    existing = sorted(entry.name for entry in workspace.iterdir())
+    if existing:
+        raise CleanroomError(f"{workspace} is not empty; the cleanroom is not merged into existing state: {existing}")
 
     container = _checked(run, ["docker", "create", image, "true"])
     try:
@@ -296,6 +313,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"  image id     {receipt.image_id}\n"
         f"  network      {receipt.network_mode}\n"
         f"  reference    ./{REFERENCE_EXECUTABLE} executable\n"
+        f"  git          worktree shipped by the image, not created here\n"
         f"  workspace    {len(receipt.workspace_entries)} entries, writable\n"
         f"  docs         {', '.join(receipt.documentation)}\n"
         f"  egress       {egress}"

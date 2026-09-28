@@ -163,6 +163,9 @@ class AdapterTests(unittest.TestCase):
             out_tar = Path(tmp) / "submission.tar.gz"
             result = adapter.produce_submission(self.task, out_tar)
             self.assertIsInstance(result, SubmissionResult)
+            # A local cell has no image to take a worktree from, and run_agent.sh refuses
+            # a repo root without one.
+            self.assertTrue((result.workspace / ".git").is_dir())
             self.assertEqual(0, result.returncode)
             self.assertTrue(out_tar.is_file())
             with tarfile.open(out_tar, "r:gz") as tar:
@@ -195,8 +198,12 @@ class AdapterTests(unittest.TestCase):
 
         def fake_prepare(instance_id: str, workspace: Path, repository: str, **_: object):
             captured["prepared"] = f"{instance_id} {repository}"
+            captured["workspace_at_prepare"] = ",".join(sorted(entry.name for entry in Path(workspace).iterdir()))
             (workspace / "executable").write_bytes(b"ELF")
             (workspace / "README.md").write_text("the spec\n", encoding="utf-8")
+            # The image's own one-commit repository, which is the only worktree a
+            # cleanroom cell may run on.
+            (workspace / ".git").mkdir()
             return cleanroom.CleanroomReceipt(
                 instance_id=instance_id,
                 image=cleanroom.image_for(instance_id),
@@ -204,6 +211,7 @@ class AdapterTests(unittest.TestCase):
                 network_mode="none",
                 reference_executable=True,
                 workspace_writable=True,
+                git_worktree=True,
             )
 
         adapter = SupervisorAgentAdapter(repo_root=self.repo_root, runner=fake_runner, cleanroom=True)
@@ -216,6 +224,11 @@ class AdapterTests(unittest.TestCase):
                 receipt = json.loads((out_tar.parent / benchmark_adapter.CLEANROOM_RECEIPT_FILENAME).read_text(encoding="utf-8"))
 
         self.assertEqual(f"{self.task.instance_id} {self.task.repository}", captured["prepared"])
+        # Nothing of the harness's own was in the workspace when the cleanroom was built:
+        # no `git init`, so the cell runs on the image's worktree rather than on one the
+        # harness invented inside the environment it is measuring.
+        self.assertEqual("", captured["workspace_at_prepare"])
+        self.assertNotIn(".git", names)
         self.assertEqual(cleanroom.image_for(self.task.instance_id), captured["image"])
         self.assertIn("compile.sh", names)
         self.assertNotIn("executable", names)

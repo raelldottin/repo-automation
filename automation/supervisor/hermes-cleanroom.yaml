@@ -27,6 +27,19 @@ terminal:
   # No sandbox directory reused between sessions: a lane that measures what compaction
   # drops is worthless if the next phase can read the last phase's leftovers.
   container_persistent: false
+  # The one that actually stops container reuse on this path. At the pinned revision
+  # `_build_docker_env` only forces `persist_across_processes=False` for a session-scoped
+  # container, and a CLI session has no session key, so its task id stays "default" and
+  # the configured value (default true) reaches DockerEnvironment. Reuse is then looked up
+  # by task/profile/egress labels and the network mode - never by image and never by bind
+  # mount - and `_attach_existing_container` deliberately *keeps* an existing
+  # `--network=none` container under `docker_network: false`. One cell could therefore
+  # inherit the previous cell's container, still holding the previous instance's image and
+  # the previous instance's workspace mount. false makes each session create and remove
+  # its own. Absent from DEFAULT_CONFIG but honoured: `TERMINAL_CONFIG_ENV_MAP` bridges it
+  # to TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES, which terminal_tool reads into the
+  # container config. The workflow checks that bridge, not just the defaults.
+  docker_persist_across_processes: false
   # Nothing from the host environment enters the container. NVIDIA_API_KEY stays in the
   # Hermes process, which is outside the sandbox; the model-facing tools never see it.
   # Both are already the shipped defaults - stated here because they are controls under
