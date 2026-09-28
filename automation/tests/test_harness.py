@@ -588,6 +588,11 @@ class AutomationHarnessTests(unittest.TestCase):
             self.assertIn("docker_network: false", effective)
             self.assertIn("docker_mount_cwd_to_workspace: true", effective)
             self.assertIn(f'docker_image: "{image}"', effective)
+            # `docker_mount_cwd_to_workspace` above only binds the workspace for the CLI
+            # parent's "default" backend; the pinned revision refuses to derive that mount
+            # for a session-scoped container, which is what every tool call inside an agent
+            # turn resolves to. The explicit binding applies to every task id.
+            self.assertIn(f'docker_volumes: ["{repo_root}:/workspace"]', effective)
             # The key that keeps NVIDIA_API_KEY in the Hermes process and out of the
             # container the model's commands run in.
             self.assertIn("docker_forward_env: []", effective)
