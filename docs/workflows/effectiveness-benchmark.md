@@ -90,13 +90,16 @@ Anything else a session needs is authorized one name at a time:
 ```
 
 `--agent-env` takes a **variable name**, never `NAME=value` — a value on the command line is
-readable in any process listing on the host, and in CI it lands in the job log. A malformed
-argument is refused by its leading variable-name prefix only, so the refusal never repeats
-whatever followed it back into the terminal or the log. A name that is not set in the
-environment is refused before the first agent launches, because a run that reached the
-provider unauthenticated would score the outage as a lane effect; that refusal names the
-argument by its **position**, never by what was supplied, because a credential pasted where
-a name belongs is still a valid name to the syntax check. The flag is
+readable in any process listing on the host, and in CI it lands in the job log. A name that is
+not set in the environment is refused before the first agent launches, because a run that
+reached the provider unauthenticated would score the outage as a lane effect.
+
+**No refusal repeats any part of what you supplied.** Every one of them names the offending
+argument by its position — `--agent-env argument #2 is not a variable name` — and nothing
+else. Two earlier versions tried to quote back something safe, first the part before `=` and
+then the leading variable-name prefix, and each leaked in turn: a credential put where a name
+belongs is indistinguishable from a name by shape alone. If you need to know which argument,
+count it on your own command line. The flag is
 repeatable and applies to `run`, `all`, `lanes` and `probe`; in `lanes` every lane gets the same
 selection, so what a lane can reach is not one of the things that varies between lanes.
 
@@ -402,6 +405,13 @@ ownership rule as a phase artifact directory: it creates them or it refuses. A r
 that already holds either is left byte-for-byte alone and the probe stops before spending the
 phase budget, so a second probe into a directory that already answered the question cannot
 destroy the answer it was run to re-check.
+
+Symlinks in the agent's `.rpi` are **skipped, not followed**, and each skip is named in
+`probe.json` under `rpi.skipped_symlinks` and printed in the summary. The probe collects what
+a session produced; dereferencing a link the session left would hand an evidence collector
+read authority over the whole host filesystem, which is not what it is for. Skipping rather
+than refusing keeps a session from halting its own diagnostic by leaving a link, and naming
+the skip keeps it from reading as "the agent wrote nothing".
 
 ### The phase artifact contract
 

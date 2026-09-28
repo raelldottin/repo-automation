@@ -352,6 +352,71 @@ class ProbeEnvironmentIsolationTests(unittest.TestCase):
         self.assertEqual([self.SENTINEL], args.agent_env)
 
 
+class ProbeArtifactLinkTests(unittest.TestCase):
+    """`.rpi` is agent-created. Copying out of it is an evidence collector's job, not a
+    dereference of whatever the agent decided to point at."""
+
+    INSTANCE = "abishekvashok__cmatrix.5c082c6"
+
+    def _probe_over_a_linked_artifact(self, out: Path, target: Path):
+        from automation.benchmark.probe import run_probe
+
+        def runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+            rpi = workspace / ".rpi"
+            rpi.mkdir(parents=True, exist_ok=True)
+            (rpi / "research.json").write_text("{}", encoding="utf-8")
+            (rpi / "host-file.json").symlink_to(target)
+            Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+            return 0
+
+        return run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+
+    def test_a_symlinked_artifact_is_not_copied_and_its_target_is_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            host = Path(raw) / "outside" / "host-sentinel.txt"
+            host.parent.mkdir(parents=True)
+            host.write_text("host sentinel, not agent evidence\n", encoding="utf-8")
+            out = Path(raw) / "probe"
+
+            self._probe_over_a_linked_artifact(out, host)
+
+            copied = out / "rpi" / "host-file.json"
+            self.assertFalse(copied.exists(), "a symlinked artifact was dereferenced into the run directory")
+            self.assertFalse(copied.is_symlink(), "a symlinked artifact was reproduced in the run directory")
+            self.assertEqual("host sentinel, not agent evidence\n", host.read_text(encoding="utf-8"))
+            # The real artifact beside it is still collected: skipping is not refusing.
+            self.assertTrue((out / "rpi" / "research.json").is_file())
+
+    def test_the_skipped_link_is_recorded_rather_than_silently_dropped(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            host = Path(raw) / "outside" / "host-sentinel.txt"
+            host.parent.mkdir(parents=True)
+            host.write_text("host sentinel\n", encoding="utf-8")
+            out = Path(raw) / "probe"
+
+            record = self._probe_over_a_linked_artifact(out, host)
+
+            # A silent omission reads as "the agent wrote nothing". This one reads as a
+            # finding about the session, which is the only thing a probe produces.
+            self.assertEqual(["host-file.json"], record["rpi"]["skipped_symlinks"])
+            self.assertEqual(["research.json"], record["rpi"]["copied"])
+
+    def test_a_run_with_no_links_records_an_empty_skip_list(self) -> None:
+        from automation.benchmark.probe import run_probe
+
+        def runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+            rpi = workspace / ".rpi"
+            rpi.mkdir(parents=True, exist_ok=True)
+            (rpi / "research.json").write_text("{}", encoding="utf-8")
+            Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+            return 0
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+            self.assertEqual([], record["rpi"]["skipped_symlinks"])
+
+
 class ProbeOutputOwnershipTests(unittest.TestCase):
     """The probe claims what it writes. It used to wipe a directory it had never created."""
 

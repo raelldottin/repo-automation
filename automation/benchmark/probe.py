@@ -168,6 +168,8 @@ def run_probe(
     result = run_phase(ctx, PROBE_PHASE, prompt, {"objective": task.objective}, budget_seconds)
 
     data, text = read_artifact(workspace, RESEARCH_ARTIFACT)
+    copied: list[str] = []
+    skipped_symlinks: list[str] = []
     rpi_source = workspace / RPI_DIR
     if rpi_source.is_dir():
         destination = out_dir / PROBE_RPI_DIRNAME
@@ -177,8 +179,16 @@ def run_probe(
             # Appeared after the pre-flight refusal looked: someone else's, either way.
             raise FileExistsError(f"refusing to overwrite pre-existing probe output: {destination}") from None
         try:
-            for artifact in rpi_source.iterdir():
+            for artifact in sorted(rpi_source.iterdir()):
+                # `.rpi` is agent-created. Following a link out of it would give an evidence
+                # collector read authority over the whole host filesystem, which is not what
+                # it is for. Skipped rather than refused: refusing would let a session halt
+                # its own diagnostic by leaving a symlink.
+                if artifact.is_symlink():
+                    skipped_symlinks.append(artifact.name)
+                    continue
                 destination.joinpath(artifact.name).write_bytes(artifact.read_bytes())
+                copied.append(artifact.name)
         except BaseException:
             shutil.rmtree(destination, ignore_errors=True)
             raise
@@ -194,6 +204,9 @@ def run_probe(
         "budget_seconds": budget_seconds,
         "prompt_chars": len(prompt),
         "phase_result": result.to_dict(),
+        # A skipped link reads as a finding about the session; a silent omission would
+        # read as "the agent wrote nothing", which is the question the probe exists to answer.
+        "rpi": {"copied": copied, "skipped_symlinks": skipped_symlinks},
         "artifact": {
             "filename": RESEARCH_ARTIFACT,
             "present": data is not None,
@@ -230,6 +243,11 @@ def summarize(record: dict[str, Any]) -> str:
         f"artifact      {'present' if artifact['present'] else 'ABSENT'}"
         f" ({artifact['chars']} chars, schema {artifact['schema_errors'] or 'valid'})",
     ]
+    if record["rpi"]["skipped_symlinks"]:
+        # Printed, not just recorded: this is the line that stops a reader concluding the
+        # agent wrote nothing when it wrote a link the probe declined to follow.
+        skipped = ", ".join(record["rpi"]["skipped_symlinks"])
+        lines.append(f"skipped links {skipped} (symlinks in {RPI_DIR}, not followed)")
     mentions = stream["artifact_mentions"]
     named = f"{len(mentions)} events name {RESEARCH_ARTIFACT}" if mentions else "none"
     lines.append(f"write attempt {named}")

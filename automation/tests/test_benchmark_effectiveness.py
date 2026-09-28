@@ -502,17 +502,49 @@ class AgentEnvSelectionTests(unittest.TestCase):
                     benchmark_run.resolve_agent_env([argument])
                 self.assertNotIn("sentinel-value", str(refusal.exception))
 
-    def test_a_malformed_argument_is_named_by_its_prefix_never_quoted_whole(self) -> None:
-        # Splitting on "=" only truncates arguments that contain one. A value separated by a
-        # space survived into the refusal, and thence into whatever log holds it - which is the
-        # leak --agent-env takes names for in the first place.
-        for argument in ("NVIDIA_API_KEY sentinel-value", "NVIDIA_API_KEY\tsentinel-value", "NVIDIA_API_KEY:sentinel-value"):
-            with self.subTest(argument=argument):
+    # Every shape of argument the resolver refuses. The property is one sentence - none of
+    # what the caller supplied comes back - and it is asserted over the table rather than per
+    # branch, because a per-branch test cannot fail for a branch nobody thought of. That is
+    # exactly how the same leak survived two slices in two adjacent branches of one function.
+    REFUSED_ARGUMENTS = (
+        "sk_live_abc123 NVIDIA_API_KEY",  # credential first: no "=" to truncate at
+        "NVIDIA_API_KEY=sk_live_abc123",  # credential after the separator
+        "NVIDIA_API_KEY sk_live_abc123",  # credential after a space
+        "NVIDIA_API_KEY\tsk_live_abc123",
+        "NVIDIA_API_KEY:sk_live_abc123",
+        "NVIDIA_API_KEY\nsk_live_abc123",
+        "$(sk_live_abc123)",  # nothing recoverable at all
+        "=sk_live_abc123",
+        "2sk_live_abc123",  # leading digit, so the recoverable prefix is empty
+        "sk_live_abc123",  # a valid name by shape, merely unset: the other branch
+        "",
+    )
+
+    def test_no_refusal_reflects_any_part_of_what_the_caller_supplied(self) -> None:
+        """The contract property, over every branch at once.
+
+        Cases are identified by index, never by content: a test that proves an argument is
+        not echoed must not echo it to report a failure.
+        """
+        for index, argument in enumerate(self.REFUSED_ARGUMENTS):
+            with self.subTest(case=index):
                 with self.assertRaises(SystemExit) as refusal:
                     benchmark_run.resolve_agent_env([argument])
                 message = str(refusal.exception)
-                self.assertFalse("sentinel-value" in message, "the refusal echoed the supplied value")
-                self.assertIn("NVIDIA_API_KEY", message)
+                runs = {argument[at : at + 4] for at in range(len(argument) - 3)}
+                for run_of_four in runs:
+                    self.assertFalse(
+                        run_of_four in message,
+                        f"the refusal for case {index} reflected 4 characters of the supplied argument",
+                    )
+
+    def test_a_refusal_still_says_which_argument_it_refused(self) -> None:
+        # Echoing nothing must not mean saying nothing: an operator has their own command
+        # line in front of them, and a position is all they need to find the argument in it.
+        with unittest.mock.patch.dict(os.environ, {"SENTINEL_PROVIDER_KEY": "sentinel-value"}):
+            with self.assertRaises(SystemExit) as refusal:
+                benchmark_run.resolve_agent_env(["SENTINEL_PROVIDER_KEY", "NVIDIA_API_KEY sk_live_abc123"])
+        self.assertIn("#2", str(refusal.exception))
 
     def test_an_argument_with_no_recoverable_name_is_refused_without_quoting_it(self) -> None:
         for argument in ("$(sentinel-value)", "=sentinel-value", "", "2sentinel-value"):

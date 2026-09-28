@@ -34,10 +34,9 @@ from .strategies import ALL_LANES
 REPORT_FILENAME = "effectiveness-report.json"
 _DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
 # The same shape unanchored, to name a malformed argument by the part that is a variable name.
-_ENV_NAME_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
 def resolve_agent_env(names: Optional[Sequence[str]]) -> dict[str, str]:
     """Copy exactly the named launcher variables through to the agent session.
 
@@ -46,27 +45,28 @@ def resolve_agent_env(names: Optional[Sequence[str]]) -> dict[str, str]:
     variables it authorizes on top of that - a name at a time.
 
     Names only. ``--agent-env NAME=value`` would put credential material in argv, where every
-    process listing on the host can read it, so an argument carrying a value is refused and
-    only its leading variable-name prefix is ever echoed back - splitting on ``=`` was not
-    enough, because ``--agent-env "NAME value"`` has no ``=`` and put the value straight into
-    the refusal, and thence into any log holding it. A name that is not set is refused too:
-    a run that reached the provider unauthenticated would score the outage as a lane effect,
-    and it is cheaper to fail now than after the first cell has spent its budget.
+    process listing on the host can read it. A name that is not set is refused too: a run that
+    reached the provider unauthenticated would score the outage as a lane effect, and it is
+    cheaper to fail now than after the first cell has spent its budget.
+
+    **No refusal here reflects any part of what the caller supplied.** Every branch names the
+    offending argument by its position and nothing else. Two earlier attempts tried to quote
+    back something safe - first the part before ``=``, then the leading variable-name prefix -
+    and each leaked in turn, because a credential put where a name belongs is indistinguishable
+    from a name by shape alone: ``sk_live_abc123`` matches ``_ENV_NAME`` exactly, and
+    ``"sk_live_abc123 NAME"`` has no ``=`` to truncate at. There is no third shape rule to
+    find. The operator has their own command line in front of them; a position is enough.
     """
     selected: dict[str, str] = {}
     for position, name in enumerate(names or (), start=1):
         if not _ENV_NAME.match(name):
-            recoverable = _ENV_NAME_PREFIX.match(name)
-            subject = f"{recoverable.group()!r} is followed by" if recoverable else "the argument contains"
             raise SystemExit(
-                f"--agent-env takes a variable name; {subject} unsupported characters: "
-                "pass the name and set the variable in the environment."
+                f"--agent-env argument #{position} is not a variable name: pass the name only "
+                "and set the variable in the environment."
             )
         if name not in os.environ:
-            # A credential value pasted where a name belongs still matches _ENV_NAME, so the
-            # refusal names the argument by position and never echoes what was supplied.
             raise SystemExit(
-                f"--agent-env argument {position} names a variable that is not set in this "
+                f"--agent-env argument #{position} names a variable that is not set in this "
                 "environment; the agent was not launched."
             )
         selected[name] = os.environ[name]
