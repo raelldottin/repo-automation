@@ -52,8 +52,11 @@ _DOCUMENTATION_SUFFIXES = (".md", ".txt", ".rst", ".html", ".htm", ".pdf", ".inf
 _DOCUMENTATION_STEMS = ("readme", "manual", "usage", "changelog", "news", "faq", "help", "tutorial")
 _DOCUMENTATION_DIRS = ("doc", "docs", "man", "manual", "manpages", "share")
 
-# (argv) -> (returncode, combined output)
-DockerRun = Callable[[list[str]], tuple[int, str]]
+# (argv) -> (returncode, stdout, stderr). Kept apart on purpose: `docker create` answers
+# on stdout and narrates a pull on stderr, and run 36419783072 showed what merging them
+# costs - "Status: Downloaded newer image for ..." arrived after the container id and was
+# handed to `docker cp` as the container's name.
+DockerRun = Callable[[list[str]], tuple[int, str, str]]
 
 # A pull inside `docker create` is the slow step; everything else is sub-second.
 _DOCKER_TIMEOUT_SECONDS = 900
@@ -120,7 +123,7 @@ def image_for(instance_id: str) -> str:
     return f"{CLEANROOM_REGISTRY}/{instance_id.replace(INSTANCE_SEPARATOR, IMAGE_SEPARATOR)}:{CLEANROOM_TAG}"
 
 
-def _subprocess_docker(argv: list[str]) -> tuple[int, str]:
+def _subprocess_docker(argv: list[str]) -> tuple[int, str, str]:
     completed = subprocess.run(
         argv,
         capture_output=True,
@@ -128,23 +131,15 @@ def _subprocess_docker(argv: list[str]) -> tuple[int, str]:
         timeout=_DOCKER_TIMEOUT_SECONDS,
         stdin=subprocess.DEVNULL,
     )
-    return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
+    return completed.returncode, (completed.stdout or ""), (completed.stderr or "")
 
 
 def _checked(run: DockerRun, argv: list[str]) -> str:
-    """Run a docker command that answers with one value, and return that value.
-
-    The last non-empty line, not the whole output: ``docker create`` pulls the image on a
-    cache miss and writes every layer's progress to stderr, which this captures alongside
-    the container id. Run 36414921665 passed that entire pull log on as a container id and
-    the daemon answered the next call with a 404 - on the runner, where the image is never
-    already present, i.e. every time.
-    """
-    returncode, output = run(argv)
+    """Run a docker command that answers with one value, and return that value."""
+    returncode, stdout, stderr = run(argv)
     if returncode != 0:
-        raise CleanroomError(f"{' '.join(argv[:3])} failed (rc {returncode}): {output.strip()}")
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    return lines[-1] if lines else ""
+        raise CleanroomError(f"{' '.join(argv[:3])} failed (rc {returncode}): {(stdout + stderr).strip()}")
+    return stdout.strip()
 
 
 def _is_documentation(entry: Path) -> bool:
@@ -270,7 +265,7 @@ def verify(
     ]
     container = _checked(run, receipt.probe_argv)
     try:
-        _, output = run(["docker", "start", "--attach", container])
+        _, output, _ = run(["docker", "start", "--attach", container])
         _parse_probe(output, receipt)
         receipt.network_mode = _checked(run, ["docker", "inspect", "--format", "{{.HostConfig.NetworkMode}}", container])
     finally:

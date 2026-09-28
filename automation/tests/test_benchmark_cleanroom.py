@@ -44,7 +44,13 @@ class FakeDocker:
         probe: str = HEALTHY_PROBE,
         network_mode: str = "none",
         executable: bool = True,
-        pull_noise: str = "Unable to find image locally\nlatest: Pulling from programbench/x\n",
+        # What a cache miss narrates on stderr. It both precedes and follows the container
+        # id on stdout, so no line-picking rule can separate them from one merged stream.
+        pull_noise: str = (
+            "Unable to find image locally\n"
+            "task_cleanroom_v6: Pulling from programbench/x\n"
+            "Status: Downloaded newer image for programbench/x:task_cleanroom_v6\n"
+        ),
     ) -> None:
         self.contents = contents
         self.probe = probe
@@ -54,13 +60,11 @@ class FakeDocker:
         self.calls: list[list[str]] = []
         self._workspace: Path | None = None
 
-    def __call__(self, argv: list[str]) -> tuple[int, str]:
+    def __call__(self, argv: list[str]) -> tuple[int, str, str]:
         self.calls.append(argv)
         if argv[1] == "create":
             container = "probe-container" if "--network=none" in argv else "copy-container"
-            # What a cache miss looks like: `docker create` pulls, and the pull's progress
-            # arrives on stderr in front of the container id.
-            return 0, f"{self.pull_noise}{container}\n"
+            return 0, f"{container}\n", self.pull_noise
         if argv[1] == "cp":
             destination = Path(argv[3])
             for name, body in self.contents.items():
@@ -69,15 +73,15 @@ class FakeDocker:
                 path.write_text(body, encoding="utf-8")
             if self.executable:
                 (destination / "executable").chmod(0o755)
-            return 0, ""
+            return 0, "", ""
         if argv[1] == "image":
-            return 0, "sha256:d1ge57\n"
+            return 0, "sha256:d1ge57\n", ""
         if argv[1] == "start":
-            return 0, self.probe
+            return 0, self.probe, ""
         if argv[1] == "inspect":
-            return 0, self.network_mode + "\n"
+            return 0, self.network_mode + "\n", ""
         if argv[1] == "rm":
-            return 0, ""
+            return 0, "", ""
         raise AssertionError(f"unexpected docker call: {argv}")
 
     def call(self, verb: str) -> list[str]:
@@ -125,9 +129,9 @@ class PrepareTests(unittest.TestCase):
             self.assertTrue(receipt.git_worktree)
 
     def test_a_pull_on_the_way_in_is_not_mistaken_for_the_container_id(self) -> None:
-        # Run 36414921665: the image is never cached on a fresh runner, so `docker create`
-        # pulled, and the pull log was passed on as the container id. Every later call
-        # addressed a container that does not exist.
+        # Runs 36414921665 and 36419783072: the image is never cached on a fresh runner, so
+        # `docker create` pulls, and its narration on stderr was read as the container id.
+        # Every later call then addressed a container that does not exist.
         docker = FakeDocker(contents=cleanroom_contents())
         with tempfile.TemporaryDirectory() as temp_dir:
             self.prepare(docker, Path(temp_dir) / "ws")
