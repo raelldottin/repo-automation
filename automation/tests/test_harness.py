@@ -591,6 +591,11 @@ class AutomationHarnessTests(unittest.TestCase):
             # The key that keeps NVIDIA_API_KEY in the Hermes process and out of the
             # container the model's commands run in.
             self.assertIn("docker_forward_env: []", effective)
+            # Reuse across Hermes processes is keyed by task/profile/egress labels and the
+            # network mode - never by image and never by bind mount - and a CLI session's
+            # task id stays "default", so container_persistent alone leaves a cell free to
+            # inherit the previous cell's container, image and workspace mount.
+            self.assertIn("docker_persist_across_processes: false", effective)
 
             controls = json.loads(sorted(usage_dir.glob("*.controls.json"))[0].read_text(encoding="utf-8"))
             self.assertEqual("docker", controls["sandbox"]["backend"])

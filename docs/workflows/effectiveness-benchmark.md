@@ -208,16 +208,22 @@ What each cell does before its first agent turn (`automation/benchmark/cleanroom
    `programbench/INSTANCE:task_cleanroom_v6`, where `INSTANCE` is the instance id with
    its `__` rewritten as `_1776_` (Docker repository names cannot hold `__`) — and records
    the image id, so `run.json` names the bytes that were used, not a tag that can move.
-2. Copies the image's entire `/workspace` into the cell workspace: the reference
-   `./executable` and the bundled documentation, nothing curated, nothing added.
+2. Copies the image's entire `/workspace` into a cell workspace that must be **empty**
+   first: the reference `./executable`, the bundled documentation, and the one-commit Git
+   repository the image ships, nothing curated, nothing added. A local cell gets a
+   `git init` because `run_agent.sh` requires a worktree at the repo root; a cleanroom
+   cell does not, and is refused if the image ships none. The harness does not create the
+   environment it is supposed to be measuring.
 3. Runs a probe container from that same image, on that same workspace, with
    `--network=none`, and reads back what it found: the executable is executable, the
-   workspace is writable, and `curl`, `wget`, `git ls-remote` and `getent hosts` all fail.
+   workspace is writable and a worktree, and `curl`, `wget`, `git ls-remote` and
+   `getent hosts` all fail.
    The network mode is then read off the container that ran the probes rather than
    trusted from the flags that were passed to it.
-4. Refuses the cell — `CleanroomError`, before any tokens are spent — on a missing
-   reference binary, absent documentation, a container that is not `NetworkMode=none`,
-   any egress attempt that *succeeded*, or an image too thin for any probe to run at all.
+4. Refuses the cell — `CleanroomError`, before any tokens are spent — on a non-empty
+   destination, a missing reference binary, absent documentation, a missing Git worktree,
+   a container that is not `NetworkMode=none`, any egress attempt that *succeeded*, or an
+   image too thin for any probe to run at all.
    A cleanroom that could not be tested is not a tested cleanroom.
 
 The receipt lands next to the submission as `cleanroom.json` and inside each lane cell's
@@ -229,8 +235,18 @@ The agent's session is then held in the same image. `run_agent.sh` appends
 `terminal.docker_image` to the instance's cleanroom image; at the pinned revision the
 terminal, file and `code_execution` tools all route through one `docker exec` container,
 so the three tool families the model is given share a single air-gapped workspace by
-construction. `docker_network: false` is `--network=none`, and Hermes refuses to reuse an
-existing networked container while it is set.
+construction. `docker_network: false` is `--network=none`.
+
+`docker_persist_across_processes: false` is what actually keeps one cell out of another
+cell's container. At the pinned revision Hermes only forces per-session containers when a
+session key is present, and a CLI session has none — its task id stays `default`, so the
+configured value reaches `DockerEnvironment`. Reuse is then matched on task, profile and
+egress labels plus the network mode, never on the image and never on the bind mount, and
+an existing `--network=none` container is deliberately *kept* under `docker_network:
+false`. Without this key a cell could attach to the previous cell's container, still
+holding the previous instance's image and workspace mount. The key is absent from the
+pinned `DEFAULT_CONFIG` but honoured through `TERMINAL_CONFIG_ENV_MAP`, which the CI
+config check now knows about.
 
 Credentials stay host-side: `NVIDIA_API_KEY` is read by the Hermes process, which runs
 *outside* the sandbox, and `docker_forward_env: []` / `docker_env: {}` keep the container's
@@ -239,7 +255,11 @@ reason — the model-facing tools never see the key, and `run.json` never record
 
 Submissions are archived from the workspace afterwards, host-side, with `.git`, the
 harness's own `rpi/` directory and the reference `executable` excluded: the binary the
-agent was given back is not part of what it built. Evaluation is unchanged — the official
+agent was given back is not part of what it built. Excluding `.git` matches ProgramBench's
+own submission packer, and matters for scoring: the evaluator seeds a synthetic repository
+with fixed identity and fixed dates *only if the submission shipped none*, so a submission
+carrying its own `.git` would make build scripts that embed a commit SHA produce a
+different binary hash on every run. Evaluation is unchanged — the official
 ProgramBench evaluator, in the official `task_v6` eval image.
 
 Requirements: Docker and an x86_64 host (the images are linux/amd64 only). Without

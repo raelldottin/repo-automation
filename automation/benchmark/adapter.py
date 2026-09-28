@@ -303,8 +303,10 @@ class SupervisorAgentAdapter:
         out_tar = Path(out_tar)
 
         workspace = Path(tempfile.mkdtemp(prefix=f"pb-{task.instance_id}-"))
-        # run_agent.sh refuses a non-git repo root; the workspace is the agent's repo.
-        subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
+        if not self._cleanroom:
+            # run_agent.sh refuses a non-git repo root; the workspace is the agent's repo.
+            # A cleanroom cell gets its worktree from the image instead - see below.
+            subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
         control_dir = Path(tempfile.mkdtemp(prefix=f"pb-control-{task.instance_id}-"))
 
         environment = self._run_environment()
@@ -313,6 +315,11 @@ class SupervisorAgentAdapter:
         # land in the workspace, and the image the tools run inside is named to run_agent.sh.
         # A cleanroom that fails its own preflight raises - an agent that can reach the
         # upstream source is not attempting this benchmark, whatever it scores.
+        #
+        # The workspace is the image's ``/workspace`` and nothing else: it must be empty
+        # when the copy starts, and the Git worktree the harness needs is the one-commit
+        # repository the image already ships. Creating either here would make the cell's
+        # environment partly the harness's invention rather than ProgramBench's.
         receipt = None
         if self._cleanroom:
             receipt = prepare_cleanroom(task.instance_id, workspace, task.repository)

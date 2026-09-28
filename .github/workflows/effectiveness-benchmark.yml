@@ -122,12 +122,20 @@ jobs:
           import os, sys, yaml
           sys.path.insert(0, os.environ["RUNNER_TEMP"] + "/hermes-agent")
           from hermes_cli.config_defaults import DEFAULT_CONFIG
+          from hermes_cli.config import TERMINAL_CONFIG_ENV_MAP
 
+          # A key is honoured if the defaults carry it, or - for `terminal.*` - if the
+          # config-to-env bridge mirrors it. `docker_persist_across_processes` is the
+          # second kind: absent from DEFAULT_CONFIG, but bridged to
+          # TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES and read from there by terminal_tool.
+          # Being in neither is the failure this step exists to catch.
           def unknown(node, defaults, prefix=""):
               for key, value in node.items():
                   path = f"{prefix}{key}"
+                  bridged = prefix == "terminal." and key in TERMINAL_CONFIG_ENV_MAP
                   if not isinstance(defaults, dict) or key not in defaults:
-                      yield path
+                      if not bridged:
+                          yield path
                   elif isinstance(value, dict):
                       yield from unknown(value, defaults[key], f"{path}.")
 
