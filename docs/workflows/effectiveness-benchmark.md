@@ -257,13 +257,18 @@ source and rw flag, Hermes's own labels, `existed_in_baseline`, and `removed_aft
 under one receipt:
 
 ```json
-{"observed": true, "default_backend_verified": true, "default_backend_removed_after_exit": true,
- "existing_containers": [], "containers": [{"task_id": "default", "...": "..."}]}
+{"observed": true, "default_backend_verified": true, "session_backend_verified": true,
+ "default_backend_removed_after_exit": true, "existing_containers": [],
+ "containers": [{"task_id": "default", "...": "..."}]}
 ```
 
-Every container, not the first: Hermes builds one backend per `task_id`, and the system
-prompt's own `prompt-backend-probe` container appears before the `default` one that serves
-the model's terminal, file and code_execution calls. Written mid-session on purpose — a
+Every container, not the first: Hermes builds one backend per `task_id`, and there are
+three kinds. The system prompt's own probe gets `prompt-backend-probe`. The CLI parent's
+tool calls get `default`. Every tool call *inside an agent turn* gets a session-scoped id,
+because `container_persistent: false` keys the backend by session — and that third kind
+reaches the mount logic by a different path, which is why the receipt scores it
+separately. First-container-wins recorded the system prompt's and hid both others.
+Written mid-session on purpose — a
 cell killed at its budget ceiling takes its process group with it, and the container is
 gone once it exits. The container's environment is never inspected, so the provider key
 cannot reach the receipt.
@@ -274,19 +279,28 @@ probe** asks directly instead, with no model in the loop: `run_agent.sh --sandbo
 composes the same `HERMES_HOME/config.yaml`, exports the same `TERMINAL_CWD` and the same
 sandbox image the session will get, then runs, under Hermes's own interpreter,
 `apply_terminal_config_to_env()` followed by
-`terminal_tool("pwd && test -x ./executable && test -f README.md", task_id=None)`. Going
-through the config file is the point: that bridge is where
-`docker_persist_across_processes` takes effect, and `task_id=None` is what every ordinary
-tool call resolves to. Its receipt and output land in `agent-sessions/sandbox-probe.sandbox.json`
-and `agent-sessions/sandbox-probe.log`.
+`terminal_tool("pwd && test -x ./executable && test -f README.md", ...)` twice: once with
+`task_id=None`, once with a fresh `probe-<uuid>`, so both the `default` backend and the
+session-scoped backend an agent turn uses are exercised. Going through the config file is
+the point: that bridge is where `docker_persist_across_processes` takes effect. Its
+receipt and output land in `agent-sessions/sandbox-probe.sandbox.json` and
+`agent-sessions/sandbox-probe.log`.
 
-The cell is refused before the budget is spent unless that probe exits 0 and the witness
-saw a `hermes-task-id=default` container with the cleanroom image id, `NetworkMode=none`,
-`/workspace` bound rw from this cell's own `pb-*` workspace, and `existed_in_baseline:
-false` — and unless that container is **gone** from `docker ps -a --filter
-label=hermes-agent=1` once the probe process exits. That last check is the runtime reading
-of `docker_persist_across_processes: false`: a container the daemon still lists is one the
-next process attaches to by label, whatever the config file says.
+The cell is refused before the budget is spent unless both probes exit 0 and the witness
+saw, for each of the two backends, a container with the cleanroom image id,
+`NetworkMode=none`, `/workspace` bound rw from this cell's own `pb-*` workspace, and
+`existed_in_baseline: false` — and unless every container it saw is **gone** from `docker
+ps -a --filter label=hermes-agent=1` once the probe process exits. That last check is the
+runtime reading of `docker_persist_across_processes: false`: a container the daemon still
+lists is one the next process attaches to by label, whatever the config file says.
+
+Probing both backends is not belt-and-braces. Run 36485906813 passed every `default` check
+and still handed the model an empty tmpfs: `docker_mount_cwd_to_workspace` derives the
+bind from `TERMINAL_CWD`, and the pinned revision's `_resolve_task_host_cwd` deliberately
+refuses to do that for a session-scoped container, since the env var outlives the session
+that set it and reusing it could leak the previous session's directory. `run_agent.sh`
+therefore appends an explicit `docker_volumes: ["<workspace>:/workspace"]` to the composed
+config, which applies to every task id, and the probe now covers the path that caught it.
 
 The same refusal applies to the session's own witness: a container running another image,
 not `NetworkMode=none`, with `/workspace` from somewhere other than that cell's workspace

@@ -131,8 +131,12 @@ class StubWitness:
         self.receipt = receipt or {
             "observed": True,
             "default_backend_verified": True,
+            "session_backend_verified": True,
             "default_backend_removed_after_exit": True,
-            "containers": [{"task_id": "default"}],
+            "containers": [
+                {"task_id": "default", "container_id": "a", "removed_after_exit": True},
+                {"task_id": "probe-a1b2", "container_id": "b", "removed_after_exit": True},
+            ],
         }
 
     @contextlib.contextmanager
@@ -305,15 +309,36 @@ class AdapterTests(unittest.TestCase):
             receipt={
                 "observed": True,
                 "default_backend_verified": False,
+                "session_backend_verified": False,
                 "default_backend_removed_after_exit": None,
-                "containers": [{"task_id": "prompt-backend-probe"}],
+                "containers": [{"task_id": "prompt-backend-probe", "container_id": "a", "removed_after_exit": True}],
             }
         )
         refusal = self.refused_cleanroom_cell(stub_witnesses(unproved))
-        self.assertIn("`hermes-task-id=default`", refusal)
+        self.assertIn("no sound default container", refusal)
+        self.assertIn("no sound session-scoped container", refusal)
         self.assertIn("prompt-backend-probe", refusal)
 
-    def test_a_default_backend_that_outlives_its_process_is_refused(self) -> None:
+    def test_a_session_scoped_backend_on_a_tmpfs_is_refused_before_the_budget(self) -> None:
+        # Run 36485906813: `docker_mount_cwd_to_workspace` binds the cell's workspace for
+        # the CLI parent's `default` backend only. The session-scoped backend every tool
+        # call inside an agent turn resolves to was handed an empty tmpfs at /workspace, and
+        # the cell spent its whole budget before anything noticed.
+        tmpfs = StubWitness(
+            violations=("the agent's container has nothing mounted at /workspace",),
+            receipt={
+                "observed": True,
+                "default_backend_verified": True,
+                "session_backend_verified": False,
+                "default_backend_removed_after_exit": True,
+                "containers": [{"task_id": "probe-a1b2", "container_id": "a", "removed_after_exit": True}],
+            },
+        )
+        refusal = self.refused_cleanroom_cell(stub_witnesses(tmpfs))
+        self.assertIn("nothing mounted at /workspace", refusal)
+        self.assertIn("no sound session-scoped container", refusal)
+
+    def test_a_backend_that_outlives_its_process_is_refused(self) -> None:
         # `docker_persist_across_processes: false` read off the daemon instead of off the
         # config file: a container still listed after its process exits is one the next
         # cell attaches to, carrying this cell's mounts into it.
@@ -321,12 +346,16 @@ class AdapterTests(unittest.TestCase):
             receipt={
                 "observed": True,
                 "default_backend_verified": True,
+                "session_backend_verified": True,
                 "default_backend_removed_after_exit": False,
-                "containers": [{"task_id": "default"}],
+                "containers": [
+                    {"task_id": "default", "container_id": "a", "removed_after_exit": False},
+                    {"task_id": "probe-a1b2", "container_id": "b", "removed_after_exit": True},
+                ],
             }
         )
         refusal = self.refused_cleanroom_cell(stub_witnesses(persisted))
-        self.assertIn("outlived the process that made it", refusal)
+        self.assertIn("outlived the process that made them: ['a']", refusal)
 
     def test_the_probe_runs_before_the_agent_session(self) -> None:
         # Spending the budget first and asking afterwards is the failure mode this exists

@@ -290,10 +290,24 @@ case "$agent_runner" in
         echo "Hermes cleanroom config not found: $hermes_sandbox_config" >&2
         exit 69
       fi
+      # A `-v` spec is colon-separated, so a workspace path containing one would bind
+      # something else entirely. mktemp never produces one; refuse rather than guess.
+      case "$repo_root" in
+        *:*)
+          echo "Workspace path contains a colon and cannot be bind-mounted: $repo_root" >&2
+          exit 78
+          ;;
+      esac
       {
         printf '\n'
         cat "$hermes_sandbox_config"
         printf '  docker_image: "%s"\n' "$sandbox_image"
+        # Per-cell, so it is appended here rather than kept in the fragment. Explicit
+        # because `docker_mount_cwd_to_workspace` only binds the CLI parent's "default"
+        # backend: a session-scoped task id - which is what every tool call in an agent
+        # turn carries - is refused the TERMINAL_CWD-derived mount and would get a tmpfs.
+        # An entry ending in :/workspace is honoured for every task id.
+        printf '  docker_volumes: ["%s:/workspace"]\n' "$repo_root"
       } >> "$HERMES_HOME/config.yaml"
       sandbox_backend="docker"
       # Which bytes ran, not which tag was requested: a tag is repointed, a digest is not.
@@ -304,11 +318,12 @@ case "$agent_runner" in
       # config composed immediately above, so what it exercises is the configuration the
       # next invocation gets rather than a restatement of it.
       #
-      # task_id=None is the whole point. Hermes builds one backend per task id: the system
-      # prompt's own probe gets "prompt-backend-probe", and every ordinary terminal, file
-      # and code_execution call the model makes resolves to "default". Only the default
-      # backend is the path where `docker_persist_across_processes: false` is load-bearing,
-      # and a session that spends its budget before the first tool call never creates it.
+      # Hermes builds one backend per task id, and the benchmark posture gives the agent
+      # two of them: the CLI parent's "default" backend (task_id=None), and - because
+      # `container_persistent: false` turns on per-session isolation - a session-scoped one
+      # that every tool call inside an agent turn resolves to. They take different paths
+      # through the mount logic, so both are probed. Run 36485906813 is why: the default
+      # backend had the cleanroom at /workspace and the session-scoped one had a tmpfs.
       if [[ -z "$sandbox_image" ]]; then
         echo "--sandbox-probe needs REPO_AUTOMATION_HERMES_SANDBOX_IMAGE; there is no sandbox to probe." >&2
         exit 78
@@ -333,6 +348,7 @@ case "$agent_runner" in
 import json
 import os
 import sys
+import uuid
 
 # Before importing the tool: this is the bridge that turns the `terminal.*` keys of
 # config.yaml into the TERMINAL_* env vars terminal_tool actually reads. Skipping it
@@ -343,9 +359,13 @@ apply_terminal_config_to_env()
 
 from tools.terminal_tool import terminal_tool
 
-answer = terminal_tool(os.environ["REPO_AUTOMATION_SANDBOX_PROBE_COMMAND"], task_id=None)
-print(answer)
-sys.exit(0 if json.loads(answer).get("exit_code") == 0 else 1)
+command = os.environ["REPO_AUTOMATION_SANDBOX_PROBE_COMMAND"]
+failed = False
+for task_id in (None, f"probe-{uuid.uuid4()}"):
+    answer = json.loads(terminal_tool(command, task_id=task_id))
+    print(json.dumps({"task_id": task_id or "default", "result": answer}))
+    failed = failed or answer.get("exit_code") != 0
+sys.exit(1 if failed else 0)
 PROBE
       probe_status=${PIPESTATUS[0]}
       set -e

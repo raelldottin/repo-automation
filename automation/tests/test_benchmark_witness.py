@@ -19,6 +19,9 @@ IMAGE = "programbench/abishekvashok_1776_cmatrix.5c082c6:task_cleanroom_v6"
 IMAGE_ID = "sha256:4ef6d754"
 CONTAINER = "c0ffee" * 10
 PROBE_CONTAINER = "decade" * 10
+SESSION_CONTAINER = "bedead" * 10
+# What `container_persistent: false` keys an agent turn's own tool calls by.
+SESSION_TASK_ID = "32c58fde-13c6-4448-bbb5-b90482b19290"
 
 
 class FakeDocker:
@@ -152,6 +155,44 @@ class WitnessTests(unittest.TestCase):
             self.assertFalse(receipt["default_backend_verified"])
             self.assertIsNone(receipt["default_backend_removed_after_exit"])
 
+    def test_the_session_scoped_backend_is_scored_apart_from_the_default_one(self) -> None:
+        # Under `container_persistent: false` a tool call inside an agent turn is keyed by
+        # session id, not by "default", and reaches the mount logic by a different path.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(
+                containers=[],
+                inspect={
+                    CONTAINER: inspected(workspace),
+                    SESSION_CONTAINER: inspected(workspace, container=SESSION_CONTAINER, task_id=SESSION_TASK_ID),
+                },
+            )
+
+            witness = self.watch(docker, workspace, sessions, creates=(CONTAINER, SESSION_CONTAINER))
+
+            receipt = self.written(sessions)
+            self.assertTrue(receipt["default_backend_verified"])
+            self.assertTrue(receipt["session_backend_verified"])
+            self.assertEqual([], witness.violations)
+
+    def test_a_session_backend_on_a_tmpfs_is_caught_while_the_default_one_looks_sound(self) -> None:
+        # Run 36485906813 exactly: `docker_mount_cwd_to_workspace` bound /workspace for the
+        # CLI parent's "default" backend, and `_resolve_task_host_cwd` refused to derive it
+        # for the session-scoped one, which got an empty tmpfs instead.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            tmpfs = inspected(workspace, container=SESSION_CONTAINER, task_id=SESSION_TASK_ID, mounts=[])
+            docker = FakeDocker(containers=[], inspect={CONTAINER: inspected(workspace), SESSION_CONTAINER: tmpfs})
+
+            witness = self.watch(docker, workspace, sessions, creates=(CONTAINER, SESSION_CONTAINER))
+
+            receipt = self.written(sessions)
+            self.assertTrue(receipt["default_backend_verified"])
+            self.assertFalse(receipt["session_backend_verified"])
+            self.assertEqual(["the agent's container has nothing mounted at /workspace"], witness.violations)
+
     def test_a_container_that_outlives_its_process_is_recorded_as_still_reusable(self) -> None:
         # The runtime reading of `docker_persist_across_processes: false`: a container the
         # daemon still lists is one the next process attaches to by label.
@@ -244,6 +285,7 @@ class WitnessTests(unittest.TestCase):
                 {
                     "observed": False,
                     "default_backend_verified": False,
+                    "session_backend_verified": False,
                     "default_backend_removed_after_exit": None,
                     "existing_containers": [],
                     "containers": [],

@@ -317,36 +317,42 @@ class SupervisorAgentAdapter:
     def _probe_sandbox(
         self, workspace: Path, environment: Mapping[str, str], sessions_dir: Path, receipt: CleanroomReceipt
     ) -> None:
-        """Prove the tools' default backend is the cleanroom, before spending the budget.
+        """Prove the containers the model's tools would get, before spending the budget.
 
         The preflight proves the image, and the witness proves whichever containers a
-        session happens to create - but the container that serves the model's terminal,
-        file and code_execution calls is created by the model's first tool call, and a cell
-        that times out before that one leaves the question open. This asks it directly: one
-        terminal call at ``task_id=None``, through the same composed config and the same
-        sandbox image the next invocation gets, with no model in the loop.
+        session happens to create - but the containers that serve terminal, file and
+        code_execution are made by the model's first tool call, and a cell that times out
+        before that one leaves the question open. This asks it directly, with no model in
+        the loop: one terminal call on each of the two backends an agent turn uses, through
+        the same composed config and the same sandbox image the session will get.
 
-        Refusing here costs a container start. Refusing after the session costs the budget.
+        Refusing here costs two container starts. Refusing after the session costs the
+        budget, which is how run 36485906813 spent 300 seconds to discover a tmpfs.
         """
         witness = SandboxWitness(sessions_dir, workspace, receipt.image, receipt.image_id, stem=SANDBOX_PROBE_STEM)
         script = shlex.quote(str(self._repo_root / SUPERVISOR_SCRIPT))
         command = f"{script} --repo-root {shlex.quote(str(workspace))} --sandbox-probe"
         with witness.watching():
             returncode = self._runner(command, workspace, environment, SANDBOX_PROBE_TIMEOUT_SECONDS)
+        observation = witness.receipt
         failures = list(witness.violations)
         if returncode != 0:
-            failures.append(f"the default-backend probe exited {returncode}; see {SANDBOX_PROBE_STEM}.log")
-        observation = witness.receipt
-        if not observation["default_backend_verified"]:
-            failures.append(
-                "no sound `hermes-task-id=default` container was observed, so the backend the "
-                f"model's tools would have used is unproved (task ids seen: {_observed_task_ids(observation)})"
-            )
-        elif not observation["default_backend_removed_after_exit"]:
-            # `docker_persist_across_processes: false` read off the daemon rather than off
-            # the config file: a container still listed is a container the next process
-            # attaches to, carrying the last cell's mounts into this one.
-            failures.append("the default backend container outlived the process that made it; the next session would reuse it")
+            failures.append(f"the sandbox probe exited {returncode}; see {SANDBOX_PROBE_STEM}.log")
+        for backend, verified in (
+            ("default", observation["default_backend_verified"]),
+            ("session-scoped", observation["session_backend_verified"]),
+        ):
+            if not verified:
+                failures.append(
+                    f"no sound {backend} container was observed, so the backend the model's tools "
+                    f"would have used is unproved (task ids seen: {_observed_task_ids(observation)})"
+                )
+        # `docker_persist_across_processes: false` read off the daemon rather than off the
+        # config file: a container the daemon still lists is one the next process attaches
+        # to by label, carrying this cell's mounts into the next.
+        outlived = [record["container_id"] for record in observation["containers"] if not record["removed_after_exit"]]
+        if outlived:
+            failures.append(f"{len(outlived)} probe container(s) outlived the process that made them: {outlived}")
         if failures:
             raise CleanroomError("the agent's sandbox was not the cleanroom it was given:\n  - " + "\n  - ".join(failures))
 

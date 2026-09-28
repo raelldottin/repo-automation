@@ -37,6 +37,11 @@ HERMES_LABEL = "hermes-agent=1"
 # to. `terminal_tool(..., task_id=None)` -> `_resolve_container_task_id` -> "default".
 TASK_ID_LABEL = "hermes-task-id"
 DEFAULT_TASK_ID = "default"
+# The backend the system prompt builds for its own `uname`/`pwd`/`whoami` probe. Neither
+# this nor `default` is what a tool call inside an agent turn resolves to: under
+# `container_persistent: false` that is a session-scoped id, and it reaches the mount logic
+# by a different path. Run 36485906813 had the first two right and the third on a tmpfs.
+PROMPT_PROBE_TASK_ID = "prompt-backend-probe"
 # The agent's first tool call is what creates the container, so the wait is the model's
 # first turn - seconds to a minute - and the poll is cheap.
 POLL_SECONDS = 0.5
@@ -64,6 +69,12 @@ def _hermes_containers(run: DockerRun) -> set[str]:
     if returncode != 0:
         return set()
     return {line.strip() for line in stdout.splitlines() if line.strip()}
+
+
+def _is_session_scoped(record: dict[str, object]) -> bool:
+    """A container keyed by a session id rather than by one of Hermes's fixed backends."""
+    task_id = record.get("task_id")
+    return bool(task_id) and task_id not in (DEFAULT_TASK_ID, PROMPT_PROBE_TASK_ID)
 
 
 def _violations(record: dict[str, object], image_id: str, workspace: Path) -> list[str]:
@@ -114,9 +125,10 @@ class SandboxWitness:
         self.violations: list[str] = []
 
     @property
-    def receipt(self) -> dict[str, object]:
+    def receipt(self) -> dict[str, Any]:
         """One structure, whatever happened: no container, one, or one per backend."""
         default = [record for record in self.containers if record.get("task_id") == DEFAULT_TASK_ID]
+        session = [record for record in self.containers if _is_session_scoped(record)]
         removed = [record.get("removed_after_exit") for record in default]
         return {
             "observed": bool(self.containers),
@@ -124,6 +136,9 @@ class SandboxWitness:
             # A session that only ever created the system prompt's probe backend has not
             # shown that the tools the model calls run in the cleanroom.
             "default_backend_verified": bool(default) and not any(record["violations"] for record in default),
+            # The backend an agent turn's own tool calls resolve to under per-session
+            # isolation. A different path through the mount logic, so a separate fact.
+            "session_backend_verified": bool(session) and not any(record["violations"] for record in session),
             # The direct runtime reading of `docker_persist_across_processes: false`: the
             # container is gone once the process that made it is, so nothing can attach to
             # it next time. Null until the session has exited.

@@ -19,10 +19,18 @@ terminal:
   # control cannot decay into a reused bridge container between cells.
   docker_network: false
   # TERMINAL_CWD is the cell's workspace, already holding everything the cleanroom image
-  # ships in /workspace. Hermes bind-mounts it at /workspace and remaps the session cwd to
-  # match. Without this Hermes mounts its own /workspace - a tmpfs here, since the
-  # container is not persistent - which would hide the reference ./executable and the
-  # bundled documentation behind an empty directory.
+  # ships in /workspace. This remaps the session cwd to /workspace and is what makes the
+  # CLI parent's "default" backend bind the workspace there. Without it Hermes mounts its
+  # own /workspace - a tmpfs here, since the container is not persistent - which would hide
+  # the reference ./executable and the bundled documentation behind an empty directory.
+  #
+  # It is NOT sufficient on its own, which run 36485906813 showed: under the
+  # `container_persistent: false` below, every tool call an agent turn makes carries a
+  # session task id, and `_resolve_task_host_cwd` deliberately refuses to derive a mount
+  # from TERMINAL_CWD for a session-scoped container (the env var is a launch artifact that
+  # outlives the session that set it, so reusing it could leak the previous session's
+  # directory). The model's own container therefore got the tmpfs. run_agent.sh appends the
+  # explicit `docker_volumes` binding below, which applies to every task id.
   docker_mount_cwd_to_workspace: true
   # No sandbox directory reused between sessions: a lane that measures what compaction
   # drops is worthless if the next phase can read the last phase's leftovers.
