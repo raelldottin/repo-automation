@@ -140,8 +140,13 @@ class TransportContractTests(unittest.TestCase):
 
             controls = sorted(sessions_dir.glob("*.controls.json"))
             self.assertEqual(1, len(controls))
-            self.assertEqual("stream-json", json.loads(controls[0].read_text(encoding="utf-8"))["transport"])
+            recorded = json.loads(controls[0].read_text(encoding="utf-8"))
+            self.assertEqual("stream-json", recorded["transport"])
             self.assertEqual([], sorted(sessions_dir.glob("*.usage.json")))
+            # Asking for a toolset is not being given it: Hermes' single-query mode answers
+            # BLOCKED to execute_code, so a probe's receipt has to name the tool it asked
+            # for and did not get.
+            self.assertEqual(["code_execution"], recorded["refused_tools"])
 
     def test_the_default_transport_is_unchanged_and_still_reports_usage(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -151,9 +156,14 @@ class TransportContractTests(unittest.TestCase):
             self.assertEqual("oneshot", controls["transport"])
             self.assertEqual(
                 ["terminal", "file", "code_execution", "todo"],
-                controls["toolsets"],
+                controls["requested_toolsets"],
                 "the transport switch must not disturb the pinned posture",
             )
+            # The other transport refuses execute_code. This one has not been observed
+            # refusing anything, which is a different claim from having been observed
+            # allowing everything.
+            self.assertEqual([], controls["refused_tools"])
+            self.assertIsNone(controls["effective_tools"])
 
     def test_an_unknown_transport_is_refused(self) -> None:
         script = REPO_ROOT / "automation" / "supervisor" / "run_agent.sh"

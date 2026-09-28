@@ -123,8 +123,6 @@ jobs:
           sys.path.insert(0, os.environ["RUNNER_TEMP"] + "/hermes-agent")
           from hermes_cli.config_defaults import DEFAULT_CONFIG
 
-          profile = yaml.safe_load(open("automation/supervisor/hermes-benchmark.yaml"))
-
           def unknown(node, defaults, prefix=""):
               for key, value in node.items():
                   path = f"{prefix}{key}"
@@ -133,11 +131,23 @@ jobs:
                   elif isinstance(value, dict):
                       yield from unknown(value, defaults[key], f"{path}.")
 
-          missing = list(unknown(profile, DEFAULT_CONFIG))
-          if missing:
-              print(f"::error::Keys absent from Hermes {os.environ['HERMES_REVISION']}: {missing}")
+          # Both files: run_agent.sh appends the cleanroom fragment to the benchmark
+          # profile, and a silently ignored `docker_network` is an agent with internet.
+          profiles = {}
+          for name in ("hermes-benchmark.yaml", "hermes-cleanroom.yaml"):
+              profiles[name] = yaml.safe_load(open(f"automation/supervisor/{name}"))
+              missing = list(unknown(profiles[name], DEFAULT_CONFIG))
+              if missing:
+                  print(f"::error::{name}: keys absent from Hermes {os.environ['HERMES_REVISION']}: {missing}")
+                  sys.exit(1)
+              print(f"{name}: every key resolves against {os.environ['HERMES_REVISION']}")
+
+          # The fragment is appended, not merged, so a top-level key in both files would
+          # leave YAML's last-one-wins silently discarding the benchmark profile's copy.
+          shared = set(profiles["hermes-benchmark.yaml"]) & set(profiles["hermes-cleanroom.yaml"])
+          if shared:
+              print(f"::error::Both profiles define {sorted(shared)}; appending would drop the benchmark profile's.")
               sys.exit(1)
-          print(f"benchmark config: every key resolves against {os.environ['HERMES_REVISION']}")
           PY
 
       # Preflight with the wrapper the benchmark actually calls, not with a hand-written
@@ -212,6 +222,27 @@ jobs:
               sys.exit(1)
           PY
 
+      # The inference environment itself, proved before any agent budget is spent: the
+      # official cleanroom image materializes, it ships a reference ./executable and the
+      # bundled documentation, the workspace is writable, and four different ways out of
+      # the container all fail. Every cell repeats this for its own instance and refuses
+      # the cell if it does not hold; this run-level check catches a missing Docker, a
+      # withdrawn image tag or a runner whose containers still have egress in 90 seconds
+      # rather than after a lane's worth of unusable results.
+      - name: Verify the ProgramBench cleanroom holds
+        if: inputs.probe != true
+        run: |
+          set -o pipefail
+          instance=$(echo "${{ inputs.instances }}" | awk '{print $1}')
+          if [ -z "$instance" ]; then
+            instance=$(uv run python -c "from automation.benchmark.instances import DEFAULT_SMOKE_INSTANCES as s; print(s[0])")
+          fi
+          uv run python -m automation.benchmark.cleanroom \
+            --instance "$instance" \
+            --workspace "$RUNNER_TEMP/cleanroom-preflight" \
+            --receipt "$RUNNER_TEMP/cleanroom-preflight.json" | tee /tmp/cleanroom.txt
+          printf '```\n%s\n```\n' "$(cat /tmp/cleanroom.txt)" >> "$GITHUB_STEP_SUMMARY"
+
       # --agent-env, by name, is the only way the key reaches a session: an agent run inherits
       # what run_agent.sh reads and nothing else, so this job's environment is not ambiently
       # readable by the model-authored commands a cell executes. Names only - NAME=value here
@@ -221,10 +252,10 @@ jobs:
         run: |
           if [ "${{ inputs.run_all }}" = "false" ] && [ -n "${{ inputs.instances }}" ]; then
             uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }} \
-              --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
+              --cleanroom --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
           else
             uv run python -m automation.benchmark all --run-dir out --all \
-              --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
+              --cleanroom --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
           fi
 
       # Lane E administers the canonical J-Space skill from a pinned external checkout.
@@ -278,7 +309,7 @@ jobs:
           # repeats x timeout; keep it under this job's 360-minute cap.
           uv run python -m automation.benchmark lanes --run-dir out --eval \
             --lanes ${{ inputs.lanes }} --repeats ${{ inputs.repeats }} \
-            --timeout ${{ inputs.timeout }} $SELECTION \
+            --timeout ${{ inputs.timeout }} $SELECTION --cleanroom \
             --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
 
       - name: Upload effectiveness report
@@ -297,6 +328,7 @@ jobs:
             out/**/rpi/*.json
             out/**/agent-sessions/*.json
             out/**/agent-sessions/*.log
+            out/**/cleanroom.json
             out/probe/probe.json
             out/probe/agent-sessions/*.stream.jsonl
           if-no-files-found: warn

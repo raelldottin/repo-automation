@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import tarfile
 import tempfile
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Mapping
 
 from automation.benchmark import adapter as benchmark_adapter
+from automation.benchmark import cleanroom
 from automation.benchmark import run as benchmark_run
 from automation.benchmark.adapter import SubmissionResult, SupervisorAgentAdapter, build_queue_data, build_slice_record
 from automation.benchmark import evalrunner
@@ -175,6 +177,54 @@ class AdapterTests(unittest.TestCase):
         # The agent was invoked with the rendered prompt + the workspace as repo root.
         self.assertIn("--prompt-file", captured["command"])
         self.assertIn("--slice-id", captured["command"])
+
+    def test_a_cleanroom_cell_hands_the_agent_the_reference_and_keeps_it_out_of_the_submission(self) -> None:
+        """The reference binary is the specification, never part of the answer.
+
+        ProgramBench's evaluator deletes ``./executable`` before it runs ``compile.sh``, so
+        shipping it changes no score - but the run is also read by a disqualification judge
+        looking for submissions that wrap the reference, and a tarball containing the
+        reference is the first thing that looks like one.
+        """
+        captured: dict[str, str] = {}
+
+        def fake_runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            captured["image"] = env[benchmark_adapter.SANDBOX_IMAGE_ENV]
+            (workspace / "compile.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            return 0
+
+        def fake_prepare(instance_id: str, workspace: Path, repository: str, **_: object):
+            captured["prepared"] = f"{instance_id} {repository}"
+            (workspace / "executable").write_bytes(b"ELF")
+            (workspace / "README.md").write_text("the spec\n", encoding="utf-8")
+            return cleanroom.CleanroomReceipt(
+                instance_id=instance_id,
+                image=cleanroom.image_for(instance_id),
+                image_id="sha256:d1ge57",
+                network_mode="none",
+                reference_executable=True,
+                workspace_writable=True,
+            )
+
+        adapter = SupervisorAgentAdapter(repo_root=self.repo_root, runner=fake_runner, cleanroom=True)
+        with unittest.mock.patch.object(benchmark_adapter, "prepare_cleanroom", fake_prepare):
+            with tempfile.TemporaryDirectory() as tmp:
+                out_tar = Path(tmp) / "submission.tar.gz"
+                result = adapter.produce_submission(self.task, out_tar)
+                with tarfile.open(out_tar, "r:gz") as tar:
+                    names = tar.getnames()
+                receipt = json.loads((out_tar.parent / benchmark_adapter.CLEANROOM_RECEIPT_FILENAME).read_text(encoding="utf-8"))
+
+        self.assertEqual(f"{self.task.instance_id} {self.task.repository}", captured["prepared"])
+        self.assertEqual(cleanroom.image_for(self.task.instance_id), captured["image"])
+        self.assertIn("compile.sh", names)
+        self.assertNotIn("executable", names)
+        # The documentation the agent read stays in: it is part of what the cell produced
+        # from, and the evaluator only cares about compile.sh and the sources.
+        self.assertIn("README.md", names)
+        self.assertEqual("none", receipt["network_mode"])
+        assert result.cleanroom is not None
+        self.assertEqual("sha256:d1ge57", result.cleanroom.image_id)
 
 
 class OrchestratorTests(unittest.TestCase):

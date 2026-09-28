@@ -17,6 +17,7 @@ across lanes.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -30,6 +31,8 @@ from typing import Callable, Mapping, Optional, Protocol
 
 from automation.context import build_context
 
+from .cleanroom import CleanroomReceipt
+from .cleanroom import prepare as prepare_cleanroom
 from .instances import TaskSpec
 from .strategies import (
     AGENT_TIMEOUT_RETURNCODE,
@@ -100,6 +103,7 @@ class SubmissionResult:
     workspace: Path
     returncode: int
     strategy: Optional[StrategyResult] = None
+    cleanroom: Optional[CleanroomReceipt] = None
 
 
 class AgentAdapter(Protocol):
@@ -184,10 +188,17 @@ def _subprocess_runner(command: str, workspace: Path, env: Mapping[str, str], ti
             return AGENT_TIMEOUT_RETURNCODE
 
 
-# Never graded: VCS metadata and the lane's own phase artifacts.
-EXCLUDED_FROM_SUBMISSION = frozenset({".git", RPI_DIR})
+# Never graded: VCS metadata, the lane's own phase artifacts, and whatever binary sits at
+# the graded path. The evaluator deletes ``./executable`` before running compile.sh either
+# way, but under a cleanroom workspace that file is ProgramBench's *reference* binary, and a
+# submission shipping it reads to the disqualification judge as wrapping the reference.
+EXCLUDED_FROM_SUBMISSION = frozenset({".git", RPI_DIR, "executable"})
 # Per-session agent reports, written next to the submission rather than into it.
 AGENT_SESSIONS_DIR = "agent-sessions"
+# What the sandbox was proved to be, written next to the submission it produced.
+CLEANROOM_RECEIPT_FILENAME = "cleanroom.json"
+# Read by run_agent.sh: the image the model-facing tools run inside, or nothing at all.
+SANDBOX_IMAGE_ENV = "REPO_AUTOMATION_HERMES_SANDBOX_IMAGE"
 # What was actually graded, kept when the tarball itself is not.
 SUBMISSION_MANIFEST_FILENAME = "submission.files.txt"
 
@@ -266,6 +277,7 @@ class SupervisorAgentAdapter:
         env: Optional[Mapping[str, str]] = None,
         runner: Optional[CommandRunner] = None,
         strategy: Optional[ExecutionStrategy] = None,
+        cleanroom: bool = False,
     ) -> None:
         self._repo_root = Path(repo_root)
         self._template = agent_command_template or _default_command_template(self._repo_root)
@@ -273,6 +285,7 @@ class SupervisorAgentAdapter:
         self._env = dict(env) if env is not None else None
         self._runner = runner or _subprocess_runner
         self._strategy = strategy or SliceContextStrategy()
+        self._cleanroom = cleanroom
 
     @property
     def lane(self) -> str:
@@ -295,6 +308,19 @@ class SupervisorAgentAdapter:
         control_dir = Path(tempfile.mkdtemp(prefix=f"pb-control-{task.instance_id}-"))
 
         environment = self._run_environment()
+        # The inference environment, before the first agent turn and proved rather than
+        # configured: the reference ``./executable`` and the image's bundled documentation
+        # land in the workspace, and the image the tools run inside is named to run_agent.sh.
+        # A cleanroom that fails its own preflight raises - an agent that can reach the
+        # upstream source is not attempting this benchmark, whatever it scores.
+        receipt = None
+        if self._cleanroom:
+            receipt = prepare_cleanroom(task.instance_id, workspace, task.repository)
+            environment[SANDBOX_IMAGE_ENV] = receipt.image
+            out_tar.parent.mkdir(parents=True, exist_ok=True)
+            (out_tar.parent / CLEANROOM_RECEIPT_FILENAME).write_text(
+                json.dumps(receipt.to_dict(), indent=2) + "\n", encoding="utf-8"
+            )
         # Beside the submission, never inside it: one usage + controls report per agent
         # session, so a result says which model answered and what it was allowed to do.
         # Absolute, because the agent runs with the workspace as its working directory and
@@ -323,4 +349,5 @@ class SupervisorAgentAdapter:
             workspace=workspace,
             returncode=strategy_result.returncode,
             strategy=strategy_result,
+            cleanroom=receipt,
         )

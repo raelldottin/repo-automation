@@ -260,6 +260,28 @@ case "$agent_runner" in
       exit 69
     fi
     cp "$hermes_config" "$HERMES_HOME/config.yaml"
+    # The model-facing sandbox, when the caller built one. The adapter materializes the
+    # ProgramBench cleanroom into the workspace and names the image here; TERMINAL_CWD
+    # above is that workspace, which Hermes bind-mounts at /workspace inside the image.
+    # Unset, the session runs on the local filesystem exactly as it always has.
+    sandbox_image="${REPO_AUTOMATION_HERMES_SANDBOX_IMAGE:-}"
+    sandbox_image_id=""
+    sandbox_backend="local"
+    if [[ -n "$sandbox_image" ]]; then
+      hermes_sandbox_config="$script_dir/hermes-cleanroom.yaml"
+      if [[ ! -f "$hermes_sandbox_config" ]]; then
+        echo "Hermes cleanroom config not found: $hermes_sandbox_config" >&2
+        exit 69
+      fi
+      {
+        printf '\n'
+        cat "$hermes_sandbox_config"
+        printf '  docker_image: "%s"\n' "$sandbox_image"
+      } >> "$HERMES_HOME/config.yaml"
+      sandbox_backend="docker"
+      # Which bytes ran, not which tag was requested: a tag is repointed, a digest is not.
+      sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image" 2>/dev/null || true)"
+    fi
     hermes_args=(--ignore-rules --in "$repo_root" --toolsets "$hermes_toolsets")
     if [[ "$hermes_transport" == "stream-json" ]]; then
       # `chat` is the only path that carries the JSONL emitter; --format implies --quiet and
@@ -282,12 +304,49 @@ case "$agent_runner" in
       fi
       # The usage report says what the session spent; it does not say what the session was
       # allowed to do. Record the controls beside it, from the same variables that set them,
-      # and hash the config so a cell states exactly which posture produced it.
-      config_sha="$(sha256_of "$hermes_config")"
-      printf '{"runner":"hermes","hermes_revision":"%s","config_profile":"kanban-benchmark-v1","config_sha256":"%s","safe_mode_env":true,"ignore_rules":true,"ignore_user_config":false,"toolsets":["terminal","file","code_execution","todo"],"transport":"%s","provider":"%s","model":"%s","slice_id":"%s","hermes_home":"%s","terminal_cwd":"%s"}\n' \
-        "${HERMES_REVISION:-unknown}" "$config_sha" "$hermes_transport" \
-        "${HERMES_INFERENCE_PROVIDER:-}" "${HERMES_INFERENCE_MODEL:-}" \
-        "$slice_id" "$HERMES_HOME" "$TERMINAL_CWD" > "$session_stem.controls.json"
+      # and hash the config so a cell states exactly which posture produced it. The hash is
+      # of the file Hermes loaded, not of the template it was copied from: under a cleanroom
+      # cell the sandbox block is appended after the copy, and a template hash would
+      # describe a configuration that never ran.
+      config_sha="$(sha256_of "$HERMES_HOME/config.yaml")"
+      # Requested is not effective. `--toolsets` is what this invocation asked for; Hermes'
+      # single-query mode refuses execute_code outright (the tool answers BLOCKED), while
+      # the --oneshot path sets HERMES_YOLO_MODE=1 and has not been observed refusing it.
+      # Neither is an observation of *this* session, so effective_tools stays null rather
+      # than restating the request as though it had been confirmed.
+      requested_toolsets="$(printf '%s' "$hermes_toolsets" | sed 's/[^,]*/"&"/g')"
+      if [[ "$hermes_transport" == "stream-json" ]]; then
+        refused_tools='["code_execution"]'
+        tool_observation="single-query mode refuses execute_code; observed on this transport, not in this session"
+      else
+        refused_tools='[]'
+        tool_observation="not observed: --oneshot leaves no tool-level transcript"
+      fi
+      cat > "$session_stem.controls.json" <<CONTROLS
+{"runner":"hermes",
+ "hermes_revision":"${HERMES_REVISION:-unknown}",
+ "config_profile":"kanban-benchmark-v1",
+ "config_sha256":"$config_sha",
+ "safe_mode_env":true,
+ "ignore_rules":true,
+ "ignore_user_config":false,
+ "requested_toolsets":[$requested_toolsets],
+ "effective_tools":null,
+ "refused_tools":$refused_tools,
+ "tool_observation":"$tool_observation",
+ "transport":"$hermes_transport",
+ "provider":"${HERMES_INFERENCE_PROVIDER:-}",
+ "model":"${HERMES_INFERENCE_MODEL:-}",
+ "sandbox":{"backend":"$sandbox_backend",
+            "image":"$sandbox_image",
+            "image_id":"$sandbox_image_id",
+            "network":"$([[ "$sandbox_backend" == docker ]] && echo none || echo host)",
+            "workspace":"$([[ "$sandbox_backend" == docker ]] && echo /workspace || echo "$TERMINAL_CWD")",
+            "credentials_forwarded":[]},
+ "slice_id":"$slice_id",
+ "hermes_home":"$HERMES_HOME",
+ "terminal_cwd":"$TERMINAL_CWD"}
+CONTROLS
     fi
     if [[ -z "$session_stem" ]]; then
       exec "$hermes_bin" "${hermes_args[@]}" "$hermes_prompt_flag" "$(cat "$prompt_file")"

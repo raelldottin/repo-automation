@@ -22,11 +22,14 @@ the program's hidden test suite. The report (`effectiveness-report.json`) aggreg
 | `automation/benchmark/adapter.py` | Drives the supervisor loop (`run_next` + `run_agent.sh`) to rebuild a program in a local workspace and archive it as `submission.tar.gz` | No |
 | `automation/benchmark/evalrunner.py` | `ProgramBenchEvalRunner` shells out to `programbench eval` (authoritative test run) | **Yes** (amd64) |
 | `automation/benchmark/scoring.py` | Reduces eval JSON to the effectiveness report | No |
-| `automation/benchmark/run.py` | CLI + orchestrator (`run` / `eval` / `score` / `all`) | only `eval`/`all` |
+| `automation/benchmark/cleanroom.py` | Materializes ProgramBench's inference cleanroom into the cell workspace and proves what is in it | **Yes** (amd64) |
+| `automation/benchmark/run.py` | CLI + orchestrator (`run` / `eval` / `score` / `all`) | only `eval`/`all`, and `--cleanroom` |
 
-The agent rebuilds on the local filesystem; ProgramBench's cleanroom Docker images are
-used only by the `eval` step, so everything except the authoritative test run is
-container-free and unit-tested with no Docker or LLM.
+By default the agent rebuilds on the local filesystem and Docker is used only by the
+`eval` step. With `--cleanroom` the agent's own tools run inside ProgramBench's cleanroom
+image too — the inference environment the benchmark is supposed to measure, described
+below. Either way the scoring, orchestration and adapter code is unit-tested with no
+Docker and no LLM.
 
 ## Running it
 
@@ -52,7 +55,7 @@ export HERMES_INFERENCE_PROVIDER=nvidia
 export HERMES_INFERENCE_MODEL=moonshotai/kimi-k3
 export NVIDIA_API_KEY="$NVIDIA_API_KEY"
 
-uv run python -m automation.benchmark all --run-dir out --all \
+uv run python -m automation.benchmark all --run-dir out --all --cleanroom \
   --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
 ```
 
@@ -189,12 +192,79 @@ Eval containers are given the host's CPU count, capped at 10. Docker refuses a c
 that asks for more CPUs than exist, which fails every container and produces no results,
 so `--docker-cpus` only ever lowers that default.
 
+## The inference environment (`--cleanroom`)
+
+ProgramBench is a *rebuild* benchmark: the model gets a compiled program and whatever
+documentation ships beside it, and has to produce sources that compile to a binary passing
+the program's own black-box tests. Everything about that task is destroyed by an agent that
+can read the upstream repository, so the environment is part of the measurement, not
+plumbing around it. `--cleanroom` makes the cell run inference in ProgramBench's own
+`task_cleanroom_v6` image instead of an empty local directory, and refuses the cell if the
+environment does not match the contract.
+
+What each cell does before its first agent turn (`automation/benchmark/cleanroom.py`):
+
+1. Resolves the official image for the instance —
+   `programbench/INSTANCE:task_cleanroom_v6`, where `INSTANCE` is the instance id with
+   its `__` rewritten as `_1776_` (Docker repository names cannot hold `__`) — and records
+   the image id, so `run.json` names the bytes that were used, not a tag that can move.
+2. Copies the image's entire `/workspace` into the cell workspace: the reference
+   `./executable` and the bundled documentation, nothing curated, nothing added.
+3. Runs a probe container from that same image, on that same workspace, with
+   `--network=none`, and reads back what it found: the executable is executable, the
+   workspace is writable, and `curl`, `wget`, `git ls-remote` and `getent hosts` all fail.
+   The network mode is then read off the container that ran the probes rather than
+   trusted from the flags that were passed to it.
+4. Refuses the cell — `CleanroomError`, before any tokens are spent — on a missing
+   reference binary, absent documentation, a container that is not `NetworkMode=none`,
+   any egress attempt that *succeeded*, or an image too thin for any probe to run at all.
+   A cleanroom that could not be tested is not a tested cleanroom.
+
+The receipt lands next to the submission as `cleanroom.json` and inside each lane cell's
+record, so a scored result can be checked afterwards against the environment that produced
+it.
+
+The agent's session is then held in the same image. `run_agent.sh` appends
+`automation/supervisor/hermes-cleanroom.yaml` to the Hermes profile and pins
+`terminal.docker_image` to the instance's cleanroom image; at the pinned revision the
+terminal, file and `code_execution` tools all route through one `docker exec` container,
+so the three tool families the model is given share a single air-gapped workspace by
+construction. `docker_network: false` is `--network=none`, and Hermes refuses to reuse an
+existing networked container while it is set.
+
+Credentials stay host-side: `NVIDIA_API_KEY` is read by the Hermes process, which runs
+*outside* the sandbox, and `docker_forward_env: []` / `docker_env: {}` keep the container's
+environment empty of it. The controls receipt records `credentials_forwarded: []` for this
+reason — the model-facing tools never see the key, and `run.json` never records it.
+
+Submissions are archived from the workspace afterwards, host-side, with `.git`, the
+harness's own `rpi/` directory and the reference `executable` excluded: the binary the
+agent was given back is not part of what it built. Evaluation is unchanged — the official
+ProgramBench evaluator, in the official `task_v6` eval image.
+
+Requirements: Docker and an x86_64 host (the images are linux/amd64 only). Without
+`--cleanroom` the agent runs against a local checkout, which is useful for harness
+development and is not a ProgramBench inference result.
+
+One instance's environment can be checked on its own, without spending any agent budget:
+
+```shell
+uv run python -m automation.benchmark.cleanroom \
+  --instance abishekvashok__cmatrix.5c082c6 \
+  --workspace /tmp/cleanroom --receipt /tmp/cleanroom.json
+```
+
 ## In production (CI)
 
 `.github/workflows/effectiveness-benchmark.yml` runs the full set on `ubuntu-latest`
 (native x86_64) on a nightly schedule and on manual dispatch. It requires the
 repository secret **`NVIDIA_API_KEY`** and uploads `effectiveness-report.json` plus the
-per-instance `*.eval.json` files as a build artifact. The workflow is repo-specific and
+per-instance `*.eval.json` and `cleanroom.json` files as a build artifact. Benchmark and
+lane runs pass `--cleanroom`. Three things are proved before any agent budget is spent:
+every key in both Hermes profiles resolves against the pinned revision's own defaults
+(Hermes ignores keys it does not know, and a silently ignored `docker_network` is an agent
+with internet access), one trivial agent session completes and writes where it was told to,
+and one instance's cleanroom materializes and fails all four egress probes. The workflow is repo-specific and
 is not part of the reusable sync manifest.
 
 ## Reading the report
@@ -543,11 +613,12 @@ instrumentation and at least three before believing a result.
 
 ### Known limits
 
-- **ProgramBench is greenfield.** The workspace starts empty, so lane C's Research phase
-  studies the program's observable contract rather than an existing codebase. `C - B`
-  therefore measures RPI's value for requirements analysis, *not* for brownfield code
-  exploration, which is the case RPI was designed for. A brownfield fixture is needed
-  before generalising the result.
+- **ProgramBench is greenfield.** The workspace holds a compiled reference and its
+  documentation, never sources, so lane C's Research phase studies the program's
+  observable contract rather than an existing codebase. `C - B` therefore measures RPI's
+  value for requirements analysis, *not* for brownfield code exploration, which is the
+  case RPI was designed for. A brownfield fixture is needed before generalising the
+  result.
 - **Tokens are recorded but not compared.** Hermes sessions write token counts into
   `run.json`; the comparison still reports wall clock and agent invocations only, because
   the reported metric has to mean the same thing for every runner the seam accepts.
