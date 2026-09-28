@@ -398,7 +398,7 @@ class ProbeArtifactLinkTests(unittest.TestCase):
 
             # A silent omission reads as "the agent wrote nothing". This one reads as a
             # finding about the session, which is the only thing a probe produces.
-            self.assertEqual(["host-file.json"], record["rpi"]["skipped_symlinks"])
+            self.assertEqual(["host-file.json"], record["rpi"]["skipped_links"])
             self.assertEqual(["research.json"], record["rpi"]["copied"])
 
     def test_a_symlinked_rpi_directory_is_not_followed_at_all(self) -> None:
@@ -471,7 +471,7 @@ class ProbeArtifactLinkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             out = Path(raw) / "probe"
             record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
-            self.assertEqual([], record["rpi"]["skipped_symlinks"])
+            self.assertEqual([], record["rpi"]["skipped_links"])
             self.assertEqual([], record["rpi"]["skipped_non_files"])
             self.assertFalse(record["rpi"]["container_skipped"])
 
@@ -583,3 +583,80 @@ class ProbeOutputOwnershipTests(unittest.TestCase):
             self._run(out)
             self.assertTrue((out / PROBE_FILENAME).is_file())
             self.assertTrue((out / "rpi" / "research.json").is_file())
+
+
+class ProbeHardLinkTests(unittest.TestCase):
+    """The third way host content reaches the run directory.
+
+    A hard link is not a symlink and ``is_file()`` is True for it, so both existing
+    per-entry guards pass it straight through and the host's bytes are written out and
+    listed under ``copied`` as though the session had produced them. It grants no read
+    authority the agent lacks - HOME is already inherited - so the harm is to the evidence,
+    not to the host: the record asserts a clean collection of something it did not collect.
+    """
+
+    INSTANCE = "abishekvashok__cmatrix.5c082c6"
+
+    def test_a_hardlinked_artifact_is_not_laundered_into_the_collected_evidence(self) -> None:
+        from automation.benchmark.probe import run_probe
+
+        with tempfile.TemporaryDirectory() as raw:
+            host = Path(raw) / "outside" / "id_rsa"
+            host.parent.mkdir(parents=True)
+            host.write_text("host sentinel, not agent evidence\n", encoding="utf-8")
+            out = Path(raw) / "probe"
+
+            def runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+                rpi = workspace / ".rpi"
+                rpi.mkdir(parents=True, exist_ok=True)
+                (rpi / "research.json").write_text("{}", encoding="utf-8")
+                os.link(host, rpi / "id_rsa")
+                Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+                return 0
+
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+
+            self.assertFalse(
+                (out / "rpi" / "id_rsa").exists(),
+                "host content reached the run directory through a hard link",
+            )
+            self.assertEqual(["id_rsa"], record["rpi"]["skipped_links"])
+            # Skipping is not refusing: the session's own artifact beside it still arrives.
+            self.assertEqual(["research.json"], record["rpi"]["copied"])
+            self.assertEqual("host sentinel, not agent evidence\n", host.read_text(encoding="utf-8"))
+
+
+class ProbeSummaryRenderingTests(unittest.TestCase):
+    """Agent-chosen names are printed to an operator. ``probe.json`` is safe because
+    ``json.dumps`` escapes; the printed summary joins the names raw, so a name carrying a
+    newline writes whole lines of its own into the operator's answer."""
+
+    INSTANCE = "abishekvashok__cmatrix.5c082c6"
+
+    FORGED = "artifact      present (9999 chars, schema valid)"
+
+    def test_a_filename_cannot_forge_a_summary_line(self) -> None:
+        from automation.benchmark.probe import run_probe, summarize
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            # Trailing newline too: the attacker owns the whole name, so the line the
+            # summary was going to append lands on a line of its own rather than as a tail.
+            name = f"decoy\n{self.FORGED}\n"
+
+            def runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+                (workspace / ".rpi" / name).mkdir(parents=True)
+                Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+                return 0
+
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+            summary = summarize(record)
+
+            # The run this describes wrote no artifact at all.
+            self.assertFalse(record["artifact"]["present"])
+            self.assertFalse(
+                self.FORGED in summary.splitlines(),
+                "an agent-chosen filename wrote a whole line into the operator summary",
+            )
+            # Escaped for printing, kept verbatim in the record: the real name is evidence.
+            self.assertEqual([name], record["rpi"]["skipped_non_files"])

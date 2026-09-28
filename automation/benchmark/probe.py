@@ -169,7 +169,7 @@ def run_probe(
 
     data, text = read_artifact(workspace, RESEARCH_ARTIFACT)
     copied: list[str] = []
-    skipped_symlinks: list[str] = []
+    skipped_links: list[str] = []
     skipped_non_files: list[str] = []
     rpi_source = workspace / RPI_DIR
     # `.rpi` is agent-created, container included. `is_dir()` follows links, so a session that
@@ -188,8 +188,15 @@ def run_probe(
             for artifact in sorted(rpi_source.iterdir()):
                 # Skipped rather than refused, both here and above: refusing would let a
                 # session halt its own diagnostic by leaving a link or a directory behind.
-                if artifact.is_symlink():
-                    skipped_symlinks.append(artifact.name)
+                # One predicate, because the two cases differ only in which call reveals
+                # them: a hard link is not a symlink and is_file() is True for it, so it
+                # would be copied out and listed under `copied` as though the session had
+                # written it. That launders host bytes into the evidence - the record would
+                # assert a clean collection of something the session never produced.
+                # `is_file()` guards the link count because a directory's own entries give
+                # it st_nlink >= 2; only a regular file with more than one name is a hard link.
+                if artifact.is_symlink() or (artifact.is_file() and artifact.lstat().st_nlink > 1):
+                    skipped_links.append(artifact.name)
                     continue
                 if not artifact.is_file():
                     # read_bytes() on a directory raised mid-loop, and the cleanup below then
@@ -218,7 +225,7 @@ def run_probe(
         # "the agent wrote nothing", which is the question the probe exists to answer.
         "rpi": {
             "copied": copied,
-            "skipped_symlinks": skipped_symlinks,
+            "skipped_links": skipped_links,
             "skipped_non_files": skipped_non_files,
             "container_skipped": container_skipped,
         },
@@ -247,6 +254,17 @@ def run_probe(
     return record
 
 
+def _rendered(names: list[str]) -> str:
+    """Agent-chosen names, escaped at the point they are printed.
+
+    ``probe.json`` is already safe - ``json.dumps`` escapes - but the summary joined these
+    raw, so a name carrying a newline wrote whole lines of its own into the operator's
+    answer, including lines that read exactly like the probe's own verdict. Escaping here
+    rather than at collection keeps the real name in the record, where it is evidence.
+    """
+    return ", ".join(repr(name) for name in names)
+
+
 def summarize(record: dict[str, Any]) -> str:
     """The four questions, answered in the order the decision tree asks them."""
     stream, artifact, phase = record["stream"], record["artifact"], record["phase_result"]
@@ -263,10 +281,10 @@ def summarize(record: dict[str, Any]) -> str:
     # wrote nothing when it wrote something the probe declined to follow.
     if rpi["container_skipped"]:
         lines.append(f"skipped links {RPI_DIR} itself is a symlink, so nothing under it was collected")
-    if rpi["skipped_symlinks"]:
-        lines.append(f"skipped links {', '.join(rpi['skipped_symlinks'])} (symlinks in {RPI_DIR}, not followed)")
+    if rpi["skipped_links"]:
+        lines.append(f"skipped links {_rendered(rpi['skipped_links'])} (links in {RPI_DIR}, not followed)")
     if rpi["skipped_non_files"]:
-        lines.append(f"skipped dirs  {', '.join(rpi['skipped_non_files'])} (not regular files in {RPI_DIR})")
+        lines.append(f"skipped dirs  {_rendered(rpi['skipped_non_files'])} (not regular files in {RPI_DIR})")
     mentions = stream["artifact_mentions"]
     named = f"{len(mentions)} events name {RESEARCH_ARTIFACT}" if mentions else "none"
     lines.append(f"write attempt {named}")

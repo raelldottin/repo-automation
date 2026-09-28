@@ -414,7 +414,13 @@ sees a link. Entries that are not regular files are skipped too, which is the sa
 also stops a directory in `.rpi` from aborting the copy and taking the already-collected
 artifacts with it.
 
-Each skip is named in `probe.json` under `rpi.skipped_symlinks`, `rpi.skipped_non_files` and
+Hard links are skipped by the same predicate. A hard link is not a symlink and `is_file()`
+is true for it, so neither existing check saw one: the host's bytes were copied out and
+listed under `rpi.copied` as though the session had written them. It grants no read
+authority the agent lacks - `HOME` is inherited either way - so what it cost was the
+evidence, which claimed a clean collection of something the session never produced.
+
+Each skip is named in `probe.json` under `rpi.skipped_links`, `rpi.skipped_non_files` and
 `rpi.container_skipped`, and printed in the summary. The probe collects what a session
 produced; dereferencing a link the session left would hand an evidence collector read
 authority over the whole host filesystem, which is not what it is for. Skipping rather than
