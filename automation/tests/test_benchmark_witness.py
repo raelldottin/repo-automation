@@ -1,4 +1,4 @@
-"""The container the agent got, not the container we asked for.
+"""The containers the agent got, not the container we asked for.
 
 Every test drives the witness against a stand-in for Docker, because the fact under test is
 what the witness *concludes* from what the daemon reports - and what it has to conclude
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from automation.benchmark.witness import WITNESS_SUFFIX, SandboxWitness
 IMAGE = "programbench/abishekvashok_1776_cmatrix.5c082c6:task_cleanroom_v6"
 IMAGE_ID = "sha256:4ef6d754"
 CONTAINER = "c0ffee" * 10
+PROBE_CONTAINER = "decade" * 10
 
 
 class FakeDocker:
@@ -24,6 +26,7 @@ class FakeDocker:
 
     def __init__(self, *, containers: list[str], inspect: dict) -> None:
         self.containers = containers
+        # One record per container id, or one record for whatever is asked about.
         self.inspect = inspect
         self.calls: list[list[str]] = []
 
@@ -32,32 +35,48 @@ class FakeDocker:
         if argv[1] == "ps":
             return 0, "".join(f"{container}\n" for container in self.containers), ""
         if argv[1] == "inspect":
-            return 0, json.dumps(self.inspect) + "\n", ""
+            record = self.inspect.get(argv[-1], self.inspect) if self.inspect else {}
+            return 0, json.dumps(record) + "\n", ""
         raise AssertionError(f"unexpected docker call: {argv}")
 
 
-def inspected(workspace: Path, **overrides) -> dict:
+def inspected(workspace: Path, *, container: str = CONTAINER, task_id: str = "default", **overrides) -> dict:
     raw = {
-        "container_id": CONTAINER,
+        "container_id": container,
         "created_at": "2026-09-28T12:14:57.1Z",
         "image_ref": IMAGE,
         "image_id": IMAGE_ID,
         "network_mode": "none",
         "mounts": [{"Destination": "/workspace", "Source": str(workspace), "RW": True, "Type": "bind"}],
-        "labels": {"hermes-agent": "1", "hermes-task-id": "default", "org.opencontainers.image.title": "cmatrix"},
+        "labels": {"hermes-agent": "1", "hermes-task-id": task_id, "org.opencontainers.image.title": "cmatrix"},
     }
     raw.update(overrides)
     return raw
 
 
 class WitnessTests(unittest.TestCase):
-    def watch(self, docker: FakeDocker, workspace: Path, sessions: Path, *, creates: bool = True) -> SandboxWitness:
-        """Run one 'session' that creates its container the way Hermes does: partway in."""
+    def watch(
+        self,
+        docker: FakeDocker,
+        workspace: Path,
+        sessions: Path,
+        *,
+        creates: tuple[str, ...] = (CONTAINER,),
+        removes: bool = False,
+    ) -> SandboxWitness:
+        """Run one 'session' that creates its containers the way Hermes does: partway in."""
         witness = SandboxWitness(sessions, workspace, IMAGE, IMAGE_ID, run=docker, poll_seconds=0.01)
 
         def session(command, workspace_arg, env, timeout) -> int:
-            if creates:
-                docker.containers.append(CONTAINER)
+            docker.containers.extend(creates)
+            if removes:
+                # What `docker_persist_across_processes: false` does at exit, once the
+                # witness has seen what it is there to see.
+                deadline = time.monotonic() + 5
+                while len(witness.containers) < len(creates) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                for container in creates:
+                    docker.containers.remove(container)
             return 0
 
         witness.wrap(session)("hermes", workspace, {}, 300)
@@ -76,19 +95,76 @@ class WitnessTests(unittest.TestCase):
             (sessions / "20260928T121455Z-3087.controls.json").write_text("{}", encoding="utf-8")
             docker = FakeDocker(containers=[], inspect=inspected(workspace))
 
-            witness = self.watch(docker, workspace, sessions)
+            witness = self.watch(docker, workspace, sessions, removes=True)
 
             self.assertEqual([], witness.violations)
             # Named for the session that created it: run_agent.sh writes its controls
             # report before it launches the agent, so the newest one names this session.
-            record = json.loads((sessions / f"20260928T121455Z-3087{WITNESS_SUFFIX}").read_text(encoding="utf-8"))
-            self.assertTrue(record["observed"])
+            receipt = json.loads((sessions / f"20260928T121455Z-3087{WITNESS_SUFFIX}").read_text(encoding="utf-8"))
+            self.assertTrue(receipt["observed"])
+            self.assertTrue(receipt["default_backend_verified"])
+            self.assertTrue(receipt["default_backend_removed_after_exit"])
+            record = receipt["containers"][0]
+            self.assertEqual("default", record["task_id"])
             self.assertFalse(record["existed_in_baseline"])
             self.assertEqual(CONTAINER, record["container_id"])
             self.assertEqual(IMAGE_ID, record["image_id"])
             self.assertEqual("none", record["network_mode"])
             self.assertEqual({"source": str(workspace), "destination": "/workspace", "rw": True}, record["workspace_mount"])
             self.assertEqual({"hermes-agent": "1", "hermes-task-id": "default"}, record["labels"])
+
+    def test_every_backend_the_session_built_is_recorded_not_just_the_first(self) -> None:
+        # Hermes builds one container per task id: the system prompt's own probe gets
+        # `prompt-backend-probe`, and the tools the model calls get `default`. The probe's
+        # container appears first, so first-container-wins recorded the one that proves
+        # nothing about the backend serving terminal, file and code_execution.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(
+                containers=[],
+                inspect={
+                    PROBE_CONTAINER: inspected(workspace, container=PROBE_CONTAINER, task_id="prompt-backend-probe"),
+                    CONTAINER: inspected(workspace),
+                },
+            )
+
+            witness = self.watch(docker, workspace, sessions, creates=(PROBE_CONTAINER, CONTAINER))
+
+            receipt = self.written(sessions)
+            self.assertEqual(
+                ["prompt-backend-probe", "default"], sorted((r["task_id"] for r in receipt["containers"]), reverse=True)
+            )
+            self.assertTrue(receipt["default_backend_verified"])
+            self.assertEqual([], witness.violations)
+
+    def test_a_session_that_only_built_the_prompt_probe_has_not_proved_the_default_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            probe = inspected(workspace, container=PROBE_CONTAINER, task_id="prompt-backend-probe")
+            docker = FakeDocker(containers=[], inspect={PROBE_CONTAINER: probe})
+
+            self.watch(docker, workspace, sessions, creates=(PROBE_CONTAINER,))
+
+            receipt = self.written(sessions)
+            self.assertTrue(receipt["observed"])
+            self.assertFalse(receipt["default_backend_verified"])
+            self.assertIsNone(receipt["default_backend_removed_after_exit"])
+
+    def test_a_container_that_outlives_its_process_is_recorded_as_still_reusable(self) -> None:
+        # The runtime reading of `docker_persist_across_processes: false`: a container the
+        # daemon still lists is one the next process attaches to by label.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(containers=[], inspect=inspected(workspace))
+
+            self.watch(docker, workspace, sessions, removes=False)
+
+            receipt = self.written(sessions)
+            self.assertFalse(receipt["default_backend_removed_after_exit"])
+            self.assertFalse(receipt["containers"][0]["removed_after_exit"])
 
     def test_the_container_environment_is_never_asked_for(self) -> None:
         # The provider key lives in the agent's environment. The witness reads the container
@@ -110,7 +186,9 @@ class WitnessTests(unittest.TestCase):
             witness = self.watch(docker, workspace, sessions)
 
             self.assertIn("NetworkMode='bridge'", witness.violations[0])
-            self.assertTrue(self.written(sessions)["observed"])
+            receipt = self.written(sessions)
+            self.assertTrue(receipt["observed"])
+            self.assertFalse(receipt["default_backend_verified"])
 
     def test_a_container_running_another_image_is_a_hard_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -159,10 +237,19 @@ class WitnessTests(unittest.TestCase):
             workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
             workspace.mkdir()
             docker = FakeDocker(containers=[], inspect={})
-            witness = self.watch(docker, workspace, sessions, creates=False)
+            witness = self.watch(docker, workspace, sessions, creates=())
 
             self.assertEqual([], witness.violations)
-            self.assertEqual({"observed": False, "existing_containers": [], "violations": []}, self.written(sessions))
+            self.assertEqual(
+                {
+                    "observed": False,
+                    "default_backend_verified": False,
+                    "default_backend_removed_after_exit": None,
+                    "existing_containers": [],
+                    "containers": [],
+                },
+                self.written(sessions),
+            )
 
     def test_a_session_that_reused_an_existing_container_is_a_hard_failure(self) -> None:
         # Reuse leaves no new container, so it looks exactly like "no container" except for
@@ -171,7 +258,7 @@ class WitnessTests(unittest.TestCase):
             workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
             workspace.mkdir()
             docker = FakeDocker(containers=["leftover-from-an-earlier-process"], inspect={})
-            witness = self.watch(docker, workspace, sessions, creates=False)
+            witness = self.watch(docker, workspace, sessions, creates=())
 
             self.assertIn("no container was created and 1 Hermes container(s) were already present", witness.violations[0])
             self.assertEqual(["leftover-from-an-earlier-process"], self.written(sessions)["existing_containers"])
@@ -183,9 +270,24 @@ class WitnessTests(unittest.TestCase):
             docker = FakeDocker(containers=["someone-elses"], inspect=inspected(workspace))
             witness = self.watch(docker, workspace, sessions)
 
-            record = self.written(sessions)
-            self.assertEqual(CONTAINER, record["container_id"])
+            receipt = self.written(sessions)
+            self.assertEqual([CONTAINER], [record["container_id"] for record in receipt["containers"]])
             self.assertEqual([], witness.violations)
+
+    def test_the_probe_names_its_own_receipt_rather_than_borrowing_a_session_s(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(containers=[], inspect=inspected(workspace))
+            witness = SandboxWitness(sessions, workspace, IMAGE, IMAGE_ID, run=docker, poll_seconds=0.01, stem="sandbox-probe")
+
+            def session(command, workspace_arg, env, timeout) -> int:
+                docker.containers.append(CONTAINER)
+                return 0
+
+            witness.wrap(session)("probe", workspace, {}, 300)
+
+            self.assertTrue((sessions / f"sandbox-probe{WITNESS_SUFFIX}").is_file())
 
 
 if __name__ == "__main__":

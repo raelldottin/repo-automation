@@ -1,13 +1,18 @@
-"""Watch the container the agent was actually given, while the agent still has it.
+"""Watch the containers the agent was actually given, while the agent still has them.
 
 ``cleanroom.py`` proves the image and the workspace before the cell starts. That is a
 different fact from the one this module records: a Hermes that reuses a container from an
 earlier process, or attaches one to a bridge network, leaves the preflight receipt entirely
 true and the inference contaminated anyway. Only the running container answers it.
 
-So the observation happens while the session is alive and is written the moment the
+So the observation happens while the session is alive and is written the moment each
 container appears. A cell killed at its budget ceiling takes its whole process group with
 it, and a witness that summarized at the end would have nothing to summarize.
+
+Every new container, not the first one. Hermes builds one backend per ``task_id``: the
+system prompt's own probe gets ``prompt-backend-probe``, and the terminal, file and
+code_execution tools the model calls get ``default``. First-container-wins recorded the
+probe's and hid the one that matters.
 
 What is never recorded: the container's environment. The inspect format below does not ask
 for ``.Config.Env``, so the provider key cannot reach this process, let alone the artifact.
@@ -20,7 +25,7 @@ import os
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Any, Generator, Optional
 
 from .cleanroom import NETWORK_MODE, WORKSPACE_DIR, DockerRun, _subprocess_docker
 
@@ -28,6 +33,10 @@ from .cleanroom import NETWORK_MODE, WORKSPACE_DIR, DockerRun, _subprocess_docke
 # a container running the wrong image is exactly one of the things this has to catch, and
 # filtering it out of the listing would hide it.
 HERMES_LABEL = "hermes-agent=1"
+# The label Hermes writes its backend key to, and the key every ordinary tool call resolves
+# to. `terminal_tool(..., task_id=None)` -> `_resolve_container_task_id` -> "default".
+TASK_ID_LABEL = "hermes-task-id"
+DEFAULT_TASK_ID = "default"
 # The agent's first tool call is what creates the container, so the wait is the model's
 # first turn - seconds to a minute - and the poll is cheap.
 POLL_SECONDS = 0.5
@@ -58,7 +67,7 @@ def _hermes_containers(run: DockerRun) -> set[str]:
 
 
 def _violations(record: dict[str, object], image_id: str, workspace: Path) -> list[str]:
-    """What, in the container the agent got, disqualifies the cell."""
+    """What, in a container the agent got, disqualifies the cell."""
     failures = []
     if record.get("image_id") != image_id:
         failures.append(f"the agent's container runs {record.get('image_id')}, not the cleanroom image {image_id}")
@@ -79,7 +88,7 @@ def _violations(record: dict[str, object], image_id: str, workspace: Path) -> li
 
 
 class SandboxWitness:
-    """One record per agent session of the container Docker actually handed it."""
+    """Every container Docker handed one agent session, recorded as that session runs."""
 
     def __init__(
         self,
@@ -90,6 +99,7 @@ class SandboxWitness:
         *,
         run: Optional[DockerRun] = None,
         poll_seconds: float = POLL_SECONDS,
+        stem: Optional[str] = None,
     ) -> None:
         self._sessions_dir = Path(sessions_dir)
         self._workspace = Path(workspace).resolve()
@@ -97,8 +107,30 @@ class SandboxWitness:
         self._image_id = image_id
         self._run = run or _subprocess_docker
         self._poll_seconds = poll_seconds
-        self.records: list[dict[str, object]] = []
+        self._stem = stem
+        self._baseline: set[str] = set()
+        self._seen: set[str] = set()
+        self.containers: list[dict[str, object]] = []
         self.violations: list[str] = []
+
+    @property
+    def receipt(self) -> dict[str, object]:
+        """One structure, whatever happened: no container, one, or one per backend."""
+        default = [record for record in self.containers if record.get("task_id") == DEFAULT_TASK_ID]
+        removed = [record.get("removed_after_exit") for record in default]
+        return {
+            "observed": bool(self.containers),
+            # The backend every ordinary terminal, file and code_execution call resolves to.
+            # A session that only ever created the system prompt's probe backend has not
+            # shown that the tools the model calls run in the cleanroom.
+            "default_backend_verified": bool(default) and not any(record["violations"] for record in default),
+            # The direct runtime reading of `docker_persist_across_processes: false`: the
+            # container is gone once the process that made it is, so nothing can attach to
+            # it next time. Null until the session has exited.
+            "default_backend_removed_after_exit": all(removed) if removed and None not in removed else None,
+            "existing_containers": sorted(self._baseline),
+            "containers": self.containers,
+        }
 
     def wrap(self, runner):
         """The session runner, with the witness watching for as long as the session runs."""
@@ -111,53 +143,42 @@ class SandboxWitness:
 
     @contextmanager
     def watching(self) -> Generator[None, None, None]:
-        baseline = _hermes_containers(self._run)
+        self._baseline = _hermes_containers(self._run)
         stop = threading.Event()
-        thread = threading.Thread(target=self._watch, args=(baseline, stop), daemon=True)
+        thread = threading.Thread(target=self._watch, args=(stop,), daemon=True)
         thread.start()
         try:
             yield
         finally:
             stop.set()
             thread.join()
+            self._after_exit()
 
-    def _watch(self, baseline: set[str], stop: threading.Event) -> None:
+    def _watch(self, stop: threading.Event) -> None:
         while True:
-            if self._observe(baseline):
-                return
+            self._observe()
             if stop.wait(self._poll_seconds):
                 # One last look before giving up: `docker ps -a` still lists a container
                 # that has exited, so a session shorter than one poll interval is not a
                 # session whose container went unobserved.
-                if not self._observe(baseline):
-                    # Reuse is invisible from the outside - it leaves no new container - so
-                    # a session that created none while one of Hermes's was already lying
-                    # around is the shape of it.
-                    violations = (
-                        [f"no container was created and {len(baseline)} Hermes container(s) were already present"]
-                        if baseline
-                        else []
-                    )
-                    self._write(
-                        {"observed": False, "existing_containers": sorted(baseline), "violations": violations},
-                        violations,
-                    )
+                self._observe()
                 return
 
-    def _observe(self, baseline: set[str]) -> bool:
-        appeared = sorted(_hermes_containers(self._run) - baseline)
-        if not appeared:
-            return False
-        returncode, stdout, _ = self._run(["docker", "inspect", "--format", _INSPECT_FORMAT, appeared[0]])
-        if returncode != 0:
-            return False
-        raw = json.loads(stdout.strip() or "{}")
-        mount = next(
-            (entry for entry in raw.get("mounts") or [] if entry.get("Destination") == WORKSPACE_DIR),
-            None,
-        )
+    def _observe(self) -> None:
+        for container in sorted(_hermes_containers(self._run) - self._baseline - self._seen):
+            self._seen.add(container)
+            returncode, stdout, _ = self._run(["docker", "inspect", "--format", _INSPECT_FORMAT, container])
+            if returncode != 0:
+                # Gone between the listing and the inspect. Not seen again, and not claimed.
+                continue
+            self._record(json.loads(stdout.strip() or "{}"))
+
+    def _record(self, raw: dict[str, Any]) -> None:
+        mounts = raw.get("mounts") or []
+        mount = next((entry for entry in mounts if entry.get("Destination") == WORKSPACE_DIR), None)
+        labels = {key: value for key, value in (raw.get("labels") or {}).items() if key.startswith("hermes")}
         record: dict[str, object] = {
-            "observed": True,
+            "task_id": labels.get(TASK_ID_LABEL),
             "container_id": raw.get("container_id"),
             "created_at": raw.get("created_at"),
             "requested_image": self._image,
@@ -167,28 +188,51 @@ class SandboxWitness:
             "workspace_mount": (
                 {"source": mount.get("Source"), "destination": mount.get("Destination"), "rw": mount.get("RW")} if mount else None
             ),
-            "labels": {key: value for key, value in (raw.get("labels") or {}).items() if key.startswith("hermes")},
+            "labels": labels,
             "existed_in_baseline": False,
+            "removed_after_exit": None,
+            "violations": [],
         }
         violations = _violations(record, self._image_id, self._workspace)
         record["violations"] = violations
-        self._write(record, violations)
-        return True
-
-    def _write(self, record: dict[str, object], violations: list[str]) -> None:
-        self.records.append(record)
+        self.containers.append(record)
         self.violations.extend(violations)
+        self._flush()
+
+    def _after_exit(self) -> None:
+        """What survived the session that made it.
+
+        A container still listed once its process is gone is one the next process can
+        attach to - `_find_reusable_container` filters on these labels, and a stopped
+        container is started again, not rebuilt. So presence, not running, is the reading.
+        """
+        if not self.containers:
+            if self._baseline:
+                # Reuse is invisible from the outside - it leaves no new container - so a
+                # session that created none while one of Hermes's was already lying around
+                # is the shape of it.
+                self.violations.append(
+                    f"no container was created and {len(self._baseline)} Hermes container(s) were already present"
+                )
+            self._flush()
+            return
+        remaining = _hermes_containers(self._run)
+        for record in self.containers:
+            record["removed_after_exit"] = record["container_id"] not in remaining
+        self._flush()
+
+    def _flush(self) -> None:
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        path = self._sessions_dir / f"{self._session_stem()}{WITNESS_SUFFIX}"
+        path = self._sessions_dir / f"{self._stem or self._session_stem()}{WITNESS_SUFFIX}"
         # Written whole or not at all: the process this runs in outlives the session, but
         # the run it belongs to does not outlive the job, and a half-written receipt reads
         # as an observation that was never made.
         temporary = path.with_name(path.name + ".partial")
-        temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        temporary.write_text(json.dumps(self.receipt, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, path)
 
     def _session_stem(self) -> str:
-        """The session this container belongs to.
+        """The session these containers belong to.
 
         ``run_agent.sh`` names the session itself and writes its controls report before it
         launches the agent, so by the time any container exists the newest of those names

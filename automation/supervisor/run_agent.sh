@@ -10,7 +10,11 @@ Usage: automation/supervisor/run_agent.sh \
   --handoff-file PATH \
   --slice-id ID
 
-Launch a fresh agent run for one supervisor-selected slice.
+automation/supervisor/run_agent.sh --repo-root PATH --sandbox-probe
+
+Launch a fresh agent run for one supervisor-selected slice, or - with
+--sandbox-probe - make one no-model terminal call through the composed Hermes
+config to prove what the tools' default backend is, and exit.
 
 Runner selection:
   REPO_AUTOMATION_AGENT_RUNNER=auto|codex|claude|hermes (default: auto)
@@ -101,6 +105,7 @@ prompt_file=""
 context_file=""
 handoff_file=""
 slice_id=""
+sandbox_probe=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -124,6 +129,10 @@ while [[ $# -gt 0 ]]; do
       slice_id="${2:-}"
       shift 2
       ;;
+    --sandbox-probe)
+      sandbox_probe=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -136,7 +145,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$repo_root" || -z "$prompt_file" || -z "$context_file" || -z "$handoff_file" || -z "$slice_id" ]]; then
+# The probe launches no session, so it needs none of a session's inputs - only the
+# workspace whose sandbox it is asking about.
+if [[ -z "$repo_root" ]] || [[ "$sandbox_probe" == "0" &&
+  (-z "$prompt_file" || -z "$context_file" || -z "$handoff_file" || -z "$slice_id") ]]; then
   echo "Missing required supervisor agent launch argument." >&2
   usage
   exit 64
@@ -147,17 +159,22 @@ if [[ ! -d "$repo_root/.git" ]]; then
   exit 66
 fi
 
-if [[ ! -f "$prompt_file" ]]; then
+if [[ "$sandbox_probe" == "1" ]]; then
+  # A Hermes sandbox is the only thing there is to probe; no other runner has one.
+  agent_runner_override="hermes"
+fi
+
+if [[ "$sandbox_probe" == "0" ]] && [[ ! -f "$prompt_file" ]]; then
   echo "Prompt file does not exist: $prompt_file" >&2
   exit 66
 fi
 
-if [[ ! -f "$context_file" ]]; then
+if [[ "$sandbox_probe" == "0" ]] && [[ ! -f "$context_file" ]]; then
   echo "Context file does not exist: $context_file" >&2
   exit 66
 fi
 
-if [[ -e "$handoff_file" ]]; then
+if [[ "$sandbox_probe" == "0" ]] && [[ -e "$handoff_file" ]]; then
   echo "Refusing to overwrite existing handoff file: $handoff_file" >&2
   exit 73
 fi
@@ -165,7 +182,7 @@ fi
 codex_bin="${REPO_AUTOMATION_CODEX_BIN:-${OWLORY_CODEX_BIN:-codex}}"
 claude_bin="${REPO_AUTOMATION_CLAUDE_BIN:-claude}"
 hermes_bin="${REPO_AUTOMATION_HERMES_BIN:-hermes}"
-agent_runner="$(select_agent_runner "${REPO_AUTOMATION_AGENT_RUNNER:-auto}" "$codex_bin" "$claude_bin" "$hermes_bin")"
+agent_runner="${agent_runner_override:-$(select_agent_runner "${REPO_AUTOMATION_AGENT_RUNNER:-auto}" "$codex_bin" "$claude_bin" "$hermes_bin")}"
 
 export REPO_AUTOMATION_SUPERVISOR_CONTEXT_FILE="$context_file"
 export REPO_AUTOMATION_SUPERVISOR_HANDOFF_FILE="$handoff_file"
@@ -281,6 +298,58 @@ case "$agent_runner" in
       sandbox_backend="docker"
       # Which bytes ran, not which tag was requested: a tag is repointed, a digest is not.
       sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image" 2>/dev/null || true)"
+    fi
+    if [[ "$sandbox_probe" == "1" ]]; then
+      # The pre-budget proof, with no model in the loop: one terminal call through the
+      # config composed immediately above, so what it exercises is the configuration the
+      # next invocation gets rather than a restatement of it.
+      #
+      # task_id=None is the whole point. Hermes builds one backend per task id: the system
+      # prompt's own probe gets "prompt-backend-probe", and every ordinary terminal, file
+      # and code_execution call the model makes resolves to "default". Only the default
+      # backend is the path where `docker_persist_across_processes: false` is load-bearing,
+      # and a session that spends its budget before the first tool call never creates it.
+      if [[ -z "$sandbox_image" ]]; then
+        echo "--sandbox-probe needs REPO_AUTOMATION_HERMES_SANDBOX_IMAGE; there is no sandbox to probe." >&2
+        exit 78
+      fi
+      # Hermes' own interpreter, not this shell's: the tools are importable only from the
+      # venv it was installed into, and importing them is what routes through config.yaml.
+      probe_python="${REPO_AUTOMATION_HERMES_PYTHON:-$(dirname "$(command -v "$hermes_bin")")/python}"
+      if [[ ! -x "$probe_python" ]]; then
+        echo "Hermes interpreter not found: $probe_python. Set REPO_AUTOMATION_HERMES_PYTHON." >&2
+        exit 69
+      fi
+      probe_log="/dev/null"
+      if [[ -n "${REPO_AUTOMATION_HERMES_USAGE_DIR:-}" ]]; then
+        mkdir -p "$REPO_AUTOMATION_HERMES_USAGE_DIR"
+        probe_log="$REPO_AUTOMATION_HERMES_USAGE_DIR/sandbox-probe.log"
+      fi
+      # Reads the cleanroom the way a rebuild would: where am I, is the reference binary
+      # here, is the documentation here. Three facts, one exit status, no model tokens.
+      export REPO_AUTOMATION_SANDBOX_PROBE_COMMAND="${REPO_AUTOMATION_SANDBOX_PROBE_COMMAND:-pwd && test -x ./executable && test -f README.md}"
+      set +e
+      "$probe_python" - <<'PROBE' 2>&1 | tee "$probe_log"
+import json
+import os
+import sys
+
+# Before importing the tool: this is the bridge that turns the `terminal.*` keys of
+# config.yaml into the TERMINAL_* env vars terminal_tool actually reads. Skipping it
+# would run the probe on Hermes' defaults and prove nothing about the composed config.
+from hermes_cli.config import apply_terminal_config_to_env
+
+apply_terminal_config_to_env()
+
+from tools.terminal_tool import terminal_tool
+
+answer = terminal_tool(os.environ["REPO_AUTOMATION_SANDBOX_PROBE_COMMAND"], task_id=None)
+print(answer)
+sys.exit(0 if json.loads(answer).get("exit_code") == 0 else 1)
+PROBE
+      probe_status=${PIPESTATUS[0]}
+      set -e
+      exit "$probe_status"
     fi
     hermes_args=(--ignore-rules --in "$repo_root" --toolsets "$hermes_toolsets")
     if [[ "$hermes_transport" == "stream-json" ]]; then
