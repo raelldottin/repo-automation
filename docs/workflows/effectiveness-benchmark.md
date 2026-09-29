@@ -417,8 +417,22 @@ lane runs pass `--cleanroom`. Three things are proved before any agent budget is
 every key in both Hermes profiles resolves against the pinned revision's own defaults
 (Hermes ignores keys it does not know, and a silently ignored `docker_network` is an agent
 with internet access), one trivial agent session completes and writes where it was told to,
-and one instance's cleanroom materializes and fails all four egress probes. The workflow is repo-specific and
-is not part of the reusable sync manifest.
+and one instance's cleanroom materializes and fails all four egress probes. That last check
+writes its receipt to `out/preflight/cleanroom.json`, so the artifact carries it even when
+no cell ran.
+
+The model id is pinned in the job environment, not read straight off `inputs.model`: the
+`inputs` context is populated for `workflow_dispatch` only, so a scheduled run does not
+inherit the dispatch input's default and would otherwise start with an empty model id.
+
+Dispatching with **`preflight_only`** runs the deterministic checks and stops: the config
+check, the cleanroom materialization and its egress probes, and nothing that spends a model
+turn - not the agent session check, not `benchmark all`, not `benchmark lanes`, not the
+diagnostic probe. It is the cheap way to read what a given instance's cleanroom exposes,
+including the `git_remotes` the preflight records (see
+[What the benchmark itself still supplies](#what-the-benchmark-itself-still-supplies)).
+
+The workflow is repo-specific and is not part of the reusable sync manifest.
 
 ## Reading the report
 

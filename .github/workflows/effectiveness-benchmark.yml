@@ -37,7 +37,11 @@ on:
       model:
         description: "Model id served by the NVIDIA endpoint"
         type: string
-        default: "qwen/qwen3-coder-480b-a35b-instruct"
+        default: "z-ai/glm-5.3"
+      preflight_only:
+        description: "Verify the benchmark environment and stop; no agent session, no cell, no model tokens"
+        type: boolean
+        default: false
       probe:
         description: "Diagnostic only: run one research phase over the stream-json transport instead of any benchmark. Not a lane; its output is not comparable with a cell."
         type: boolean
@@ -64,7 +68,13 @@ jobs:
       # engine, not the treatment.
       REPO_AUTOMATION_AGENT_RUNNER: hermes
       HERMES_INFERENCE_PROVIDER: nvidia
-      HERMES_INFERENCE_MODEL: ${{ inputs.model }}
+      # `inputs` is populated for workflow_dispatch only. A scheduled run does not inherit
+      # the dispatch input's default, so `${{ inputs.model }}` alone would hand the nightly
+      # an empty model id. The baseline model is named here, where the schedule reads it.
+      HERMES_INFERENCE_MODEL: >-
+        ${{ github.event_name == 'workflow_dispatch'
+            && inputs.model
+            || 'z-ai/glm-5.3' }}
       NVIDIA_BASE_URL: https://integrate.api.nvidia.com/v1
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       # Job-level so every run.json records which Hermes produced the result.
@@ -165,6 +175,7 @@ jobs:
       # throwaway HERMES_HOME, transport, auth and the model id together - and leaves the
       # same usage and controls reports a real cell produces.
       - name: Verify the agent can complete one session
+        if: inputs.preflight_only != true
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/agent-preflight"
@@ -178,7 +189,7 @@ jobs:
               --context-file "$RUNNER_TEMP/preflight-context.json" \
               --handoff-file "$RUNNER_TEMP/preflight-handoff.json" \
               --slice-id preflight 2>&1 | tee /tmp/preflight.log; then
-            echo "::error::The agent could not complete a trivial session with ${{ inputs.model }}." >&2
+            echo "::error::The agent could not complete a trivial session with ${HERMES_INFERENCE_MODEL}." >&2
             echo "Models this key can reach:" >&2
             curl -sS "$NVIDIA_BASE_URL/models" -H "Authorization: Bearer $NVIDIA_API_KEY" \
               | python -c "import json,sys; [print(' ', m['id']) for m in json.load(sys.stdin).get('data', [])[:40]]" >&2 || true
@@ -241,6 +252,7 @@ jobs:
         if: inputs.probe != true
         run: |
           set -o pipefail
+          mkdir -p out/preflight
           instance=$(echo "${{ inputs.instances }}" | awk '{print $1}')
           if [ -z "$instance" ]; then
             instance=$(uv run python -c "from automation.benchmark.instances import DEFAULT_SMOKE_INSTANCES as s; print(s[0])")
@@ -248,7 +260,7 @@ jobs:
           uv run python -m automation.benchmark.cleanroom \
             --instance "$instance" \
             --workspace "$RUNNER_TEMP/cleanroom-preflight" \
-            --receipt "$RUNNER_TEMP/cleanroom-preflight.json" | tee /tmp/cleanroom.txt
+            --receipt out/preflight/cleanroom.json | tee /tmp/cleanroom.txt
           printf '```\n%s\n```\n' "$(cat /tmp/cleanroom.txt)" >> "$GITHUB_STEP_SUMMARY"
 
       # --agent-env, by name, is the only way the key reaches a session: an agent run inherits
@@ -256,7 +268,7 @@ jobs:
       # readable by the model-authored commands a cell executes. Names only - NAME=value here
       # would print the secret into the job log on top of the runner's process listing.
       - name: Run benchmark (rebuild -> eval -> score)
-        if: inputs.experiment != true && inputs.probe != true
+        if: inputs.experiment != true && inputs.probe != true && inputs.preflight_only != true
         run: |
           if [ "${{ inputs.run_all }}" = "false" ] && [ -n "${{ inputs.instances }}" ]; then
             uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }} \
@@ -276,7 +288,7 @@ jobs:
       # and --oneshot can never say why. Nothing this step produces belongs in a comparison:
       # the transport is a different execution path in the agent and leaves no usage receipt.
       - name: Run the stream-json research probe (diagnostic)
-        if: inputs.probe == true
+        if: inputs.probe == true && inputs.preflight_only != true
         run: |
           set -o pipefail
           instance=$(echo "${{ inputs.instances }}" | awk '{print $1}')
@@ -306,7 +318,7 @@ jobs:
       # The experiment costs lanes x repeats x instances agent runs, so it is manual only
       # and defaults to the smoke set. Never add it to the nightly schedule unattended.
       - name: Run lane experiment (A-E)
-        if: inputs.experiment == true && inputs.probe != true
+        if: inputs.experiment == true && inputs.probe != true && inputs.preflight_only != true
         run: |
           if [ -n "${{ inputs.instances }}" ]; then
             SELECTION="--instances ${{ inputs.instances }}"
