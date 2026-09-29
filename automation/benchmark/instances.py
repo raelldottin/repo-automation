@@ -20,10 +20,15 @@ DEFAULT_SMOKE_INSTANCES: tuple[str, ...] = ("abishekvashok__cmatrix.5c082c6",)
 _FIXTURE_PREFIX = "testorg__"
 
 # How a task is named to the agent. An instance id is `<owner>__<repo>.<sha>`, so it names
-# the upstream project outright - and a model that knows the project can recall its source
-# instead of deriving it from the reference binary, which is the whole question the lanes
-# are asking. A digest of it is stable across lanes and repeats, so two cells for the same
-# task stay comparable in a transcript, and reveals nothing to recall from.
+# the upstream project outright, and a model that reads the name can recall the source
+# instead of deriving it from the reference binary. A digest of it is stable across lanes
+# and repeats, so two cells for the same task stay comparable in a transcript.
+#
+# Opaque in a prompt, not anonymous. ProgramBench's instance catalogue is public and
+# small, so anyone holding it can hash every entry and invert this in a second. It is not
+# an anti-memorization measure - that would need a run-scoped random or HMAC id, which
+# would also cost cross-run comparability. What it is: the harness declining to put the
+# name in front of the model.
 _PUBLIC_ID_PREFIX = "task-"
 _PUBLIC_ID_LENGTH = 12
 
@@ -40,7 +45,7 @@ class TaskSpec:
 
     @property
     def public_id(self) -> str:
-        """What the agent is allowed to call this task."""
+        """What the harness calls this task in front of the agent."""
         return _PUBLIC_ID_PREFIX + hashlib.sha256(self.instance_id.encode("utf-8")).hexdigest()[:_PUBLIC_ID_LENGTH]
 
     @property
@@ -51,6 +56,11 @@ class TaskSpec:
         `compile.sh` that builds an `./executable`, so the original implementation language
         was never a requirement - it was a hint about the upstream source, and an agent
         told "this is the Rust one" is part-way to recalling which Rust one.
+
+        This says nothing about what the agent can work out from the workspace. ProgramBench
+        bundles the program's own documentation, and cmatrix's `README.md` names the project
+        and links its repository. The claim is about what the *harness* adds, not about what
+        the cleanroom contains.
         """
         return (
             "Rebuild the program in this workspace from scratch so that its black-box test suite "
