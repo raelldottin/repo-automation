@@ -8,6 +8,7 @@ small built-in smoke set so the CLI and tests still function.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -17,6 +18,14 @@ DEFAULT_SMOKE_INSTANCES: tuple[str, ...] = ("abishekvashok__cmatrix.5c082c6",)
 
 # ProgramBench reserves this prefix for its own test fixtures; never benchmark them.
 _FIXTURE_PREFIX = "testorg__"
+
+# How a task is named to the agent. An instance id is `<owner>__<repo>.<sha>`, so it names
+# the upstream project outright - and a model that knows the project can recall its source
+# instead of deriving it from the reference binary, which is the whole question the lanes
+# are asking. A digest of it is stable across lanes and repeats, so two cells for the same
+# task stay comparable in a transcript, and reveals nothing to recall from.
+_PUBLIC_ID_PREFIX = "task-"
+_PUBLIC_ID_LENGTH = 12
 
 
 @dataclass(frozen=True)
@@ -30,12 +39,24 @@ class TaskSpec:
     difficulty: str
 
     @property
+    def public_id(self) -> str:
+        """What the agent is allowed to call this task."""
+        return _PUBLIC_ID_PREFIX + hashlib.sha256(self.instance_id.encode("utf-8")).hexdigest()[:_PUBLIC_ID_LENGTH]
+
+    @property
     def objective(self) -> str:
+        """The task, with nothing in it that identifies the program being rebuilt.
+
+        The language is gone along with the name. The submission only has to produce a
+        `compile.sh` that builds an `./executable`, so the original implementation language
+        was never a requirement - it was a hint about the upstream source, and an agent
+        told "this is the Rust one" is part-way to recalling which Rust one.
+        """
         return (
-            f"Rebuild the program `{self.repository}` (language: {self.language}) from scratch so "
-            "that its black-box test suite passes. Work only from the program's observable behaviour "
-            "and interface. Produce a self-contained codebase plus an executable `compile.sh` at the "
-            "workspace root that builds the program's `./executable`."
+            "Rebuild the program in this workspace from scratch so that its black-box test suite "
+            "passes. Work only from the program's observable behaviour and interface. Produce a "
+            "self-contained codebase plus an executable `compile.sh` at the workspace root that "
+            "builds the program's `./executable`."
         )
 
 

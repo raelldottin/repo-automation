@@ -81,7 +81,7 @@ class FakeAgent:
             "research": (
                 RESEARCH_ARTIFACT,
                 {
-                    "task": "rebuild owner/proj",
+                    "task": "rebuild the program in this workspace",
                     "relevant_files": [],
                     "findings": ["FINDING-MARKER: renders a grid"] * 40,
                     "constraints": ["must ship compile.sh"],
@@ -93,7 +93,7 @@ class FakeAgent:
             "research_compact": (
                 "research.compact.json",
                 {
-                    "task": "rebuild owner/proj",
+                    "task": "rebuild the program in this workspace",
                     "relevant_files": [],
                     "findings": ["FINDING-MARKER: renders a grid"],
                     "constraints": ["must ship compile.sh"],
@@ -105,7 +105,7 @@ class FakeAgent:
             "plan": (
                 PLAN_ARTIFACT,
                 {
-                    "goal": "PLAN-MARKER rebuild owner/proj",
+                    "goal": "PLAN-MARKER rebuild the program",
                     "implementation_steps": ["write main.c"] * 40,
                     "files_expected": ["main.c", "compile.sh"],
                     "validation_plan": ["sh compile.sh"],
@@ -116,7 +116,7 @@ class FakeAgent:
             "plan_compact": (
                 "plan.compact.json",
                 {
-                    "goal": "PLAN-MARKER rebuild owner/proj",
+                    "goal": "PLAN-MARKER rebuild the program",
                     "implementation_steps": ["write main.c"],
                     "files_expected": ["main.c", "compile.sh"],
                     "validation_plan": ["sh compile.sh"],
@@ -188,7 +188,7 @@ class LaneTreatmentTests(unittest.TestCase):
         prompt = agent.prompt_for("implement")
         self.assertEqual(["implement"], agent.phases())
         self.assertIn("compile.sh", prompt)
-        self.assertIn("owner/proj", prompt)
+        self.assertIn(TASK.public_id, prompt)
         self.assertNotIn("Supervised Slice Run", prompt)  # base.md never reaches lane A
         self.assertNotIn("Execution constraints", prompt)
 
@@ -208,7 +208,28 @@ class LaneTreatmentTests(unittest.TestCase):
         agent, _, _ = run_lane("C")
         for session in agent.sessions:
             self.assertIn("Objective (immutable)", session["prompt"])
-            self.assertIn("owner/proj", session["prompt"])
+            self.assertIn(TASK.public_id, session["prompt"])
+
+    def test_no_lane_tells_the_agent_which_program_it_is_rebuilding(self) -> None:
+        # The cleanroom stops the agent fetching the upstream source. This is the other
+        # half: an agent told it is rebuilding `owner/proj` does not need to fetch anything,
+        # because a model that has read that project is recalling it rather than deriving
+        # it from the reference binary - and every lane would inherit the same head start.
+        for lane in ("A", "B", "C", "D", "E"):
+            with self.subTest(lane=lane):
+                strategy = RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT) if lane == "E" else None
+                agent, _, _ = run_lane(lane, strategy=strategy)
+                for session in agent.sessions:
+                    for identifier in (TASK.repository, TASK.instance_id, TASK.commit, "language:"):
+                        self.assertNotIn(identifier, session["prompt"], f"{lane}/{session['phase']}")
+                    self.assertIn(TASK.public_id, session["prompt"])
+
+    def test_the_public_id_is_stable_and_says_nothing_about_the_instance(self) -> None:
+        # Stable, so the same task is recognisable across lanes and repeats in a transcript.
+        self.assertEqual(TASK.public_id, TaskSpec(TASK.instance_id, "", "", "", "").public_id)
+        self.assertNotEqual(TASK.public_id, TaskSpec("other__thing.9999999", "", "", "", "").public_id)
+        for part in ("owner", "proj", "abc1234"):
+            self.assertNotIn(part, TASK.public_id)
 
     def test_lane_d_compacts_between_phases_and_records_the_loss(self) -> None:
         agent, result, _ = run_lane("D")

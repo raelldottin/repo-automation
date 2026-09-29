@@ -194,8 +194,12 @@ class AdapterTests(unittest.TestCase):
             context_bundle=bundle,
             handoff_path=Path("/tmp/handoff.json"),
         )
-        self.assertIn("owner/proj", prompt)
         self.assertIn("compile.sh", prompt)
+        # The slice record is rendered into the prompt, so its id and title are agent-facing
+        # surfaces like any other.
+        self.assertIn(self.task.public_id, prompt)
+        self.assertNotIn("owner/proj", prompt)
+        self.assertNotIn(self.task.instance_id, prompt)
 
     def test_produce_submission_archives_agent_workspace(self) -> None:
         captured: dict[str, str] = {}
