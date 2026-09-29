@@ -114,8 +114,11 @@ class AgentAdapter(Protocol):
 def build_slice_record(task: TaskSpec) -> dict:
     """Model a ProgramBench rebuild as a schema-valid supervisor slice."""
     return {
-        "slice_id": task.instance_id,
-        "title": f"Rebuild {task.repository} from scratch",
+        # Both reach the agent: `summarize_slice` puts them in the rendered prompt. The
+        # instance id keeps identifying the cell everywhere else - directories, receipts,
+        # `--slice-id` - because that is bookkeeping the agent never reads.
+        "slice_id": task.public_id,
+        "title": "Rebuild the program in this workspace from scratch",
         "status": "queued",
         "priority": 0,
         "domain": "programbench",
@@ -359,12 +362,15 @@ class SupervisorAgentAdapter:
     def produce_submission(self, task: TaskSpec, out_tar: Path) -> SubmissionResult:
         out_tar = Path(out_tar)
 
-        workspace = Path(tempfile.mkdtemp(prefix=f"pb-{task.instance_id}-"))
+        # Named for the public id: outside a cleanroom cell this path is the agent's own
+        # working directory, and `pb-abishekvashok__cmatrix.5c082c6-x` in a shell prompt
+        # tells it everything the envelope no longer does.
+        workspace = Path(tempfile.mkdtemp(prefix=f"pb-{task.public_id}-"))
         if not self._cleanroom:
             # run_agent.sh refuses a non-git repo root; the workspace is the agent's repo.
             # A cleanroom cell gets its worktree from the image instead - see below.
             subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
-        control_dir = Path(tempfile.mkdtemp(prefix=f"pb-control-{task.instance_id}-"))
+        control_dir = Path(tempfile.mkdtemp(prefix=f"pb-control-{task.public_id}-"))
 
         environment = self._run_environment()
         # The inference environment, before the first agent turn and proved rather than

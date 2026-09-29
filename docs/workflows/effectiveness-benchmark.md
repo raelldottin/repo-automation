@@ -351,6 +351,36 @@ uv run python -m automation.benchmark.cleanroom \
   --workspace /tmp/cleanroom --receipt /tmp/cleanroom.json
 ```
 
+## What the agent is told the task is
+
+The cleanroom stops the agent *fetching* the upstream source. It does not stop the agent
+*recalling* it, and a model that has read `abishekvashok/cmatrix` does not need to fetch
+anything. So the prompt does not say which program this is. Nothing agent-facing carries
+the repository, the instance id, the upstream commit or the implementation language:
+
+- `TaskSpec.objective` — "Rebuild the program in this workspace from scratch…". The
+  language went with the name: the submission only has to produce a `compile.sh` that
+  builds an `./executable`, so the original language was never a requirement, only a hint
+  about the upstream source.
+- The prompt envelope every phase of every lane repeats — one `- Task:` line.
+- The phase headings (`# Research:`, `# Plan:`, `# Implement:`, `# Rebuild`).
+- `build_slice_record`'s `slice_id` and `title`, which `summarize_slice` renders into the
+  prompt for the lanes that get harness context.
+- The cell's workspace directory name, which is the agent's own cwd outside a cleanroom.
+
+What they carry instead is `TaskSpec.public_id`: `task-` plus twelve hex characters of
+`sha256(instance_id)`. Stable, so the same task is recognisable across lanes and repeats
+in a transcript; derived one way, so there is nothing in it to recall.
+
+`instance_id` is unchanged everywhere the agent does not read — run directories, `run.json`,
+`cleanroom.json`, the scoring report, the `--slice-id` passed to `run_agent.sh`, and the
+image name the cleanroom is built from. The mapping stays in the receipts; it just never
+reaches the model.
+
+Residual, and outside this control: the cleanroom image ships ProgramBench's own
+one-commit Git worktree at `/workspace/.git`, whose contents we do not author. If it
+names an upstream remote, an agent that looks there learns what the prompt no longer says.
+
 ## In production (CI)
 
 `.github/workflows/effectiveness-benchmark.yml` runs the full set on `ubuntu-latest`

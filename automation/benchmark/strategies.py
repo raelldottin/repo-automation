@@ -298,8 +298,7 @@ _ENVELOPE = """## Objective (immutable)
 
 {objective}
 
-- Instance: `{instance_id}`
-- Program: `{repository}` (language: {language})
+- Task: `{public_id}`
 - Workspace root: the current working directory. Only files here are graded.
 - A working `compile.sh` at the workspace root that builds `./executable` is mandatory.
 
@@ -391,12 +390,7 @@ the input. Do not add commentary.
 
 
 def envelope(task: TaskSpec) -> str:
-    return _ENVELOPE.format(
-        objective=task.objective,
-        instance_id=task.instance_id,
-        repository=task.repository,
-        language=task.language,
-    )
+    return _ENVELOPE.format(objective=task.objective, public_id=task.public_id)
 
 
 def artifact_instruction(spec: ArtifactSpec, filename: Optional[str] = None) -> str:
@@ -422,7 +416,7 @@ def research_prompt(task: TaskSpec, jspace: Optional[JSpaceArtifact] = None) -> 
     lane does; composing a near-copy somewhere else would measure the near-copy.
     """
     return compose_prompt(
-        f"# Research: {task.repository}",
+        f"# Research: {task.public_id}",
         envelope(task),
         _RESEARCH_BODY,
         artifact_instruction(RESEARCH_SPEC),
@@ -534,7 +528,7 @@ class OneSessionStrategy:
 
     def execute(self, ctx: ExecutionContext) -> StrategyResult:
         prompt = compose_prompt(
-            f"# Rebuild {ctx.task.repository}",
+            f"# Rebuild {ctx.task.public_id}",
             envelope(ctx.task),
             "## Phase: Implement\n\nBuild the program now. Finish with a working `compile.sh`.",
         )
@@ -694,7 +688,7 @@ class RpiStrategy:
             return self._not_administered(run, compaction_stats, phase="plan")
 
         plan_prompt = compose_prompt(
-            f"# Plan: {ctx.task.repository}",
+            f"# Plan: {ctx.task.public_id}",
             envelope(ctx.task),
             _PLAN_BODY.format(research=json.dumps(research, indent=2, ensure_ascii=False)),
             artifact_instruction(PLAN_SPEC),
@@ -710,7 +704,7 @@ class RpiStrategy:
             compaction_stats.update(stats)
 
         implement_prompt = compose_prompt(
-            f"# Implement: {ctx.task.repository}",
+            f"# Implement: {ctx.task.public_id}",
             envelope(ctx.task),
             _IMPLEMENT_BODY.format(plan=json.dumps(plan, indent=2, ensure_ascii=False)),
             jspace=self.jspace,
