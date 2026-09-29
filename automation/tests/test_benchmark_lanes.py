@@ -210,11 +210,12 @@ class LaneTreatmentTests(unittest.TestCase):
             self.assertIn("Objective (immutable)", session["prompt"])
             self.assertIn(TASK.public_id, session["prompt"])
 
-    def test_no_lane_tells_the_agent_which_program_it_is_rebuilding(self) -> None:
-        # The cleanroom stops the agent fetching the upstream source. This is the other
-        # half: an agent told it is rebuilding `owner/proj` does not need to fetch anything,
-        # because a model that has read that project is recalling it rather than deriving
-        # it from the reference binary - and every lane would inherit the same head start.
+    def test_no_lane_adds_upstream_identity_the_harness_was_not_asked_for(self) -> None:
+        # The claim is about what the harness adds, and only that. ProgramBench's own
+        # cleanroom bundles the program's documentation, and cmatrix's README names the
+        # project and links its repository - so an agent can still work out what it is
+        # rebuilding. What it cannot do is read it in a prompt we wrote, which every lane
+        # shares, and which would give all five the same head start.
         for lane in ("A", "B", "C", "D", "E"):
             with self.subTest(lane=lane):
                 strategy = RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT) if lane == "E" else None
@@ -224,8 +225,10 @@ class LaneTreatmentTests(unittest.TestCase):
                         self.assertNotIn(identifier, session["prompt"], f"{lane}/{session['phase']}")
                     self.assertIn(TASK.public_id, session["prompt"])
 
-    def test_the_public_id_is_stable_and_says_nothing_about_the_instance(self) -> None:
+    def test_the_public_id_is_stable_and_carries_no_fragment_of_the_instance(self) -> None:
         # Stable, so the same task is recognisable across lanes and repeats in a transcript.
+        # Opaque, not anonymous: the instance catalogue is public and small, so this is
+        # invertible by anyone holding it. It is the harness declining to say the name.
         self.assertEqual(TASK.public_id, TaskSpec(TASK.instance_id, "", "", "", "").public_id)
         self.assertNotEqual(TASK.public_id, TaskSpec("other__thing.9999999", "", "", "", "").public_id)
         for part in ("owner", "proj", "abc1234"):

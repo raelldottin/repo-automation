@@ -351,12 +351,13 @@ uv run python -m automation.benchmark.cleanroom \
   --workspace /tmp/cleanroom --receipt /tmp/cleanroom.json
 ```
 
-## What the agent is told the task is
+## Upstream identity the harness adds
 
 The cleanroom stops the agent *fetching* the upstream source. It does not stop the agent
 *recalling* it, and a model that has read `abishekvashok/cmatrix` does not need to fetch
-anything. So the prompt does not say which program this is. Nothing agent-facing carries
-the repository, the instance id, the upstream commit or the implementation language:
+anything. So the harness adds no upstream repository identity, instance identity, commit,
+or implementation-language hint of its own. Nothing agent-facing that we author carries
+them:
 
 - `TaskSpec.objective` — "Rebuild the program in this workspace from scratch…". The
   language went with the name: the submission only has to produce a `compile.sh` that
@@ -367,19 +368,44 @@ the repository, the instance id, the upstream commit or the implementation langu
 - `build_slice_record`'s `slice_id` and `title`, which `summarize_slice` renders into the
   prompt for the lanes that get harness context.
 - The cell's workspace directory name, which is the agent's own cwd outside a cleanroom.
+- The `--slice-id` handed to `run_agent.sh`, which it exports as
+  `REPO_AUTOMATION_SUPERVISOR_SLICE_ID` and `OWLORY_SUPERVISOR_SLICE_ID`. The pinned Hermes
+  path renders neither into a prompt, but the worker process has no use for the real name.
 
 What they carry instead is `TaskSpec.public_id`: `task-` plus twelve hex characters of
 `sha256(instance_id)`. Stable, so the same task is recognisable across lanes and repeats
-in a transcript; derived one way, so there is nothing in it to recall.
+in a transcript.
+
+**Opaque in a prompt, not anonymous.** ProgramBench's instance catalogue is public and
+small; anyone holding it can hash every entry and invert this in a second. It is not an
+anti-memorization measure — that would need a run-scoped random or HMAC id, which would
+also cost cross-run comparability. It is the harness declining to put the name in front of
+the model.
 
 `instance_id` is unchanged everywhere the agent does not read — run directories, `run.json`,
-`cleanroom.json`, the scoring report, the `--slice-id` passed to `run_agent.sh`, and the
-image name the cleanroom is built from. The mapping stays in the receipts; it just never
-reaches the model.
+`cleanroom.json`, the scoring report, and the image name the cleanroom is built from. The
+mapping stays in the receipts; it just never reaches the model.
 
-Residual, and outside this control: the cleanroom image ships ProgramBench's own
-one-commit Git worktree at `/workspace/.git`, whose contents we do not author. If it
-names an upstream remote, an agent that looks there learns what the prompt no longer says.
+### What the benchmark itself still supplies
+
+This control covers what the harness adds, and stops there. The cleanroom bundles the
+program's own documentation, because rebuilding from observable behaviour and docs is the
+task — and for `abishekvashok__cmatrix.5c082c6` that documentation is a `README.md`
+beginning "CMatrix" and linking `https://github.com/abishekvashok/cmatrix`, plus a
+`cmatrix.1` man page naming the program. An agent that reads them knows what it is
+rebuilding.
+
+Sanitizing them is not on the table: it would stop this being ProgramBench's inference
+environment and make it a new benchmark variant. What the preflight does instead is
+**record** the other provenance signal it can see. The probe reads the image's own Git
+worktree and writes any remotes into `cleanroom.json`:
+
+```json
+"git_remotes": [{"name": "remote.origin.url", "url": "https://github.com/…"}]
+```
+
+Read, never acted on — the worktree is ProgramBench's, and the harness does not edit an
+environment it is administering. An empty list is a real answer, not a missing one.
 
 ## In production (CI)
 

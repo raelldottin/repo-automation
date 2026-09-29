@@ -83,6 +83,11 @@ class CleanroomReceipt:
     git_worktree: bool = False
     workspace_entries: list[str] = field(default_factory=list)
     documentation: list[str] = field(default_factory=list)
+    # Read, never acted on. The image's own worktree is ProgramBench's, and a remote in it
+    # is upstream identity the benchmark supplies - unlike the prompt, which the harness
+    # controls and has had it removed from. Recording it says which of the two a given
+    # instance leaks through, without the harness editing an environment it administers.
+    git_remotes: list[dict[str, str]] = field(default_factory=list)
     egress_probes: list[dict[str, object]] = field(default_factory=list)
     probe_argv: list[str] = field(default_factory=list)
 
@@ -161,6 +166,11 @@ set -u
 cd {workspace} || exit 70
 if [ -x ./{executable} ]; then echo "reference_executable=yes"; else echo "reference_executable=no"; fi
 if [ -d .git ]; then echo "git_worktree=yes"; else echo "git_worktree=no"; fi
+if [ -d .git ] && command -v git >/dev/null 2>&1; then
+  git config --get-regexp '^remote\..*\.url$' 2>/dev/null | while read -r remote_name remote_url; do
+    echo "git_remote=$remote_name|$remote_url"
+  done
+fi
 probe=".cleanroom-write-probe"
 if echo ok > "$probe" && [ "$(cat "$probe")" = ok ] && rm -f "$probe" && [ ! -e "$probe" ]; then
   echo "workspace_writable=yes"
@@ -194,6 +204,9 @@ def _parse_probe(output: str, receipt: CleanroomReceipt) -> None:
             receipt.workspace_writable = value == "yes"
         elif key == "git_worktree":
             receipt.git_worktree = value == "yes"
+        elif key == "git_remote":
+            name, _, url = value.partition("|")
+            receipt.git_remotes.append({"name": name, "url": url})
         elif key == "egress":
             present, _, rest = value.partition("|")
             returncode, _, command = rest.partition("|")
@@ -317,7 +330,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"  image id     {receipt.image_id}\n"
         f"  network      {receipt.network_mode}\n"
         f"  reference    ./{REFERENCE_EXECUTABLE} executable\n"
-        f"  git          worktree shipped by the image, not created here\n"
+        f"  git          worktree shipped by the image, not created here; "
+        f"{', '.join(remote['url'] for remote in receipt.git_remotes) or 'no remotes'}\n"
         f"  workspace    {len(receipt.workspace_entries)} entries, writable\n"
         f"  docs         {', '.join(receipt.documentation)}\n"
         f"  egress       {egress}"

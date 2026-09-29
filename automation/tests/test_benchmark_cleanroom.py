@@ -210,6 +210,29 @@ class PrepareTests(unittest.TestCase):
         self.assertIn("is not empty", str(refusal.exception))
         self.assertEqual([], [argv for argv in docker.calls if argv[1] == "cp"])
 
+    def test_the_worktree_the_image_ships_has_its_remotes_read_and_left_alone(self) -> None:
+        # The upstream identity this benchmark leaks is not all the harness's to remove.
+        # The prompt is ours and no longer names the program; the image's own worktree is
+        # ProgramBench's, and sanitizing it would make this a different benchmark. So a
+        # remote is recorded as evidence and nothing is written back.
+        probe = HEALTHY_PROBE + "git_remote=remote.origin.url|https://github.com/abishekvashok/cmatrix.git\n"
+        docker = FakeDocker(contents=cleanroom_contents(), probe=probe)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt = prepare(INSTANCE, Path(temp_dir), REPOSITORY, run=docker)
+
+            self.assertEqual(
+                [{"name": "remote.origin.url", "url": "https://github.com/abishekvashok/cmatrix.git"}],
+                receipt.git_remotes,
+            )
+            self.assertEqual([], receipt.violations())
+            self.assertEqual([], [argv for argv in docker.calls if "remote" in argv or "config" in argv])
+
+    def test_a_worktree_with_no_remote_records_none_rather_than_guessing(self) -> None:
+        docker = FakeDocker(contents=cleanroom_contents())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt = prepare(INSTANCE, Path(temp_dir), REPOSITORY, run=docker)
+            self.assertEqual([], receipt.git_remotes)
+
     def test_an_image_that_ships_no_worktree_is_refused_rather_than_git_inited(self) -> None:
         docker = FakeDocker(
             contents={"executable": "ELF", "README.md": "docs"},
