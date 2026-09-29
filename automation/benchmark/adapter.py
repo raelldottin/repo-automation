@@ -115,8 +115,8 @@ def build_slice_record(task: TaskSpec) -> dict:
     """Model a ProgramBench rebuild as a schema-valid supervisor slice."""
     return {
         # Both reach the agent: `summarize_slice` puts them in the rendered prompt. The
-        # instance id keeps identifying the cell everywhere else - directories, receipts,
-        # `--slice-id` - because that is bookkeeping the agent never reads.
+        # instance id survives only where the agent never reads - run directories, the
+        # benchmark receipts and scoring, and resolving the cleanroom image.
         "slice_id": task.public_id,
         "title": "Rebuild the program in this workspace from scratch",
         "status": "queued",
