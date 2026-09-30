@@ -207,9 +207,51 @@ jobs:
               --handoff-file "$RUNNER_TEMP/preflight-handoff.json" \
               --slice-id preflight 2>&1 | tee /tmp/preflight.log; then
             echo "::error::The agent could not complete a trivial session with ${HERMES_INFERENCE_MODEL}." >&2
-            echo "Models this key can reach:" >&2
+            # Exact membership, not a sample. This printed the first 40 ids alphabetically,
+            # which stopped at nvidia/* - so for a z-ai model it could never show the one id
+            # the failure is about, and run 36736351822's 403 went undiagnosed.
+            #
+            # Diagnostic only, and deliberately weaker than the check above it: appearing in
+            # /models is not a promise of service. The model turn that just failed remains
+            # the authority on whether this credential can be served this model.
             curl -sS "$NVIDIA_BASE_URL/models" -H "Authorization: Bearer $NVIDIA_API_KEY" \
-              | python -c "import json,sys; [print(' ', m['id']) for m in json.load(sys.stdin).get('data', [])[:40]]" >&2 || true
+              > "$RUNNER_TEMP/model-catalog.json" || true
+            python - "$RUNNER_TEMP/model-catalog.json" >&2 <<'PY' || true
+          import json, os, pathlib, sys
+
+          requested = os.environ["HERMES_INFERENCE_MODEL"]
+          vendor = requested.split("/")[0]
+          print(f"requested model: {requested}")
+          try:
+              payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+              # A JSON error body - {"status": 403, "title": "Forbidden", ...} - parses
+              # fine and has no `data`. Reading that as an empty catalog would report the
+              # requested model as absent on the strength of the error that stopped us
+              # from looking, so require the list before believing anything about it.
+              data = payload.get("data")
+              if not isinstance(data, list):
+                  raise ValueError("response carries no model catalog data list")
+              ids = sorted(
+                  {
+                      str(entry["id"])
+                      for entry in data
+                      if isinstance(entry, dict) and entry.get("id")
+                  }
+              )
+          except Exception as error:
+              # "unknown", never "no": a catalog we could not read is not a catalog that
+              # excludes the model, and the difference is the whole point of asking.
+              print(f"listed for this credential: unknown, no catalog could be read ({error})")
+              raise SystemExit(0)
+          print(f"listed for this credential: {'yes' if requested in ids else 'no'}")
+          print(f"catalog size for this credential: {len(ids)}")
+          siblings = [entry for entry in ids if entry.split("/")[0] == vendor]
+          print(f"matching {vendor} models:")
+          for entry in siblings:
+              print(f"  {entry}")
+          if not siblings:
+              print(f"  (none, this credential sees no {vendor} model at all)")
+          PY
             exit 1
           fi
           grep -qiE '\bok\b' /tmp/preflight.log || {

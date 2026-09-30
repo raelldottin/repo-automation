@@ -133,6 +133,32 @@ next cell opens on top of the previous one's files. That is a silent result, not
 error, which is why the preflight now makes the agent write a file and checks where it
 landed before any budget is spent.
 
+When that preflight fails, it reads the authenticated `/v1/models` catalog and reports
+**exact membership** of the requested id, not a sample of the catalogue:
+
+```text
+requested model: z-ai/glm-5.3
+listed for this credential: yes | no | unknown, no catalog could be read (...)
+catalog size for this credential: 78
+matching z-ai models:
+  z-ai/glm-5.3-flash
+```
+
+It used to print the first 40 ids alphabetically, which stopped inside `nvidia/*` — so for
+a `z-ai` model it could never show the one id the failure was about, and run 36736351822's
+`HTTP 403` went undiagnosed. `unknown` is a distinct answer from `no` on purpose: a catalog
+we could not read is not a catalog that excludes the model. So `no` is withheld until the
+response actually carries a `data` list — an NVIDIA error body like
+`{"status": 403, "title": "Forbidden"}` is valid JSON with no catalogue in it, and reporting
+that as an absent model would blame the missing model for the error that stopped us looking.
+An empty `{"data": []}` is a real answer and still reads `no`.
+
+This is diagnostic only, and deliberately weaker than the check above it. Membership in
+`/models` is not a promise of service — the model turn that just failed remains the
+authority on whether this credential can be served this model. The value it does have is
+discriminating a credential that cannot see the model at all from one that sees it and is
+refused anyway, which are different incidents with different fixes.
+
 `HERMES_IGNORE_USER_CONFIG` is left unset, so the config profile loads. Its identity is
 recorded as `config_profile` and `config_sha256` in each session's controls report.
 
