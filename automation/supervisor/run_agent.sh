@@ -277,6 +277,32 @@ case "$agent_runner" in
       exit 69
     fi
     cp "$hermes_config" "$HERMES_HOME/config.yaml"
+    # Stop the session after N tool-calling iterations. Diagnostic only: this is how the
+    # first-turn accounting slice reads its token counts as soon as one provider turn has
+    # completed, instead of waiting out a whole research phase.
+    #
+    # stream-json only, and refused rather than ignored on the other transport. At the
+    # pinned revision the cap cannot reach a --oneshot session at all: hermes_cli/oneshot.py
+    # builds its AIAgent without passing max_iterations, so run_agent.py's default of
+    # sys.maxsize stands, and the three ways to set it - the --max-turns flag,
+    # agent.max_turns in config.yaml, and HERMES_MAX_ITERATIONS - are all read in
+    # cli_init_mixin._init_turn_limits, on the chat path, which --oneshot bypasses
+    # ("Bypasses cli.py entirely"). A receipt saying max_turns=1 over a session that ran to
+    # the wall clock is worse than no cap at all, so this exits instead.
+    max_turns="${REPO_AUTOMATION_HERMES_MAX_TURNS:-}"
+    if [[ -n "$max_turns" ]]; then
+      case "$max_turns" in
+        '' | *[!0-9]* | 0)
+          echo "REPO_AUTOMATION_HERMES_MAX_TURNS must be a positive integer: $max_turns" >&2
+          exit 64
+          ;;
+      esac
+      if [[ "$hermes_transport" != "stream-json" ]]; then
+        echo "REPO_AUTOMATION_HERMES_MAX_TURNS is only honoured on the stream-json transport;" >&2
+        echo "the pinned --oneshot path ignores every turn cap. Got: $hermes_transport." >&2
+        exit 64
+      fi
+    fi
     # The model-facing sandbox, when the caller built one. The adapter materializes the
     # ProgramBench cleanroom into the workspace and names the image here; TERMINAL_CWD
     # above is that workspace, which Hermes bind-mounts at /workspace inside the image.
@@ -377,6 +403,13 @@ PROBE
       # requires -q, so the prompt moves off --oneshot onto --query.
       hermes_args=(chat "${hermes_args[@]}" --format stream-json)
       hermes_prompt_flag="--query"
+      # The flag, not config: _CHAT_PASSTHROUGH carries max_turns into the CLI, which passes
+      # it to AIAgent as max_iterations (cli_agent_setup_mixin.py:664). Nothing is written
+      # into hermes-benchmark.yaml, because that file is the posture every A-E lane shares
+      # and a lane must not be capped at one turn.
+      if [[ -n "$max_turns" ]]; then
+        hermes_args+=(--max-turns "$max_turns")
+      fi
       # Removes the one avoidable difference from --oneshot, which sets this itself. Without
       # it `hermes chat -q` takes the unattended path, and approvals.single_query_mode
       # defaults to deny, so execute_code answers BLOCKED and the diagnostic measures a
@@ -434,6 +467,7 @@ PROBE
  "refused_tools":$refused_tools,
  "tool_observation":"$tool_observation",
  "transport":"$hermes_transport",
+"max_turns":${max_turns:-null},
  "provider":"${HERMES_INFERENCE_PROVIDER:-}",
  "model":"${HERMES_INFERENCE_MODEL:-}",
  "sandbox":{"backend":"$sandbox_backend",

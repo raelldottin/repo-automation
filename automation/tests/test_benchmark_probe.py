@@ -11,8 +11,10 @@ those survives being killed at a ceiling.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -848,3 +850,227 @@ class TerminalResultTests(unittest.TestCase):
             final,
         )
         self.assertNotIn("model", final)
+
+
+class FirstTurnAccountingTests(unittest.TestCase):
+    """The accounting slice: one completed provider turn, then read what it spent.
+
+    The stream-json probe ruled out tool and sandbox latency but cannot say whether the model
+    reasoned silently or the provider was slow, because the emitter drops reasoning events by
+    design. `reasoning_tokens` is what separates the two, and neither transport gives both
+    halves: --oneshot writes a usage report but honours no turn cap, and the capped chat path
+    writes no report. So the cap goes on the chat path and the accounting is read from Hermes'
+    own session ledger, which every path writes through.
+    """
+
+    INSTANCE = "abishekvashok__cmatrix.5c082c6"
+    # Shape taken from hermes_cli/oneshot.py's _USAGE_KEYS, not invented.
+    REPORT = {
+        "input_tokens": 5852,
+        "output_tokens": 55,
+        "reasoning_tokens": 35,
+        "total_tokens": 5942,
+        "api_calls": 2,
+        "model": "z-ai/glm-5.3",
+        "provider": "nvidia",
+        "completed": False,
+        "partial": True,
+        "interrupted": False,
+        "turn_exit_reason": "max_turns",
+    }
+    SESSION_ID = "sess-1f485258"
+    # Columns as hermes_state_common.py declares them for session_model_usage.
+    LEDGER_COLUMNS = (
+        "session_id",
+        "model",
+        "billing_provider",
+        "api_call_count",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "estimated_cost_usd",
+    )
+
+    def _write_ledger(self, hermes_home: Path, rows: list[tuple]) -> None:
+        from automation.benchmark.probe import LEDGER_TABLE, SESSION_DB_FILENAME
+
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        with contextlib.closing(sqlite3.connect(hermes_home / SESSION_DB_FILENAME)) as conn:
+            conn.execute(f"CREATE TABLE {LEDGER_TABLE} ({', '.join(self.LEDGER_COLUMNS)})")
+            conn.executemany(f"INSERT INTO {LEDGER_TABLE} VALUES ({', '.join('?' * len(self.LEDGER_COLUMNS))})", rows)
+            conn.commit()
+
+    ROW = (SESSION_ID, "z-ai/glm-5.3", "nvidia", 2, 5852, 55, 0, 0, 35, 0.001)
+
+    def _run(self, out: Path, *, transport: str, max_turns=None, session: str = "ledger", rows=None):
+        """Run the probe against a fake session that leaves what that transport leaves.
+
+        `session`: "ledger" writes a stream plus a controls receipt and a ledger row, as the
+        capped chat path does; "report" writes a --usage-file report, as --oneshot does;
+        "nothing" leaves neither.
+        """
+        from automation.benchmark.probe import CONTROLS_SUFFIX, STREAM_JSON_SUFFIX, USAGE_SUFFIX, run_probe
+
+        captured: dict = {}
+
+        def runner(_command: str, _workspace: Path, env, _timeout: int) -> int:
+            captured.update(env)
+            sessions = Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"])
+            sessions.mkdir(parents=True, exist_ok=True)
+            if session == "report":
+                (sessions / f"turn{USAGE_SUFFIX}").write_text(json.dumps(self.REPORT), encoding="utf-8")
+            elif session == "ledger":
+                home = sessions / "hermes-home"
+                (sessions / f"turn{STREAM_JSON_SUFFIX}").write_text(
+                    json.dumps({"type": "system", "subtype": "init", "session_id": self.SESSION_ID}) + "\n",
+                    encoding="utf-8",
+                )
+                (sessions / f"turn{CONTROLS_SUFFIX}").write_text(
+                    json.dumps({"hermes_home": str(home), "max_turns": 1}), encoding="utf-8"
+                )
+                self._write_ledger(home, list(rows) if rows is not None else [self.ROW])
+            return 0
+
+        record = run_probe(
+            self.INSTANCE,
+            out,
+            repo_root=REPO_ROOT,
+            budget_seconds=1800,
+            runner=runner,
+            cleanroom=False,
+            transport=transport,
+            max_turns=max_turns,
+        )
+        return record, captured
+
+    def test_the_turn_cap_goes_to_the_transport_that_consumes_it(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            record, env = self._run(Path(raw) / "probe", transport="stream-json", max_turns=1)
+
+            self.assertEqual("stream-json", env["REPO_AUTOMATION_HERMES_TRANSPORT"])
+            self.assertEqual("1", env["REPO_AUTOMATION_HERMES_MAX_TURNS"])
+            self.assertEqual(1, record["max_turns"])
+
+    def test_a_cap_on_the_uncappable_transport_is_refused_not_recorded(self) -> None:
+        """At the pinned revision --oneshot builds its AIAgent without max_iterations, so
+        sys.maxsize stands; the flag, agent.max_turns and HERMES_MAX_ITERATIONS are all read
+        on the chat path it bypasses. Recording the cap anyway would label a session that ran
+        to the wall clock as one turn."""
+        from automation.benchmark.probe import run_probe
+
+        def unreachable(*_args: object) -> int:
+            raise AssertionError("a refused cap must not reach a session")
+
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaises(ValueError) as refusal:
+                run_probe(
+                    self.INSTANCE,
+                    Path(raw) / "probe",
+                    repo_root=REPO_ROOT,
+                    runner=unreachable,
+                    cleanroom=False,
+                    transport="oneshot",
+                    max_turns=1,
+                )
+
+            self.assertIn("not honoured on the 'oneshot' transport", str(refusal.exception))
+
+    def test_an_uncapped_probe_says_nothing_about_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            record, env = self._run(Path(raw) / "probe", transport="oneshot", session="report")
+
+            self.assertNotIn("REPO_AUTOMATION_HERMES_MAX_TURNS", env)
+            self.assertIsNone(record["max_turns"])
+
+    def test_the_capped_transport_reads_its_accounting_from_the_session_ledger(self) -> None:
+        """The chat path writes no usage report, so the numbers come from the row Hermes wrote
+        for that exact session id - the one the stream names."""
+        with tempfile.TemporaryDirectory() as raw:
+            record, _env = self._run(Path(raw) / "probe", transport="stream-json", max_turns=1)
+
+            self.assertEqual("state.db:session_model_usage", record["usage_source"])
+            self.assertEqual(self.SESSION_ID, record["usage"]["session_id"])
+            self.assertEqual(35, record["usage"]["reasoning_tokens"])
+            self.assertEqual(2, record["usage"]["api_calls"])
+            self.assertEqual("z-ai/glm-5.3", record["usage"]["model"])
+            self.assertEqual("nvidia", record["usage"]["provider"])
+            rendered = summarize(record)
+            self.assertIn("reasoning 35", rendered)
+            self.assertIn("state.db:session_model_usage", rendered)
+            self.assertIn("per api call", rendered)
+
+    def test_two_routes_in_the_ledger_are_summed_and_said_to_be_a_blend(self) -> None:
+        """A fallback mid-session leaves two rows. Summing them and naming the busiest route is
+        the only reading available, so the record has to say the counts are not one model's."""
+        with tempfile.TemporaryDirectory() as raw:
+            record, _env = self._run(
+                Path(raw) / "probe",
+                transport="stream-json",
+                max_turns=1,
+                rows=[
+                    (self.SESSION_ID, "z-ai/glm-5.3", "nvidia", 3, 100, 10, 0, 0, 30, 0.001),
+                    (self.SESSION_ID, "fallback/model", "openrouter", 1, 50, 5, 0, 0, 5, 0.002),
+                ],
+            )
+
+            self.assertEqual(2, record["usage"]["routes"])
+            self.assertEqual(4, record["usage"]["api_calls"])
+            self.assertEqual(35, record["usage"]["reasoning_tokens"])
+            self.assertEqual("z-ai/glm-5.3", record["usage"]["model"])
+            self.assertIn("2 ROUTES summed", summarize(record))
+
+    def test_a_session_that_never_called_the_api_leaves_no_row_and_says_so(self) -> None:
+        from automation.benchmark.probe import ledger_usage
+
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw) / "home"
+            self.assertIsNone(ledger_usage(home, self.SESSION_ID))  # no database at all
+            self._write_ledger(home, [])
+            self.assertIsNone(ledger_usage(home, self.SESSION_ID))  # a database, no row
+
+    def test_the_reasoning_tokens_and_the_wall_clock_are_recorded_together(self) -> None:
+        """A token count without elapsed time cannot distinguish a long hidden trace from a
+        slow start to a short one - the ratio is the whole finding."""
+        with tempfile.TemporaryDirectory() as raw:
+            record, _env = self._run(Path(raw) / "probe", transport="oneshot", session="report")
+
+            self.assertEqual(self.REPORT, record["usage"])
+            self.assertEqual("usage.json", record["usage_source"])
+            self.assertIsInstance(record["elapsed_seconds"], float)
+            rendered = summarize(record)
+            self.assertIn("reasoning 35", rendered)
+            self.assertIn("exit_reason=max_turns", rendered)
+            self.assertIn("per api call", rendered)
+
+    def test_no_accounting_at_all_is_said_out_loud(self) -> None:
+        """Silence here would read as a turn that cost nothing, which is the one reading the
+        accounting slice exists to prevent."""
+        with tempfile.TemporaryDirectory() as raw:
+            record, _env = self._run(Path(raw) / "probe", transport="oneshot", session="nothing")
+
+            self.assertIsNone(record["usage"])
+            self.assertIsNone(record["usage_source"])
+            self.assertIn("NO USAGE REPORT", summarize(record))
+
+    def test_a_nonsense_transport_or_cap_is_refused_before_anything_runs(self) -> None:
+        from automation.benchmark.probe import run_probe
+
+        def unreachable(*_args: object) -> int:
+            raise AssertionError("refused arguments must not reach a session")
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            with self.assertRaises(ValueError):
+                run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, runner=unreachable, cleanroom=False, transport="grpc")
+            with self.assertRaises(ValueError):
+                run_probe(
+                    self.INSTANCE,
+                    out,
+                    repo_root=REPO_ROOT,
+                    runner=unreachable,
+                    cleanroom=False,
+                    transport="stream-json",
+                    max_turns=0,
+                )

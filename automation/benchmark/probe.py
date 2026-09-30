@@ -27,11 +27,14 @@ killed session leaves behind. The transport is the one difference, and it is the
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -62,6 +65,23 @@ from .strategies import (
 from .witness import SandboxWitness
 
 STREAM_JSON_SUFFIX = ".stream.jsonl"
+USAGE_SUFFIX = ".usage.json"
+CONTROLS_SUFFIX = ".controls.json"
+# The two transports this diagnostic can administer. stream-json shows the shape of a turn
+# and is blind to reasoning; oneshot shows the accounting and is blind to everything until
+# the turn ends. Neither is a lane.
+TRANSPORTS = ("stream-json", "oneshot")
+# The turn cap is only real on one of them. At the pinned revision `--oneshot` builds its
+# AIAgent without passing max_iterations at all (hermes_cli/oneshot.py:574), so the default
+# in run_agent.py:256 stands: sys.maxsize. Neither the flag, nor agent.max_turns in config,
+# nor HERMES_MAX_ITERATIONS reaches it - every one of those is read in cli_init_mixin, on
+# the chat path. Capping a oneshot session is not possible here without forking the pin.
+CAPPABLE_TRANSPORT = "stream-json"
+# Hermes' own per-session token accounting, inside the throwaway HERMES_HOME. Written
+# through update_token_counts, the chokepoint every per-API-call delta flows through on
+# every path, so a `chat -q` session lands here even though --usage-file does not.
+SESSION_DB_FILENAME = "state.db"
+LEDGER_TABLE = "session_model_usage"
 PROBE_FILENAME = "probe.json"
 # Where the workspace's .rpi artifacts are kept once they belong to the run directory.
 PROBE_RPI_DIRNAME = "rpi"
@@ -148,6 +168,100 @@ def terminal_result(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     return {key: final.get(key) for key in ("exit_code", "duration_ms", "tokens", "session_id")}
 
 
+def stream_session_id(events: list[dict[str, Any]]) -> Optional[str]:
+    """The session id the stream names, which is the key into Hermes' own accounting."""
+    for event in events:
+        session_id = event.get("session_id")
+        if session_id:
+            return str(session_id)
+    return None
+
+
+def ledger_usage(hermes_home: Path, session_id: str) -> Optional[dict[str, Any]]:
+    """The session's row in Hermes' own usage table, normalised to the usage-report keys.
+
+    This is the accounting source for the capped transport. ``--usage-file`` is written only
+    by ``--oneshot``, and ``--oneshot`` cannot be capped, so the one path that honours
+    ``--max-turns`` has to be read somewhere else - and ``session_model_usage`` carries the
+    field the whole diagnostic turns on, ``reasoning_tokens``, per session and per route.
+
+    Read-only, by URI: this is somebody else's database and the harness is reading evidence
+    out of it, not administering it. A session that never reached an API call leaves no row,
+    which is reported as no accounting rather than as zeros.
+    """
+    database = Path(hermes_home) / SESSION_DB_FILENAME
+    if not database.exists():
+        return None
+    columns = (
+        "model",
+        "billing_provider",
+        "api_call_count",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "estimated_cost_usd",
+    )
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = [
+                dict(row)
+                for row in conn.execute(f"SELECT {', '.join(columns)} FROM {LEDGER_TABLE} WHERE session_id = ?", (session_id,))
+            ]
+    except sqlite3.Error as error:
+        return {"error": f"{type(error).__name__}: {error}"}
+    if not rows:
+        return None
+
+    # One row per (model, provider) route. A fallback mid-session would give two, and summing
+    # the counters while naming only the busiest route would report a blend as if it were one
+    # model - so the route count travels with the numbers.
+    busiest = max(rows, key=lambda row: row.get("api_call_count") or 0)
+    totals = {
+        key: sum(int(row.get(key) or 0) for row in rows)
+        for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
+    }
+    return {
+        **totals,
+        "api_calls": sum(int(row.get("api_call_count") or 0) for row in rows),
+        "estimated_cost_usd": sum(float(row.get("estimated_cost_usd") or 0.0) for row in rows),
+        "model": busiest.get("model"),
+        "provider": busiest.get("billing_provider"),
+        "session_id": session_id,
+        "routes": len(rows),
+    }
+
+
+def _hermes_home(sessions_dir: Path) -> Optional[Path]:
+    """Where the session's throwaway HERMES_HOME was, as its own controls receipt recorded it."""
+    receipts = sorted(sessions_dir.glob(f"*{CONTROLS_SUFFIX}"))
+    if not receipts:
+        return None
+    try:
+        controls = json.loads(receipts[0].read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    home = controls.get("hermes_home")
+    return Path(home) if home else None
+
+
+def session_accounting(sessions_dir: Path) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    """The session id the stream named, and what Hermes recorded against it.
+
+    The pair the capped transport is read through, and the one the CI cap-consumption proof
+    calls: if the accounting source ever moves, the proof fails in a minute instead of a
+    30-minute diagnostic reporting no tokens and being read as a stalled provider.
+    """
+    streams = sorted(sessions_dir.glob(f"*{STREAM_JSON_SUFFIX}"))
+    session_id = stream_session_id(_events(streams[0])) if streams else None
+    home = _hermes_home(sessions_dir)
+    if not (session_id and home):
+        return session_id, None
+    return session_id, ledger_usage(home, session_id)
+
+
 def _refuse_pre_existing(path: Path) -> None:
     """Ownership is established by creation: what this run did not make, it does not clear."""
     if path.exists():
@@ -163,8 +277,22 @@ def run_probe(
     runner: Optional[CommandRunner] = None,
     env: Optional[dict[str, str]] = None,
     cleanroom: bool = True,
+    transport: str = "stream-json",
+    max_turns: Optional[int] = None,
 ) -> dict[str, Any]:
     """Administer the research phase once and keep everything it left behind."""
+    if transport not in TRANSPORTS:
+        raise ValueError(f"unknown transport {transport!r}; expected one of {', '.join(TRANSPORTS)}")
+    if max_turns is not None and max_turns < 1:
+        raise ValueError(f"max_turns must be at least 1, got {max_turns}")
+    if max_turns is not None and transport != CAPPABLE_TRANSPORT:
+        # Refused rather than ignored. The pinned --oneshot path would run to the wall budget
+        # while the receipt said max_turns=1, and a measurement labelled as one turn that was
+        # not one turn is worse than no measurement.
+        raise ValueError(
+            f"max_turns is not honoured on the {transport!r} transport at the pinned Hermes revision; "
+            f"use --transport {CAPPABLE_TRANSPORT}"
+        )
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     task = task_spec(instance_id)
@@ -190,7 +318,9 @@ def run_probe(
     if env:
         environment.update(env)
     environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(sessions_dir)
-    environment["REPO_AUTOMATION_HERMES_TRANSPORT"] = "stream-json"
+    environment["REPO_AUTOMATION_HERMES_TRANSPORT"] = transport
+    if max_turns is not None:
+        environment["REPO_AUTOMATION_HERMES_MAX_TURNS"] = str(max_turns)
 
     session_runner = runner or _subprocess_runner
     receipt = None
@@ -218,7 +348,11 @@ def run_probe(
         runner=session_runner,
     )
     prompt = research_prompt(task)
+    # Measured here because the phase result does not carry it, and a token count without the
+    # time it took cannot say whether a long turn was spent generating or spent waiting.
+    started = time.monotonic()
     result = run_phase(ctx, PROBE_PHASE, prompt, {"objective": task.objective}, budget_seconds)
+    elapsed_seconds = round(time.monotonic() - started, 1)
 
     data, text = read_artifact(workspace, RESEARCH_ARTIFACT)
     copied: list[str] = []
@@ -266,11 +400,36 @@ def run_probe(
     sessions = _agent_sessions(out_dir)
     streams = sorted(sessions_dir.glob(f"*{STREAM_JSON_SUFFIX}"))
     events = _events(streams[0]) if streams else []
+    # Two transports, two accounting sources, because each path leaves exactly one. Recorded
+    # with the source named: the numbers mean the same thing, but how much of the run they
+    # cover does not - the report is the whole -z call, the ledger row is the session.
+    usage_reports = sorted(sessions_dir.glob(f"*{USAGE_SUFFIX}"))
+    usage_source: Optional[str] = None
+    usage = None
+    if usage_reports:
+        usage = json.loads(usage_reports[0].read_text(encoding="utf-8"))
+        usage_source = USAGE_SUFFIX.lstrip(".")
+    else:
+        _session_id, usage = session_accounting(sessions_dir)
+        if usage is not None:
+            usage_source = f"{SESSION_DB_FILENAME}:{LEDGER_TABLE}"
 
     record = {
         "instance_id": task.instance_id,
         "phase": PROBE_PHASE,
-        "transport": "stream-json",
+        "transport": transport,
+        "max_turns": max_turns,
+        # Wall time beside the token counts, because the ratio is the finding: ten minutes
+        # spent emitting a large hidden reasoning trace and ten minutes spent waiting to
+        # start a small one look identical in a duration alone.
+        "elapsed_seconds": elapsed_seconds,
+        "usage_source": usage_source,
+        # reasoning_tokens, which is the field the latency question turns on, and which the
+        # stream protocol drops. Off --oneshot it comes from --usage-file, and there it also
+        # carries `turn_exit_reason`; off the capped transport it comes from Hermes' own
+        # session_model_usage row, which has no exit reason - the stream's terminal `result`
+        # says how the session ended there.
+        "usage": usage,
         # The environment, recorded rather than assumed: a probe.json that does not say which
         # sandbox it ran in cannot be told apart from the synthetic-repo ones that preceded it.
         "cleanroom": receipt.to_dict() if receipt is not None else None,
@@ -334,7 +493,9 @@ def summarize(record: dict[str, Any]) -> str:
     stream, artifact, phase = record["stream"], record["artifact"], record["phase_result"]
     lines = [
         f"instance      {record['instance_id']}",
-        f"phase         {record['phase']} via {record['transport']}, {record['prompt_chars']} prompt chars",
+        f"phase         {record['phase']} via {record['transport']}"
+        + (f", max {record['max_turns']} turn(s)" if record.get("max_turns") else "")
+        + f", {record['prompt_chars']} prompt chars",
         f"ended         rc {phase['returncode']} ({phase['state']}) after {phase['seconds']:.0f}s of {record['budget_seconds']}s",
         f"stream        {stream['events']} events ({stream['text_deltas']} text deltas) in {stream['file'] or 'no stream file'}",
         f"artifact      {'present' if artifact['present'] else 'ABSENT'}"
@@ -352,6 +513,29 @@ def summarize(record: dict[str, Any]) -> str:
             f"session       exit {final.get('exit_code')} after {(final.get('duration_ms') or 0) / 1000:.0f}s,"
             f" tokens {(final.get('tokens') or {}).get('total')} (this transport names no model)"
         )
+    usage = record.get("usage")
+    elapsed = record.get("elapsed_seconds")
+    if usage:
+        # Tokens and time on adjacent lines, because the question is a ratio: a large hidden
+        # reasoning trace and a slow start to a small one are the same wall clock.
+        lines.append(
+            f"accounting    in {usage.get('input_tokens')} / out {usage.get('output_tokens')}"
+            f" / reasoning {usage.get('reasoning_tokens')} tokens over {usage.get('api_calls')} api calls"
+        )
+        lines.append(f"              {usage.get('model')} on {usage.get('provider')}, per {record.get('usage_source')}")
+        if usage.get("turn_exit_reason") is not None or usage.get("completed") is not None:
+            # --usage-file only. The ledger row records what was spent, not why it stopped.
+            lines.append(
+                f"              completed={usage.get('completed')} partial={usage.get('partial')}"
+                f" interrupted={usage.get('interrupted')} exit_reason={usage.get('turn_exit_reason')}"
+            )
+        if (usage.get("routes") or 1) > 1:
+            lines.append(f"              {usage['routes']} ROUTES summed: the counts are a blend, not one model's")
+        if elapsed is not None:
+            per_call = elapsed / (usage.get("api_calls") or 1)
+            lines.append(f"              {elapsed:.0f}s wall, {per_call:.0f}s per api call")
+    else:
+        lines.append("accounting    NO USAGE REPORT: no report and no ledger row, so no token counts to read")
     for violation in record.get("sandbox", {}).get("violations", []):
         lines.append(f"sandbox flag  {violation}")
     rpi = record["rpi"]
@@ -398,6 +582,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Forward this launcher variable to the probe session. Repeatable. Name only, never NAME=value.",
     )
     parser.add_argument(
+        "--transport",
+        choices=TRANSPORTS,
+        default="stream-json",
+        help="stream-json shows the shape of a turn, can be capped with --max-turns, and "
+        "reports its accounting from Hermes' session ledger; oneshot is what a lane runs, "
+        "shows nothing until the turn ends, writes a --usage-file report, and cannot be capped.",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        help="Stop the session after N tool-calling iterations. stream-json only - the "
+        "pinned --oneshot path honours no turn cap at all. Use 1 to read the accounting as "
+        "soon as one provider turn completes instead of waiting out the whole phase.",
+    )
+    parser.add_argument(
         "--no-cleanroom",
         dest="cleanroom",
         action="store_false",
@@ -418,6 +618,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         budget_seconds=args.budget,
         env=resolve_agent_env(args.agent_env),
         cleanroom=args.cleanroom,
+        transport=args.transport,
+        max_turns=args.max_turns,
     )
     print(summarize(record))
     return 0
