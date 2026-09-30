@@ -617,6 +617,70 @@ class AutomationHarnessTests(unittest.TestCase):
             )
             self.assertNotEqual(hashlib.sha256(profile.encode()).hexdigest(), controls["config_sha256"])
 
+    # The documentation names ProgramBench actually ships, for an image whose docs are a
+    # FAQ, an extensionless README and a man page - and no `README.md` anywhere.
+    FIGLET_WORKSPACE_ENTRIES = ("FAQ", "LICENSE", "README", "figlet.6")
+
+    def test_the_sandbox_probe_accepts_a_cleanroom_whose_docs_are_not_named_readme_md(self) -> None:
+        """The probe asks whether Hermes got the workspace, not what the docs are called.
+
+        `cmatsuoka__figlet.202a0a8` ships FAQ, README and figlet.6. The probe used to run
+        `test -f README.md`, so it refused that cell - and because a CleanroomError aborts
+        the whole run rather than the cell, run 36724292484 lost every instance after it,
+        35 sound cells in, over a filename. cleanroom.py already refuses an image with no
+        documentation at all, by type and convention rather than by one name.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workspace = temp_path / "workspace"
+            (workspace / ".git").mkdir(parents=True)
+            self.write_fake_executable(workspace / "executable", "#!/usr/bin/env bash\nprintf 'figlet\\n'\n")
+            for name in self.FIGLET_WORKSPACE_ENTRIES:
+                (workspace / name).write_text(f"{name} contents\n", encoding="utf-8")
+            self.assertFalse((workspace / "README.md").exists())
+
+            bin_dir = temp_path / "bin"
+            bin_dir.mkdir()
+            self.write_fake_executable(bin_dir / "hermes", "#!/usr/bin/env bash\nexit 1\n")
+            self.write_fake_executable(bin_dir / "docker", "#!/usr/bin/env bash\nprintf 'sha256:c0ffee\\n'\n")
+            # Stands in for Hermes' interpreter running terminal_tool twice: it discards the
+            # probe program on stdin and runs the composed command where the container would
+            # run it, so what is under test is the command itself against real file shapes.
+            self.write_fake_executable(
+                bin_dir / "python",
+                "#!/usr/bin/env bash\ncat > /dev/null\nstatus=0\n"
+                'for task in default "probe-$$"; do\n'
+                '  if output="$(sh -c "$REPO_AUTOMATION_SANDBOX_PROBE_COMMAND" 2>&1)"; then code=0; else code=$?; status=1; fi\n'
+                '  printf \'{"task_id": "%s", "result": {"output": "%s", "exit_code": %s}}\\n\' "$task" "$output" "$code"\n'
+                "done\nexit $status\n",
+            )
+
+            usage_dir = temp_path / "sessions"
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+            env["REPO_AUTOMATION_AGENT_RUNNER"] = "hermes"
+            env["REPO_AUTOMATION_HERMES_PYTHON"] = str(bin_dir / "python")
+            env["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(usage_dir)
+            env["REPO_AUTOMATION_HERMES_SANDBOX_IMAGE"] = "programbench/cmatsuoka_1776_figlet.202a0a8:task_cleanroom_v6"
+
+            result = subprocess.run(
+                [str(self.repo_root / "automation/supervisor/run_agent.sh"), "--repo-root", str(workspace), "--sandbox-probe"],
+                # Where a cleanroom cell runs it, and where `docker -w /workspace` puts the
+                # command: relative paths in the probe resolve against the workspace.
+                cwd=workspace,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            probe_log = (usage_dir / "sandbox-probe.log").read_text(encoding="utf-8")
+            self.assertEqual(2, probe_log.count('"exit_code": 0'))
+            self.assertNotIn('"exit_code": 1', probe_log)
+            # The fix is the absence of a second documentation contract, so assert the
+            # absence: a future edit that reintroduces a filename fails here.
+            self.assertNotIn("README", probe_log)
+
     def test_agent_wrapper_keeps_the_session_output_beside_its_reports(self) -> None:
         """Why a session failed is only ever printed; the usage report never says.
 
