@@ -420,20 +420,36 @@ environment it is administering. An empty list is a real answer, not a missing o
 ## In production (CI)
 
 `.github/workflows/effectiveness-benchmark.yml` runs the full set on `ubuntu-latest`
-(native x86_64) on a nightly schedule and on manual dispatch. It requires the
-repository secret **`NVIDIA_API_KEY`** and uploads `effectiveness-report.json` plus the
-per-instance `*.eval.json` and `cleanroom.json` files as a build artifact. Benchmark and
-lane runs pass `--cleanroom`. Three things are proved before any agent budget is spent:
-every key in both Hermes profiles resolves against the pinned revision's own defaults
-(Hermes ignores keys it does not know, and a silently ignored `docker_network` is an agent
-with internet access), one trivial agent session completes and writes where it was told to,
-and one instance's cleanroom materializes and fails all four egress probes. That last check
-writes its receipt to `out/preflight/cleanroom.json`, so the artifact carries it even when
-no cell ran.
+(native x86_64) **on manual dispatch only**:
+
+> Nightly execution is intentionally disabled while model availability and viable phase
+> budgets are being established. Run manually so every campaign has an explicit model,
+> purpose, and generation.
+
+The benchmark is an administered experiment, not a health check. The last nightly — run
+36724292484 — spent 5h34m to produce nothing interpretable: nine cells each hit the 1800s
+wall having written no file, then the provider stopped serving the pinned model mid-run
+(`HTTP 404` from 18:27 UTC, `HTTP 403 Authorization failed` from 19:21). A cron that can
+consume hours without yielding a readable effectiveness result is worse than no cron,
+because its failures arrive unattributed and nobody chose to spend that time. Restore the
+schedule only alongside a representative campaign design, not merely once this incident
+closes. `workflow_dispatch` and every input are unchanged.
+
+A run requires the repository secret **`NVIDIA_API_KEY`** and uploads
+`effectiveness-report.json` plus the per-instance `*.eval.json` and `cleanroom.json` files as
+a build artifact. Benchmark and lane runs pass `--cleanroom`. Three things are proved before
+any agent budget is spent: every key in both Hermes profiles resolves against the pinned
+revision's own defaults (Hermes ignores keys it does not know, and a silently ignored
+`docker_network` is an agent with internet access), one trivial agent session completes and
+writes where it was told to, and one instance's cleanroom materializes and fails all four
+egress probes. That last check writes its receipt to `out/preflight/cleanroom.json`, so the
+artifact carries it even when no cell ran.
 
 The model id is pinned in the job environment, not read straight off `inputs.model`: the
-`inputs` context is populated for `workflow_dispatch` only, so a scheduled run does not
-inherit the dispatch input's default and would otherwise start with an empty model id.
+`inputs` context is populated for `workflow_dispatch` only and an empty `model` input is
+falsy, so the guard supplies the baseline id for both — and for any trigger added later. It
+was written when a nightly schedule existed; the schedule is gone, but a run whose model id
+resolved to the empty string is still the failure worth preventing.
 
 Dispatching with **`preflight_only`** runs the deterministic checks and stops: the config
 check, the cleanroom materialization and its egress probes, and nothing that spends a model
@@ -743,7 +759,7 @@ ledger row carrying non-zero input and output tokens is the accounting source st
 where the probe reads it. Both have a silent failure mode worth a minute: a cap the transport
 ignores produces a confident mislabel, and an accounting source that moved produces zero
 tokens, which reads exactly like a stalled provider. The step is gated on the probe input, so
-scheduled A–E runs are untouched.
+an A–E dispatch is untouched.
 
 One research phase at the lane's own 600-second ceiling. `out/probe/probe.json` holds the
 phase result, the artifact and its schema errors, the tool-event timeline with offsets from

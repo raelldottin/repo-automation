@@ -4,8 +4,19 @@ name: Effectiveness Benchmark
 # ProgramBench programs and scoring them with ProgramBench's black-box test suites.
 #
 # This is heavyweight (Docker cleanroom images + LLM calls + long runtime), so it never
-# runs on push/PR. Trigger it manually, or let the nightly schedule run it. Requires the
-# repository secret NVIDIA_API_KEY (an OpenAI-compatible key for the agent).
+# runs on push/PR. Requires the repository secret NVIDIA_API_KEY (an OpenAI-compatible key
+# for the agent).
+#
+# Nightly execution is intentionally disabled while model availability and viable phase
+# budgets are being established. Run manually so every campaign has an explicit model,
+# purpose, and generation.
+#
+# This is an administered experiment, not a health check. The last nightly - run
+# 36724292484 - spent 5h34m to produce nothing interpretable: nine cells each hit the
+# 1800s wall having written no file, then the provider stopped serving the pinned model
+# mid-run. A cron that can consume hours without yielding a readable effectiveness result
+# is worse than no cron, because its failures arrive unattributed. Restore the schedule
+# only alongside a representative campaign design, not merely once this incident closes.
 
 on:
   workflow_dispatch:
@@ -54,9 +65,6 @@ on:
         description: "Diagnostic only: the probe's wall ceiling in seconds. Raise it above the phase ceiling when capping turns, so the cap is what ends the session."
         type: string
         default: "600"
-  schedule:
-    # 07:17 UTC nightly — off the top of the hour on purpose.
-    - cron: "17 7 * * *"
 
 permissions:
   contents: read
@@ -76,9 +84,10 @@ jobs:
       # engine, not the treatment.
       REPO_AUTOMATION_AGENT_RUNNER: hermes
       HERMES_INFERENCE_PROVIDER: nvidia
-      # `inputs` is populated for workflow_dispatch only. A scheduled run does not inherit
-      # the dispatch input's default, so `${{ inputs.model }}` alone would hand the nightly
-      # an empty model id. The baseline model is named here, where the schedule reads it.
+      # `inputs` is populated for workflow_dispatch only, and an empty `model` input is
+      # falsy, so this guard supplies the baseline id for both - and for any trigger added
+      # later. It was added when a nightly schedule existed; that schedule is gone, but a
+      # run whose model id resolved to the empty string is still the failure to avoid.
       HERMES_INFERENCE_MODEL: >-
         ${{ github.event_name == 'workflow_dispatch'
             && inputs.model
@@ -397,7 +406,7 @@ jobs:
           uv run python -c "from automation.benchmark import jspace; print(jspace.resolve().provenance())"
 
       # The experiment costs lanes x repeats x instances agent runs, so it is manual only
-      # and defaults to the smoke set. Never add it to the nightly schedule unattended.
+      # and defaults to the smoke set. Never put it behind an unattended trigger.
       - name: Run lane experiment (A-E)
         if: inputs.experiment == true && inputs.probe != true && inputs.preflight_only != true
         run: |
