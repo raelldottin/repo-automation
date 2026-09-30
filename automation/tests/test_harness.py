@@ -682,6 +682,92 @@ exit 7
             controls = sorted(usage_dir.glob("*.controls.json"))
             self.assertEqual([logs[0].name.removesuffix(".log")], [c.name.removesuffix(".controls.json") for c in controls])
 
+    def _run_hermes_wrapper(self, temp_path: Path, hermes_body: str, extra_env: dict) -> subprocess.CompletedProcess:
+        """Launch the wrapper on the hermes runner with a fake CLI, and hand back its exit."""
+        repo_root = temp_path / "repo"
+        (repo_root / ".git").mkdir(parents=True)
+        prompt_path = temp_path / "prompt.md"
+        prompt_path.write_text("rebuild it", encoding="utf-8")
+        context_path = temp_path / "context.json"
+        context_path.write_text("{}", encoding="utf-8")
+        bin_dir = temp_path / "bin"
+        bin_dir.mkdir()
+        self.write_fake_executable(bin_dir / "hermes", hermes_body)
+        env = os.environ.copy()
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+        env["REPO_AUTOMATION_AGENT_RUNNER"] = "hermes"
+        env["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(temp_path / "sessions")
+        env.update(extra_env)
+
+        return subprocess.run(
+            [
+                str(self.repo_root / "automation/supervisor/run_agent.sh"),
+                "--repo-root",
+                str(repo_root),
+                "--prompt-file",
+                str(prompt_path),
+                "--context-file",
+                str(context_path),
+                "--handoff-file",
+                str(temp_path / "handoff.json"),
+                "--slice-id",
+                "slice-c:research",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_agent_wrapper_caps_the_turn_through_config_because_the_flag_misses_this_path(self) -> None:
+        """The cap has to reach the session as `agent.max_turns`, and only for this session.
+
+        `--max-turns` parses on --oneshot and then does nothing: _run_oneshot_from_args never
+        forwards it. The shared benchmark posture file must stay uncapped, so the cap is
+        appended to the per-session config copy instead.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            result = self._run_hermes_wrapper(
+                temp_path,
+                '#!/usr/bin/env bash\ncat "$HERMES_HOME/config.yaml"\n',
+                {"REPO_AUTOMATION_HERMES_MAX_TURNS": "1"},
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("max_turns: 1", result.stdout)
+            shared = (self.repo_root / "automation/supervisor/hermes-benchmark.yaml").read_text(encoding="utf-8")
+            self.assertNotIn("max_turns", shared)
+            controls = sorted((temp_path / "sessions").glob("*.controls.json"))
+            self.assertEqual(1, json.loads(controls[0].read_text(encoding="utf-8"))["max_turns"])
+
+    def test_agent_wrapper_refuses_a_turn_cap_that_is_not_a_positive_integer(self) -> None:
+        """A cap of "one" would append a config line the agent reads as no cap at all, and the
+        diagnostic would then bill a full phase while claiming to have stopped after a turn."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            for bad in ("one", "0", "-1", "1.5"):
+                with self.subTest(max_turns=bad):
+                    result = self._run_hermes_wrapper(
+                        (temp_path / bad.replace(".", "_")),
+                        "#!/usr/bin/env bash\necho launched\n",
+                        {"REPO_AUTOMATION_HERMES_MAX_TURNS": bad},
+                    )
+
+                    self.assertEqual(64, result.returncode, result.stdout)
+                    self.assertIn("must be a positive integer", result.stderr)
+                    self.assertNotIn("launched", result.stdout)
+
+    def test_agent_wrapper_leaves_the_turn_budget_alone_when_no_cap_is_asked_for(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            result = self._run_hermes_wrapper(temp_path, '#!/usr/bin/env bash\ncat "$HERMES_HOME/config.yaml"\n', {})
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn("max_turns", result.stdout)
+            controls = sorted((temp_path / "sessions").glob("*.controls.json"))
+            self.assertIsNone(json.loads(controls[0].read_text(encoding="utf-8"))["max_turns"])
+
     def test_format_agent_command_shell_quotes_placeholder_values(self) -> None:
         formatted = format_agent_command(
             command_template=(

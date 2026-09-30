@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -62,6 +63,11 @@ from .strategies import (
 from .witness import SandboxWitness
 
 STREAM_JSON_SUFFIX = ".stream.jsonl"
+USAGE_SUFFIX = ".usage.json"
+# The two transports this diagnostic can administer. stream-json shows the shape of a turn
+# and is blind to reasoning; oneshot shows the accounting and is blind to everything until
+# the turn ends. Neither is a lane.
+TRANSPORTS = ("stream-json", "oneshot")
 PROBE_FILENAME = "probe.json"
 # Where the workspace's .rpi artifacts are kept once they belong to the run directory.
 PROBE_RPI_DIRNAME = "rpi"
@@ -163,8 +169,14 @@ def run_probe(
     runner: Optional[CommandRunner] = None,
     env: Optional[dict[str, str]] = None,
     cleanroom: bool = True,
+    transport: str = "stream-json",
+    max_turns: Optional[int] = None,
 ) -> dict[str, Any]:
     """Administer the research phase once and keep everything it left behind."""
+    if transport not in TRANSPORTS:
+        raise ValueError(f"unknown transport {transport!r}; expected one of {', '.join(TRANSPORTS)}")
+    if max_turns is not None and max_turns < 1:
+        raise ValueError(f"max_turns must be at least 1, got {max_turns}")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     task = task_spec(instance_id)
@@ -190,7 +202,9 @@ def run_probe(
     if env:
         environment.update(env)
     environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(sessions_dir)
-    environment["REPO_AUTOMATION_HERMES_TRANSPORT"] = "stream-json"
+    environment["REPO_AUTOMATION_HERMES_TRANSPORT"] = transport
+    if max_turns is not None:
+        environment["REPO_AUTOMATION_HERMES_MAX_TURNS"] = str(max_turns)
 
     session_runner = runner or _subprocess_runner
     receipt = None
@@ -218,7 +232,11 @@ def run_probe(
         runner=session_runner,
     )
     prompt = research_prompt(task)
+    # Measured here because the phase result does not carry it, and a token count without the
+    # time it took cannot say whether a long turn was spent generating or spent waiting.
+    started = time.monotonic()
     result = run_phase(ctx, PROBE_PHASE, prompt, {"objective": task.objective}, budget_seconds)
+    elapsed_seconds = round(time.monotonic() - started, 1)
 
     data, text = read_artifact(workspace, RESEARCH_ARTIFACT)
     copied: list[str] = []
@@ -266,11 +284,21 @@ def run_probe(
     sessions = _agent_sessions(out_dir)
     streams = sorted(sessions_dir.glob(f"*{STREAM_JSON_SUFFIX}"))
     events = _events(streams[0]) if streams else []
+    usage_reports = sorted(sessions_dir.glob(f"*{USAGE_SUFFIX}"))
+    usage = json.loads(usage_reports[0].read_text(encoding="utf-8")) if usage_reports else None
 
     record = {
         "instance_id": task.instance_id,
         "phase": PROBE_PHASE,
-        "transport": "stream-json",
+        "transport": transport,
+        "max_turns": max_turns,
+        # Wall time beside the token counts, because the ratio is the finding: ten minutes
+        # spent emitting a large hidden reasoning trace and ten minutes spent waiting to
+        # start a small one look identical in a duration alone.
+        "elapsed_seconds": elapsed_seconds,
+        # Only --oneshot writes one. It is the sole place reasoning_tokens is visible, and
+        # `turn_exit_reason` is the field that separates an iteration-budget stop from a kill.
+        "usage": usage,
         # The environment, recorded rather than assumed: a probe.json that does not say which
         # sandbox it ran in cannot be told apart from the synthetic-repo ones that preceded it.
         "cleanroom": receipt.to_dict() if receipt is not None else None,
@@ -334,7 +362,9 @@ def summarize(record: dict[str, Any]) -> str:
     stream, artifact, phase = record["stream"], record["artifact"], record["phase_result"]
     lines = [
         f"instance      {record['instance_id']}",
-        f"phase         {record['phase']} via {record['transport']}, {record['prompt_chars']} prompt chars",
+        f"phase         {record['phase']} via {record['transport']}"
+        + (f", max {record['max_turns']} turn(s)" if record.get("max_turns") else "")
+        + f", {record['prompt_chars']} prompt chars",
         f"ended         rc {phase['returncode']} ({phase['state']}) after {phase['seconds']:.0f}s of {record['budget_seconds']}s",
         f"stream        {stream['events']} events ({stream['text_deltas']} text deltas) in {stream['file'] or 'no stream file'}",
         f"artifact      {'present' if artifact['present'] else 'ABSENT'}"
@@ -352,6 +382,25 @@ def summarize(record: dict[str, Any]) -> str:
             f"session       exit {final.get('exit_code')} after {(final.get('duration_ms') or 0) / 1000:.0f}s,"
             f" tokens {(final.get('tokens') or {}).get('total')} (this transport names no model)"
         )
+    usage = record.get("usage")
+    elapsed = record.get("elapsed_seconds")
+    if usage:
+        # Tokens and time on adjacent lines, because the question is a ratio: a large hidden
+        # reasoning trace and a slow start to a small one are the same wall clock.
+        lines.append(
+            f"accounting    in {usage.get('input_tokens')} / out {usage.get('output_tokens')}"
+            f" / reasoning {usage.get('reasoning_tokens')} tokens over {usage.get('api_calls')} api calls"
+        )
+        lines.append(
+            f"              {usage.get('model')} on {usage.get('provider')},"
+            f" completed={usage.get('completed')} partial={usage.get('partial')}"
+            f" interrupted={usage.get('interrupted')} exit_reason={usage.get('turn_exit_reason')}"
+        )
+        if elapsed is not None:
+            per_call = elapsed / (usage.get("api_calls") or 1)
+            lines.append(f"              {elapsed:.0f}s wall, {per_call:.0f}s per api call")
+    elif record["transport"] == "oneshot":
+        lines.append("accounting    NO USAGE REPORT: the turn left none, so no token counts to read")
     for violation in record.get("sandbox", {}).get("violations", []):
         lines.append(f"sandbox flag  {violation}")
     rpi = record["rpi"]
@@ -398,6 +447,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Forward this launcher variable to the probe session. Repeatable. Name only, never NAME=value.",
     )
     parser.add_argument(
+        "--transport",
+        choices=TRANSPORTS,
+        default="stream-json",
+        help="stream-json shows the shape of a turn and cannot see reasoning; oneshot shows "
+        "nothing until the turn ends but is the only path that writes a usage report.",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        help="Stop the turn after N tool-calling iterations, via agent.max_turns in the "
+        "session config. Use 1 to read the accounting as soon as one provider turn completes "
+        "instead of waiting out the whole phase.",
+    )
+    parser.add_argument(
         "--no-cleanroom",
         dest="cleanroom",
         action="store_false",
@@ -418,6 +482,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         budget_seconds=args.budget,
         env=resolve_agent_env(args.agent_env),
         cleanroom=args.cleanroom,
+        transport=args.transport,
+        max_turns=args.max_turns,
     )
     print(summarize(record))
     return 0

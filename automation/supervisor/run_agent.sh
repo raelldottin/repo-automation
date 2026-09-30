@@ -277,6 +277,29 @@ case "$agent_runner" in
       exit 69
     fi
     cp "$hermes_config" "$HERMES_HOME/config.yaml"
+    # Stop the turn after N tool-calling iterations. Diagnostic only: this is how the
+    # first-turn accounting slice gets a usage report as soon as one provider turn has
+    # completed, instead of waiting out a whole research phase to read its token counts.
+    #
+    # It has to be config. `--max-turns` is a real flag, and on the `chat` path it is
+    # honoured (_CHAT_PASSTHROUGH in hermes_cli/main.py carries max_turns), but
+    # `_run_oneshot_from_args` forwards seven kwargs and that is not one of them -
+    # `run_oneshot` has no such parameter at all. Passing the flag to --oneshot parses
+    # fine and silently does nothing, which is the failure mode main.py warns about for
+    # --resume. The flag's own help names the equivalent: "default: 500, or
+    # agent.max_turns in config". Appended, not written into hermes-benchmark.yaml,
+    # because that file is the posture every A-E lane shares and a lane must not be
+    # capped at one turn.
+    max_turns="${REPO_AUTOMATION_HERMES_MAX_TURNS:-}"
+    if [[ -n "$max_turns" ]]; then
+      case "$max_turns" in
+        '' | *[!0-9]* | 0)
+          echo "REPO_AUTOMATION_HERMES_MAX_TURNS must be a positive integer: $max_turns" >&2
+          exit 64
+          ;;
+      esac
+      printf '\nagent:\n  max_turns: %s\n' "$max_turns" >> "$HERMES_HOME/config.yaml"
+    fi
     # The model-facing sandbox, when the caller built one. The adapter materializes the
     # ProgramBench cleanroom into the workspace and names the image here; TERMINAL_CWD
     # above is that workspace, which Hermes bind-mounts at /workspace inside the image.
@@ -434,6 +457,7 @@ PROBE
  "refused_tools":$refused_tools,
  "tool_observation":"$tool_observation",
  "transport":"$hermes_transport",
+"max_turns":${max_turns:-null},
  "provider":"${HERMES_INFERENCE_PROVIDER:-}",
  "model":"${HERMES_INFERENCE_MODEL:-}",
  "sandbox":{"backend":"$sandbox_backend",

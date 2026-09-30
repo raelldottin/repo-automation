@@ -848,3 +848,118 @@ class TerminalResultTests(unittest.TestCase):
             final,
         )
         self.assertNotIn("model", final)
+
+
+class FirstTurnAccountingTests(unittest.TestCase):
+    """The accounting slice: one completed provider turn, then read the receipt.
+
+    The stream-json probe ruled out tool and sandbox latency but cannot say whether the model
+    reasoned silently or the provider was slow, because the emitter drops reasoning events by
+    design. Only `--oneshot` writes a usage report, and `reasoning_tokens` there is the field
+    that separates the two. Capping the turn is what makes it affordable: the receipt arrives
+    when one turn completes instead of when the whole phase does.
+    """
+
+    INSTANCE = "abishekvashok__cmatrix.5c082c6"
+    # Shape taken from hermes_cli/oneshot.py's _USAGE_KEYS, not invented.
+    REPORT = {
+        "input_tokens": 5852,
+        "output_tokens": 55,
+        "reasoning_tokens": 35,
+        "total_tokens": 5942,
+        "api_calls": 2,
+        "model": "z-ai/glm-5.3",
+        "provider": "nvidia",
+        "completed": False,
+        "partial": True,
+        "interrupted": False,
+        "turn_exit_reason": "max_turns",
+    }
+
+    def _run(self, out: Path, *, transport: str, max_turns=None, write_usage: bool = True):
+        from automation.benchmark.probe import USAGE_SUFFIX, run_probe
+
+        captured: dict = {}
+
+        def runner(_command: str, _workspace: Path, env, _timeout: int) -> int:
+            captured.update(env)
+            sessions = Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"])
+            sessions.mkdir(parents=True, exist_ok=True)
+            if write_usage:
+                (sessions / f"turn{USAGE_SUFFIX}").write_text(json.dumps(self.REPORT), encoding="utf-8")
+            return 0
+
+        record = run_probe(
+            self.INSTANCE,
+            out,
+            repo_root=REPO_ROOT,
+            budget_seconds=1800,
+            runner=runner,
+            cleanroom=False,
+            transport=transport,
+            max_turns=max_turns,
+        )
+        return record, captured
+
+    def test_the_turn_cap_travels_as_config_because_the_flag_does_not(self) -> None:
+        """`--max-turns` is honoured on the chat path but `_run_oneshot_from_args` never
+        forwards it, so on this transport the flag parses and silently does nothing. The
+        launcher appends agent.max_turns instead, which is what the flag's help names."""
+        with tempfile.TemporaryDirectory() as raw:
+            record, env = self._run(Path(raw) / "probe", transport="oneshot", max_turns=1)
+
+            self.assertEqual("oneshot", env["REPO_AUTOMATION_HERMES_TRANSPORT"])
+            self.assertEqual("1", env["REPO_AUTOMATION_HERMES_MAX_TURNS"])
+            self.assertEqual(1, record["max_turns"])
+
+    def test_an_uncapped_probe_says_nothing_about_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            record, env = self._run(Path(raw) / "probe", transport="stream-json")
+
+            self.assertNotIn("REPO_AUTOMATION_HERMES_MAX_TURNS", env)
+            self.assertIsNone(record["max_turns"])
+
+    def test_the_reasoning_tokens_and_the_wall_clock_are_recorded_together(self) -> None:
+        """A token count without elapsed time cannot distinguish a long hidden trace from a
+        slow start to a short one - the ratio is the whole finding."""
+        with tempfile.TemporaryDirectory() as raw:
+            record, _env = self._run(Path(raw) / "probe", transport="oneshot", max_turns=1)
+
+            self.assertEqual(self.REPORT, record["usage"])
+            self.assertEqual(35, record["usage"]["reasoning_tokens"])
+            self.assertEqual("max_turns", record["usage"]["turn_exit_reason"])
+            self.assertIsInstance(record["elapsed_seconds"], float)
+            rendered = summarize(record)
+            self.assertIn("reasoning 35", rendered)
+            self.assertIn("per api call", rendered)
+            self.assertIn("exit_reason=max_turns", rendered)
+
+    def test_a_missing_usage_report_is_said_out_loud(self) -> None:
+        """Silence here would read as a turn that cost nothing, which is the one reading the
+        accounting slice exists to prevent."""
+        with tempfile.TemporaryDirectory() as raw:
+            record, _env = self._run(Path(raw) / "probe", transport="oneshot", max_turns=1, write_usage=False)
+
+            self.assertIsNone(record["usage"])
+            self.assertIn("NO USAGE REPORT", summarize(record))
+
+    def test_a_nonsense_transport_or_cap_is_refused_before_anything_runs(self) -> None:
+        from automation.benchmark.probe import run_probe
+
+        def unreachable(*_args: object) -> int:
+            raise AssertionError("refused arguments must not reach a session")
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            with self.assertRaises(ValueError):
+                run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, runner=unreachable, cleanroom=False, transport="grpc")
+            with self.assertRaises(ValueError):
+                run_probe(
+                    self.INSTANCE,
+                    out,
+                    repo_root=REPO_ROOT,
+                    runner=unreachable,
+                    cleanroom=False,
+                    transport="oneshot",
+                    max_turns=0,
+                )

@@ -542,6 +542,7 @@ out/<lane>/r<repeat>/<instance>/run.json            provenance + process metrics
 out/<lane>/r<repeat>/<instance>/rpi/                phase artifacts (C–E)
 out/<lane>/r<repeat>/<instance>/agent-sessions/     per-session usage + controls + log + sandbox
 out/probe/probe.json | probe/cleanroom.json | probe/agent-sessions/*.stream.jsonl
+out/probe/agent-sessions/*.usage.json                 accounting slice only (--oneshot)
                                                     diagnostic only, not a cell
 out/<lane>/r<repeat>/effectiveness-report.json      ProgramBench score for that cell
 out/lane-comparison.json | lane-comparison.md       the comparison
@@ -663,6 +664,46 @@ so a later assignment would not take — which removes that one avoidable differ
 not make the two transports identical. Catastrophic commands still stop at the hardline
 floor, which runs ahead of the override, and the session is in a network-none disposable
 container either way.
+
+### First-turn accounting (`--max-turns`)
+
+The transport above ruled execution latency out and cannot rule anything else in. Hermes'
+stream-json emitter carries `system/init`, text deltas, `tool_use`, `tool_result` and the
+terminal `result` and nothing else — its own `on_tool_progress` says reasoning progress is
+not part of the protocol — and a reasoning model emits no text until it has finished
+reasoning. So a phase that reasons through its whole ceiling and is killed before its first
+visible token records exactly one event, which looks identical to a provider that never
+answered. Run 36679174467 recorded that: init at ~6s, 599 seconds of silence, no tool call,
+no artifact.
+
+`reasoning_tokens` is what separates the two, and only `--oneshot` writes it, in the
+`--usage-file` report. Hence the accounting slice: the same lane-C research prompt in the
+same cleanroom on the default transport, capped at one turn.
+
+```shell
+uv run python -m automation.benchmark.probe \
+  --instance abishekvashok__cmatrix.5c082c6 --out-dir out/probe \
+  --transport oneshot --max-turns 1 --budget 1800 \
+  --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
+```
+
+The cap travels as **config, not a flag**. `--max-turns` is real and is honoured on the
+`chat` path, but `_run_oneshot_from_args` forwards seven kwargs and that is not one of them,
+and `run_oneshot` has no such parameter — so passing it to `--oneshot` parses fine and
+silently does nothing. The launcher appends `agent.max_turns` to the session's own copy of
+the config, which is the equivalent the flag's own help names. It is appended to the copy and
+never to `hermes-benchmark.yaml`, because that file is the posture every A–E lane shares and
+a lane must not be capped at one turn. A value that is not a positive integer is refused with
+exit 64.
+
+The report is read into the record's `usage` key and printed beside `elapsed_seconds`,
+because the finding is a ratio: ten minutes spent emitting a large hidden reasoning trace
+and ten minutes spent waiting to start a small one are the same wall clock. A missing report
+is printed as `NO USAGE REPORT` rather than omitted — silence there would read as a turn
+that cost nothing. `--usage-file` is written on every exit path including the iteration
+limit, so the receipt arrives when one turn completes instead of when the phase does. The
+report names a model and a provider; like the terminal `result`, that is what the CLI asked
+for, and the job-level preflight stays the check that compares served against asked.
 
 One research phase at the lane's own 600-second ceiling. `out/probe/probe.json` holds the
 phase result, the artifact and its schema errors, the tool-event timeline with offsets from
