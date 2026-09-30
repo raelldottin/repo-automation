@@ -23,7 +23,8 @@ from typing import Optional
 
 from automation.benchmark.adapter import AGENT_SESSIONS_DIR, _default_command_template, _subprocess_runner
 from automation.benchmark.instances import TaskSpec, task_spec
-from automation.benchmark.probe import STREAM_JSON_SUFFIX, artifact_mentions, timeline
+from automation.tests.test_benchmark_effectiveness import StubWitness, _fake_prepare
+from automation.benchmark.probe import STREAM_JSON_SUFFIX, artifact_mentions, summarize, timeline
 from automation.benchmark.strategies import (
     AGENT_TIMEOUT_RETURNCODE,
     PHASE_CENSORED,
@@ -43,8 +44,15 @@ FAKE_HERMES = '''#!/usr/bin/env python3
 """Stand in for the pinned Hermes CLI: one transport that speaks, one that does not."""
 import json, sys, time
 
+import os, pathlib
+
 argv = sys.argv[1:]
 stream = argv[0] == "chat" and "--format" in argv and "stream-json" in argv
+# What the launcher put in the environment, before this process could change it. The real
+# CLI freezes HERMES_YOLO_MODE at import, so only an export made before the exec counts.
+pathlib.Path(sys.argv[0] + ".env.json").write_text(
+    json.dumps({"HERMES_YOLO_MODE": os.environ.get("HERMES_YOLO_MODE")})
+)
 
 def emit(obj):
     sys.stdout.write(json.dumps(obj) + "\\n")
@@ -93,13 +101,13 @@ def _run_phase(tmp: Path, transport: str):
         runner=_subprocess_runner,
     )
     result = run_phase(ctx, "research", research_prompt(TASK), {"objective": TASK.objective}, PHASE_BUDGET_SECONDS)
-    return result, sessions_dir
+    return result, sessions_dir, hermes
 
 
 class StreamTransportTests(unittest.TestCase):
     def test_a_killed_stream_session_keeps_every_event_it_flushed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            result, sessions_dir = _run_phase(Path(raw), "stream-json")
+            result, sessions_dir, _hermes = _run_phase(Path(raw), "stream-json")
 
             self.assertEqual(AGENT_TIMEOUT_RETURNCODE, result.returncode)
             self.assertEqual(PHASE_CENSORED, result.state)
@@ -123,7 +131,7 @@ class StreamTransportTests(unittest.TestCase):
     def test_the_oneshot_transport_still_leaves_nothing_when_killed(self) -> None:
         """Not a regression - the reason the probe had to exist."""
         with tempfile.TemporaryDirectory() as raw:
-            result, sessions_dir = _run_phase(Path(raw), "oneshot")
+            result, sessions_dir, _hermes = _run_phase(Path(raw), "oneshot")
 
             self.assertEqual(AGENT_TIMEOUT_RETURNCODE, result.returncode)
             self.assertEqual([], sorted(sessions_dir.glob(f"*{STREAM_JSON_SUFFIX}")))
@@ -136,21 +144,39 @@ class TransportContractTests(unittest.TestCase):
     def test_the_stream_transport_records_itself_and_claims_no_usage(self) -> None:
         """A probe must not look like a cell that was served and spent nothing."""
         with tempfile.TemporaryDirectory() as raw:
-            _result, sessions_dir = _run_phase(Path(raw), "stream-json")
+            _result, sessions_dir, _hermes = _run_phase(Path(raw), "stream-json")
 
             controls = sorted(sessions_dir.glob("*.controls.json"))
             self.assertEqual(1, len(controls))
             recorded = json.loads(controls[0].read_text(encoding="utf-8"))
             self.assertEqual("stream-json", recorded["transport"])
             self.assertEqual([], sorted(sessions_dir.glob("*.usage.json")))
-            # Asking for a toolset is not being given it: Hermes' single-query mode answers
-            # BLOCKED to execute_code, so a probe's receipt has to name the tool it asked
-            # for and did not get.
-            self.assertEqual(["code_execution"], recorded["refused_tools"])
+            # Nothing here refuses a pinned tool by configuration any more, so the receipt
+            # claims no refusal; what the session was actually given is read off the JSONL.
+            self.assertEqual([], recorded["refused_tools"])
+
+    def test_the_stream_transport_is_launched_without_the_approval_difference(self) -> None:
+        """`hermes chat -q` denies execute_code unattended, and freezes the override at
+        import - so an export after the exec would measure a session working around a
+        refusal the diagnostic did not mean to administer."""
+        with tempfile.TemporaryDirectory() as raw:
+            _result, _sessions_dir, hermes = _run_phase(Path(raw), "stream-json")
+
+            observed = json.loads(Path(str(hermes) + ".env.json").read_text(encoding="utf-8"))
+            self.assertEqual("1", observed["HERMES_YOLO_MODE"])
+
+    def test_the_default_transport_is_left_to_set_its_own_approval_mode(self) -> None:
+        """--oneshot sets it inside Hermes. Exporting it here too would change the posture
+        every A-E lane has been measured under, for no diagnostic gain."""
+        with tempfile.TemporaryDirectory() as raw:
+            _result, _sessions_dir, hermes = _run_phase(Path(raw), "oneshot")
+
+            observed = json.loads(Path(str(hermes) + ".env.json").read_text(encoding="utf-8"))
+            self.assertIsNone(observed["HERMES_YOLO_MODE"])
 
     def test_the_default_transport_is_unchanged_and_still_reports_usage(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            _result, sessions_dir = _run_phase(Path(raw), "oneshot")
+            _result, sessions_dir, _hermes = _run_phase(Path(raw), "oneshot")
 
             controls = json.loads(sorted(sessions_dir.glob("*.controls.json"))[0].read_text(encoding="utf-8"))
             self.assertEqual("oneshot", controls["transport"])
@@ -159,9 +185,8 @@ class TransportContractTests(unittest.TestCase):
                 controls["requested_toolsets"],
                 "the transport switch must not disturb the pinned posture",
             )
-            # The other transport refuses execute_code. This one has not been observed
-            # refusing anything, which is a different claim from having been observed
-            # allowing everything.
+            # Not observed refusing anything is a different claim from observed allowing
+            # everything, which is why effective_tools stays null on both transports.
             self.assertEqual([], controls["refused_tools"])
             self.assertIsNone(controls["effective_tools"])
 
@@ -254,6 +279,7 @@ class ProbeRecordTests(unittest.TestCase):
                 out,
                 repo_root=REPO_ROOT,
                 budget_seconds=30,
+                cleanroom=False,
                 runner=self._runner(checkpoint, events),
             )
 
@@ -333,6 +359,7 @@ class ProbeEnvironmentIsolationTests(unittest.TestCase):
                 Path(raw) / "probe",
                 repo_root=REPO_ROOT,
                 budget_seconds=30,
+                cleanroom=False,
                 runner=self._capturing_runner(captured),
                 env=probe_env,
             )
@@ -379,7 +406,7 @@ class ProbeArtifactLinkTests(unittest.TestCase):
             Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
             return 0
 
-        return run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+        return run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner, cleanroom=False)
 
     def test_a_symlinked_artifact_is_not_copied_and_its_target_is_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -433,7 +460,7 @@ class ProbeArtifactLinkTests(unittest.TestCase):
                 Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
                 return 0
 
-            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner, cleanroom=False)
 
             self.assertFalse((out / "rpi" / "id_rsa").exists(), "a linked artifact container was followed")
             self.assertFalse((out / "rpi").exists(), "a linked artifact container produced a run directory")
@@ -462,7 +489,7 @@ class ProbeArtifactLinkTests(unittest.TestCase):
                 Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
                 return 0
 
-            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner, cleanroom=False)
 
             self.assertTrue((out / "rpi" / "research.json").is_file(), "the real artifact was lost with the directory")
             self.assertFalse((out / "rpi" / "nested").exists())
@@ -480,7 +507,7 @@ class ProbeArtifactLinkTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as raw:
             out = Path(raw) / "probe"
-            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner, cleanroom=False)
             self.assertEqual([], record["rpi"]["skipped_links"])
             self.assertEqual([], record["rpi"]["skipped_non_files"])
             self.assertFalse(record["rpi"]["container_skipped"])
@@ -518,6 +545,7 @@ class ProbeOutputOwnershipTests(unittest.TestCase):
             out_dir,
             repo_root=REPO_ROOT,
             budget_seconds=30,
+            cleanroom=False,
             runner=self._runner(calls if calls is not None else [], squats),
         )
 
@@ -624,7 +652,7 @@ class ProbeHardLinkTests(unittest.TestCase):
                 Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
                 return 0
 
-            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner, cleanroom=False)
 
             self.assertFalse(
                 (out / "rpi" / "id_rsa").exists(),
@@ -659,7 +687,7 @@ class ProbeSummaryRenderingTests(unittest.TestCase):
                 Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
                 return 0
 
-            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+            record = run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner, cleanroom=False)
             summary = summarize(record)
 
             # The run this describes wrote no artifact at all.
@@ -670,3 +698,153 @@ class ProbeSummaryRenderingTests(unittest.TestCase):
             )
             # Escaped for printing, kept verbatim in the record: the real name is evidence.
             self.assertEqual([name], record["rpi"]["skipped_non_files"])
+
+
+class ProbeCleanroomInheritanceTests(unittest.TestCase):
+    """The diagnostic has to run where a cell runs.
+
+    Before this, the probe built a bare `git init` workspace on the local filesystem, named
+    it after the real instance id, and reached Hermes' local backend with no ProgramBench
+    executable, no bundled docs and no network-none container. Its timings would have
+    described the pre-cleanroom environment that PR #55 and #56 retired, and a 600-second
+    answer about the wrong sandbox is worse than no answer.
+    """
+
+    INSTANCE = "abishekvashok__cmatrix.5c082c6"
+
+    def _run(self, out: Path, calls: list):
+        from automation.benchmark import probe as probe_module
+
+        def runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+            calls.append({"workspace": workspace, "env": dict(env)})
+            sessions = Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"])
+            sessions.mkdir(parents=True, exist_ok=True)
+            (sessions / f"turn{STREAM_JSON_SUFFIX}").write_text(
+                json.dumps({"type": "system", "subtype": "init", "timestamp": 1000})
+                + "\n"
+                + json.dumps(
+                    {"type": "result", "exit_code": 0, "duration_ms": 612000, "tokens": {"total": 4096}, "session_id": "s-1"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        proofs: list = []
+        witness = StubWitness()
+        with unittest.mock.patch.object(probe_module, "prepare_cleanroom", _fake_prepare):
+            with unittest.mock.patch.object(probe_module, "SandboxWitness", lambda *a, **k: witness):
+                with unittest.mock.patch.object(probe_module, "probe_sandbox", lambda *a, **k: proofs.append(len(calls))):
+                    record = probe_module.run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+        return record, proofs
+
+    def test_the_probe_session_runs_in_the_cell_s_own_cleanroom(self) -> None:
+        from automation.benchmark.adapter import SANDBOX_IMAGE_ENV
+        from automation.benchmark.cleanroom import image_for
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            calls: list = []
+            record, proofs = self._run(out, calls)
+
+            self.assertEqual(1, len(calls))
+            # Named by the image the caller materialized, so run_agent.sh takes its sandbox
+            # branch instead of Hermes' local backend.
+            self.assertEqual(image_for(self.INSTANCE), calls[0]["env"][SANDBOX_IMAGE_ENV])
+            self.assertEqual("stream-json", calls[0]["env"]["REPO_AUTOMATION_HERMES_TRANSPORT"])
+            # De-identified, like a cell's: the agent's shell prompt shows this directory.
+            workspace = calls[0]["workspace"].name
+            self.assertIn(task_spec(self.INSTANCE).public_id, workspace)
+            self.assertNotIn(self.INSTANCE, workspace)
+            # Proven before the budget is spent, not after.
+            self.assertEqual([0], proofs, "the sandbox proof did not run before the model turn")
+
+    def test_the_receipts_are_kept_beside_the_record(self) -> None:
+        from automation.benchmark.adapter import CLEANROOM_RECEIPT_FILENAME
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            record, _proofs = self._run(out, [])
+
+            receipt = json.loads((out / CLEANROOM_RECEIPT_FILENAME).read_text(encoding="utf-8"))
+            self.assertEqual("none", receipt["network_mode"])
+            self.assertEqual(receipt, record["cleanroom"])
+            self.assertTrue(record["sandbox"]["observation"]["observed"])
+            self.assertEqual([], record["sandbox"]["violations"])
+            self.assertIn("NetworkMode=none", summarize(record))
+
+    def test_a_sandbox_violation_is_recorded_rather_than_raised(self) -> None:
+        """A cell refuses, because a violated sandbox makes its score not a ProgramBench
+        result. A probe has no score, and its timeline is the whole deliverable - throwing
+        that away over a finding about the environment would lose the finding too."""
+        from automation.benchmark import probe as probe_module
+
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+
+            def runner(_command: str, _workspace: Path, env, _timeout: int) -> int:
+                Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+                return 0
+
+            witness = StubWitness(violations=("container ran with NetworkMode=bridge",))
+            with unittest.mock.patch.object(probe_module, "prepare_cleanroom", _fake_prepare):
+                with unittest.mock.patch.object(probe_module, "SandboxWitness", lambda *a, **k: witness):
+                    with unittest.mock.patch.object(probe_module, "probe_sandbox", lambda *a, **k: None):
+                        record = probe_module.run_probe(self.INSTANCE, out, repo_root=REPO_ROOT, budget_seconds=30, runner=runner)
+
+            self.assertEqual(["container ran with NetworkMode=bridge"], record["sandbox"]["violations"])
+            self.assertIn("NetworkMode=bridge", summarize(record))
+
+    def test_the_synthetic_path_says_it_is_not_a_cell_s_environment(self) -> None:
+        """--no-cleanroom exists to exercise this module without Docker. Its summary must not
+        read like a measurement of the environment a lane runs in."""
+        from automation.benchmark.probe import run_probe
+
+        def runner(_command: str, _workspace: Path, env, _timeout: int) -> int:
+            Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+            return 0
+
+        with tempfile.TemporaryDirectory() as raw:
+            record = run_probe(
+                self.INSTANCE,
+                Path(raw) / "probe",
+                repo_root=REPO_ROOT,
+                budget_seconds=30,
+                runner=runner,
+                cleanroom=False,
+            )
+
+            self.assertIsNone(record["cleanroom"])
+            self.assertEqual([], record["sandbox"]["violations"])
+            self.assertIn("NO CLEANROOM", summarize(record))
+
+
+class TerminalResultTests(unittest.TestCase):
+    """What PR #54 was for, kept without its transport claim: stream-json carries the turn's
+    duration and token counts, and names no model. The job-level preflight is what compares
+    served against asked."""
+
+    def test_the_final_result_event_is_the_only_accounting_this_transport_gives(self) -> None:
+        from automation.benchmark.probe import terminal_result
+
+        self.assertIsNone(terminal_result([{"type": "text", "text": "hi"}]))
+        final = terminal_result(
+            [
+                {"type": "result", "exit_code": 1, "duration_ms": 1},
+                {
+                    "type": "result",
+                    "exit_code": 0,
+                    "duration_ms": 612000,
+                    "tokens": {"total": 4096},
+                    "session_id": "s-1",
+                    "model": "",
+                },
+            ]
+        )
+        assert final is not None
+        # The last one wins, and nothing model-shaped is carried forward.
+        self.assertEqual(
+            {"exit_code": 0, "duration_ms": 612000, "tokens": {"total": 4096}, "session_id": "s-1"},
+            final,
+        )
+        self.assertNotIn("model", final)

@@ -248,8 +248,10 @@ jobs:
       # the cell if it does not hold; this run-level check catches a missing Docker, a
       # withdrawn image tag or a runner whose containers still have egress in 90 seconds
       # rather than after a lane's worth of unusable results.
+      # The probe used to skip this, back when it ran in a synthetic git repo where the
+      # check described nothing it would touch. It runs in the cleanroom now, so the same
+      # 90-second refusal protects its 600 seconds too.
       - name: Verify the ProgramBench cleanroom holds
-        if: inputs.probe != true
         run: |
           set -o pipefail
           mkdir -p out/preflight
@@ -351,4 +353,5 @@ jobs:
             out/**/cleanroom.json
             out/probe/probe.json
             out/probe/agent-sessions/*.stream.jsonl
+            out/probe/agent-sessions/*.controls.json
           if-no-files-found: warn
