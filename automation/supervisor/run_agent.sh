@@ -377,6 +377,16 @@ PROBE
       # requires -q, so the prompt moves off --oneshot onto --query.
       hermes_args=(chat "${hermes_args[@]}" --format stream-json)
       hermes_prompt_flag="--query"
+      # Removes the one avoidable difference from --oneshot, which sets this itself. Without
+      # it `hermes chat -q` takes the unattended path, and approvals.single_query_mode
+      # defaults to deny, so execute_code answers BLOCKED and the diagnostic measures a
+      # session working around a refusal instead of one doing the work. In the pinned agent
+      # tools/approval.py checks _yolo_active() before that unattended branch, and freezes
+      # the value from the environment at import - so exporting it here, before the process
+      # starts, is the only assignment that can take effect. Catastrophic commands still
+      # stop at the hardline floor, which runs ahead of this, and the session is in a
+      # network-none disposable container either way.
+      export HERMES_YOLO_MODE=1
     else
       hermes_prompt_flag="--oneshot"
     fi
@@ -398,17 +408,17 @@ PROBE
       # cell the sandbox block is appended after the copy, and a template hash would
       # describe a configuration that never ran.
       config_sha="$(sha256_of "$HERMES_HOME/config.yaml")"
-      # Requested is not effective. `--toolsets` is what this invocation asked for; Hermes'
-      # single-query mode refuses execute_code outright (the tool answers BLOCKED), while
-      # the --oneshot path sets HERMES_YOLO_MODE=1 and has not been observed refusing it.
-      # Neither is an observation of *this* session, so effective_tools stays null rather
-      # than restating the request as though it had been confirmed.
+      # Requested is not effective. `--toolsets` is what this invocation asked for; nothing
+      # here observes what the session got, so effective_tools stays null rather than
+      # restating the request as though it had been confirmed. refused_tools is for refusals
+      # this harness knows it caused by configuration - both transports now run with
+      # HERMES_YOLO_MODE=1, so neither is expected to refuse a pinned tool, and an actual
+      # refusal is evidence in the stream rather than a prediction made here.
       requested_toolsets="$(printf '%s' "$hermes_toolsets" | sed 's/[^,]*/"&"/g')"
+      refused_tools='[]'
       if [[ "$hermes_transport" == "stream-json" ]]; then
-        refused_tools='["code_execution"]'
-        tool_observation="single-query mode refuses execute_code; observed on this transport, not in this session"
+        tool_observation="read the JSONL: every tool_use and tool_result is recorded there"
       else
-        refused_tools='[]'
         tool_observation="not observed: --oneshot leaves no tool-level transcript"
       fi
       cat > "$session_stem.controls.json" <<CONTROLS

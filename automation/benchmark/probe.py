@@ -13,6 +13,15 @@ This is a diagnostic, never a lane. ``hermes chat`` is a different execution pat
 comparable with an A-E cell. It exists to answer four questions about the research phase:
 what the model does first, whether it ever calls a tool to write the artifact, when, and
 what the tool said back.
+
+Everything *else* about the environment is the cell's, because a diagnostic run against a
+different environment answers a question nobody asked. It was not: this module used to
+``git init`` an empty directory and let Hermes pick its own local backend, which is the
+pre-cleanroom environment runs 35715428932 onward were administered in and which PR #55
+retired. So the workspace is now ProgramBench's own ``task_cleanroom_v6`` worktree, the
+image is named to run_agent.sh, the two sandbox backends are proved before the model turn,
+and the session runs under the same witness - including its exact-id reap of a container a
+killed session leaves behind. The transport is the one difference, and it is the point.
 """
 
 from __future__ import annotations
@@ -28,11 +37,15 @@ from typing import Any, Optional
 
 from .adapter import (
     AGENT_SESSIONS_DIR,
+    CLEANROOM_RECEIPT_FILENAME,
+    SANDBOX_IMAGE_ENV,
     CommandRunner,
     _default_command_template,
     _subprocess_runner,
     audited_inherited_environment,
+    probe_sandbox,
 )
+from .cleanroom import prepare as prepare_cleanroom
 from .instances import task_spec
 from .lanes import _agent_sessions
 from .run import resolve_agent_env
@@ -46,6 +59,7 @@ from .strategies import (
     research_prompt,
     run_phase,
 )
+from .witness import SandboxWitness
 
 STREAM_JSON_SUFFIX = ".stream.jsonl"
 PROBE_FILENAME = "probe.json"
@@ -116,6 +130,24 @@ def artifact_mentions(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [entry for entry, event in zip(timeline(events), named) if RESEARCH_ARTIFACT in json.dumps(event)]
 
 
+def terminal_result(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """What the final ``result`` event exposes - the only accounting this transport gives.
+
+    There is no ``--usage-file`` off anything but ``-z/--oneshot``, so a stream session
+    leaves no usage receipt. The terminal event does carry the exit code, the turn's
+    duration and its token counts, which is exactly the timing evidence this probe is for.
+
+    It is not provenance. Nothing here names the model or the provider, so no field of it may
+    be read as evidence of which model served the turn - that remains the job-level preflight,
+    which compares served against asked and fails the run on a mismatch.
+    """
+    finals = [event for event in events if event.get("type") == "result"]
+    if not finals:
+        return None
+    final = finals[-1]
+    return {key: final.get(key) for key in ("exit_code", "duration_ms", "tokens", "session_id")}
+
+
 def _refuse_pre_existing(path: Path) -> None:
     """Ownership is established by creation: what this run did not make, it does not clear."""
     if path.exists():
@@ -130,6 +162,7 @@ def run_probe(
     budget_seconds: int = PROBE_BUDGET_SECONDS,
     runner: Optional[CommandRunner] = None,
     env: Optional[dict[str, str]] = None,
+    cleanroom: bool = True,
 ) -> dict[str, Any]:
     """Administer the research phase once and keep everything it left behind."""
     out_dir = Path(out_dir)
@@ -138,11 +171,16 @@ def run_probe(
     _refuse_pre_existing(out_dir / PROBE_RPI_DIRNAME)
     _refuse_pre_existing(out_dir / PROBE_FILENAME)
 
-    # Same workspace construction as a cell: an agent that finds a different repo shape
-    # answers a different question.
-    workspace = Path(tempfile.mkdtemp(prefix=f"pb-probe-{task.instance_id}-"))
-    subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
-    control_dir = Path(tempfile.mkdtemp(prefix=f"pb-probe-control-{task.instance_id}-"))
+    # Same workspace construction as a cell, down to the name: the agent's shell prompt shows
+    # its own working directory, so `pb-probe-abishekvashok__cmatrix.5c082c6-x` would hand back
+    # the instance id the envelope stopped naming.
+    workspace = Path(tempfile.mkdtemp(prefix=f"pb-probe-{task.public_id}-"))
+    if not cleanroom:
+        # run_agent.sh refuses a non-git repo root. A cleanroom workspace gets its worktree
+        # from the image; this branch is the synthetic repo, and nothing it measures describes
+        # the environment a cell runs in.
+        subprocess.run(["git", "init", "--quiet", str(workspace)], check=True)
+    control_dir = Path(tempfile.mkdtemp(prefix=f"pb-probe-control-{task.public_id}-"))
 
     sessions_dir = (out_dir / AGENT_SESSIONS_DIR).resolve()
     # A diagnostic reaches the same agent through the same shell as a lane, so it inherits
@@ -154,6 +192,21 @@ def run_probe(
     environment["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(sessions_dir)
     environment["REPO_AUTOMATION_HERMES_TRANSPORT"] = "stream-json"
 
+    session_runner = runner or _subprocess_runner
+    receipt = None
+    witness = None
+    if cleanroom:
+        # The cell's own inference environment, in the cell's own order: materialize, name the
+        # image to run_agent.sh, keep the receipt, then prove the two backends the model's
+        # tools would get. The proof raises before the budget is touched - a diagnostic run in
+        # the wrong sandbox costs 600 seconds and answers about the wrong sandbox.
+        receipt = prepare_cleanroom(task.instance_id, workspace, task.repository)
+        environment[SANDBOX_IMAGE_ENV] = receipt.image
+        (out_dir / CLEANROOM_RECEIPT_FILENAME).write_text(json.dumps(receipt.to_dict(), indent=2) + "\n", encoding="utf-8")
+        probe_sandbox(Path(repo_root), session_runner, workspace, environment, sessions_dir, receipt)
+        witness = SandboxWitness(sessions_dir, workspace, receipt.image, receipt.image_id)
+        session_runner = witness.wrap(session_runner)
+
     ctx = ExecutionContext(
         repo_root=Path(repo_root),
         task=task,
@@ -162,7 +215,7 @@ def run_probe(
         command_template=_default_command_template(Path(repo_root)),
         env=environment,
         timeout_seconds=budget_seconds,
-        runner=runner or _subprocess_runner,
+        runner=session_runner,
     )
     prompt = research_prompt(task)
     result = run_phase(ctx, PROBE_PHASE, prompt, {"objective": task.objective}, budget_seconds)
@@ -218,6 +271,16 @@ def run_probe(
         "instance_id": task.instance_id,
         "phase": PROBE_PHASE,
         "transport": "stream-json",
+        # The environment, recorded rather than assumed: a probe.json that does not say which
+        # sandbox it ran in cannot be told apart from the synthetic-repo ones that preceded it.
+        "cleanroom": receipt.to_dict() if receipt is not None else None,
+        # Recorded, not raised on. A cell refuses, because a violated sandbox makes its score
+        # not a ProgramBench result; this run has no score, and its timeline is the deliverable.
+        # Throwing the evidence away over a finding about the environment would lose both.
+        "sandbox": {
+            "observation": witness.receipt if witness is not None else None,
+            "violations": list(witness.violations) if witness is not None else [],
+        },
         "budget_seconds": budget_seconds,
         "prompt_chars": len(prompt),
         "phase_result": result.to_dict(),
@@ -241,6 +304,7 @@ def run_probe(
             "text_deltas": sum(1 for event in events if event.get("type") == "text"),
             "timeline": timeline(events),
             "artifact_mentions": artifact_mentions(events),
+            "terminal_result": terminal_result(events),
         },
         "agent_sessions": sessions,
     }
@@ -276,6 +340,20 @@ def summarize(record: dict[str, Any]) -> str:
         f"artifact      {'present' if artifact['present'] else 'ABSENT'}"
         f" ({artifact['chars']} chars, schema {artifact['schema_errors'] or 'valid'})",
     ]
+    cleanroom = record.get("cleanroom")
+    lines.append(
+        f"sandbox       {cleanroom['image']} on NetworkMode={cleanroom['network_mode']}"
+        if cleanroom
+        else "sandbox       NO CLEANROOM: synthetic repo, local backend - not a cell's environment"
+    )
+    final = stream.get("terminal_result")
+    if final:
+        lines.append(
+            f"session       exit {final.get('exit_code')} after {(final.get('duration_ms') or 0) / 1000:.0f}s,"
+            f" tokens {(final.get('tokens') or {}).get('total')} (this transport names no model)"
+        )
+    for violation in record.get("sandbox", {}).get("violations", []):
+        lines.append(f"sandbox flag  {violation}")
     rpi = record["rpi"]
     # Printed, not just recorded: these are the lines that stop a reader concluding the agent
     # wrote nothing when it wrote something the probe declined to follow.
@@ -319,6 +397,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Forward this launcher variable to the probe session. Repeatable. Name only, never NAME=value.",
     )
+    parser.add_argument(
+        "--no-cleanroom",
+        dest="cleanroom",
+        action="store_false",
+        help="Run in a synthetic git repo on the local filesystem instead of ProgramBench's "
+        "cleanroom image. For exercising this module without Docker; the timings it produces "
+        "describe no environment a cell runs in and are not comparable to a lane's.",
+    )
     return parser
 
 
@@ -331,6 +417,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         repo_root=args.repo_root,
         budget_seconds=args.budget,
         env=resolve_agent_env(args.agent_env),
+        cleanroom=args.cleanroom,
     )
     print(summarize(record))
     return 0

@@ -541,7 +541,8 @@ out/<lane>/r<repeat>/<instance>/submission.tar.gz   graded artefact
 out/<lane>/r<repeat>/<instance>/run.json            provenance + process metrics
 out/<lane>/r<repeat>/<instance>/rpi/                phase artifacts (C–E)
 out/<lane>/r<repeat>/<instance>/agent-sessions/     per-session usage + controls + log + sandbox
-out/probe/probe.json | probe/agent-sessions/*.stream.jsonl   diagnostic only, not a cell
+out/probe/probe.json | probe/cleanroom.json | probe/agent-sessions/*.stream.jsonl
+                                                    diagnostic only, not a cell
 out/<lane>/r<repeat>/effectiveness-report.json      ProgramBench score for that cell
 out/lane-comparison.json | lane-comparison.md       the comparison
 ```
@@ -614,8 +615,13 @@ ordinary controls receipt beside it and `transport` recorded in it.
 the agent, so a result produced on it is not comparable with an A–E cell measured on
 `--oneshot`, and it carries no `--usage-file` receipt — that flag has no effect outside
 `-z/--oneshot`, so the probe records no usage rather than an empty one that would read like
-a session that spent nothing. The default transport stays `oneshot`; an unrecognised value
-is refused with exit 64 rather than silently falling back.
+a session that spent nothing. What accounting the transport does give is the terminal
+`result` event — exit code, wall duration and token counts — recorded as
+`stream.terminal_result`. It is not provenance: that event's `model` field came back empty,
+so nothing in a probe record may be read as evidence of which model served the turn. The
+job-level preflight remains the check that compares served against asked. The default
+transport stays `oneshot`; an unrecognised value is refused with exit 64 rather than
+silently falling back.
 
 ```shell
 uv run python -m automation.benchmark.probe \
@@ -629,10 +635,40 @@ audited set of launcher variables and takes the rest one name at a time through 
 Being a diagnostic is why it needs the flag at all: with nothing selected it reaches the
 provider unauthenticated.
 
+It also runs **where a cell runs**. The probe materializes the same
+`task_cleanroom_v6` workspace through `prepare()`, names the image in
+`REPO_AUTOMATION_HERMES_SANDBOX_IMAGE`, runs the same `--sandbox-probe` proof of both
+backends before it spends any budget, and wraps the session in the same `SandboxWitness`,
+down to the exact-id cleanup on a timeout kill. Its workspace directory is named from
+`public_id`, like a cell's, because the agent's shell prompt shows its own working
+directory. The receipts land in `out/probe/cleanroom.json` and in the record's `cleanroom`
+and `sandbox` keys. Without this the probe answered about a bare `git init` directory on
+Hermes' local backend with no reference `./executable`, no bundled docs and no
+`NetworkMode=none` — the environment PRs #55 and #56 retired — and a 600-second answer
+about the wrong sandbox is worse than none.
+
+Witness findings are **recorded, not raised**, which is the one place the probe departs
+from a cell. A cell refuses on a violation because a violated sandbox makes its score not a
+ProgramBench result; a probe has no score, and its timeline is the whole deliverable, so
+discarding it over a finding about the environment would lose the finding too. The pre-turn
+`--sandbox-probe` proof still refuses outright — that one costs nothing to repeat.
+`--no-cleanroom` restores the old synthetic path for exercising the module without Docker;
+its summary says `NO CLEANROOM` and its timings are not comparable to a lane's.
+
+Unlike `--oneshot`, which sets `HERMES_YOLO_MODE=1` inside Hermes, the `chat -q` path takes
+the unattended approval route, where `approvals.single_query_mode` defaults to `deny` and
+`execute_code` answers `BLOCKED`. The launcher exports `HERMES_YOLO_MODE=1` for this
+transport only, before the process starts — `tools/approval.py` freezes the value at import,
+so a later assignment would not take — which removes that one avoidable difference. It does
+not make the two transports identical. Catastrophic commands still stop at the hardline
+floor, which runs ahead of the override, and the session is in a network-none disposable
+container either way.
+
 One research phase at the lane's own 600-second ceiling. `out/probe/probe.json` holds the
 phase result, the artifact and its schema errors, the tool-event timeline with offsets from
-the first event, and every event naming `research.json` at the offset of the event that
-named it; the printed summary answers what
+the first event, the terminal `result` accounting, the cleanroom and sandbox receipts, and
+every event naming `research.json` at the offset of the event that named it; the printed
+summary answers what
 the model did first, whether it ever called a tool to write the artifact, when, and what the
 tool said back. In CI it is the `probe` input on the workflow, which reuses the same Hermes
 install and config-verification preflight and skips the matrix and eval entirely.
