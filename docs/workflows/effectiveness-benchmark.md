@@ -295,12 +295,22 @@ probe** asks directly instead, with no model in the loop: `run_agent.sh --sandbo
 composes the same `HERMES_HOME/config.yaml`, exports the same `TERMINAL_CWD` and the same
 sandbox image the session will get, then runs, under Hermes's own interpreter,
 `apply_terminal_config_to_env()` followed by
-`terminal_tool("pwd && test -x ./executable && test -f README.md", ...)` twice: once with
+`terminal_tool("pwd && test -x ./executable && test -d .git", ...)` twice: once with
 `task_id=None`, once with a fresh `probe-<uuid>`, so both the `default` backend and the
 session-scoped backend an agent turn uses are exercised. Going through the config file is
 the point: that bridge is where `docker_persist_across_processes` takes effect. Its
 receipt and output land in `agent-sessions/sandbox-probe.sandbox.json` and
 `agent-sessions/sandbox-probe.log`.
+
+What it deliberately does **not** check is the documentation, because the cleanroom
+preflight above already owns that invariant and owns it generically: it discovers docs by
+type and convention — man pages, extensionless `README` and `FAQ` — refuses any image whose
+list comes back empty, and records the exact filenames in the receipt. This probe's job is
+narrower: prove Hermes was handed that already-verified workspace. A `test -f README.md`
+here was a second, weaker copy of the same contract, and it refused
+`cmatsuoka__figlet.202a0a8` — which ships `FAQ`, `README` and `figlet.6` — which aborted all
+of run 36724292484, 35 sound cells in, over a filename.
+`REPO_AUTOMATION_SANDBOX_PROBE_COMMAND` overrides the command for a one-off diagnostic.
 
 The cell is refused before the budget is spent unless both probes exit 0 and the witness
 saw, for each of the two backends, a container with the cleanroom image id,

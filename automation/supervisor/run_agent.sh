@@ -366,9 +366,17 @@ case "$agent_runner" in
         mkdir -p "$REPO_AUTOMATION_HERMES_USAGE_DIR"
         probe_log="$REPO_AUTOMATION_HERMES_USAGE_DIR/sandbox-probe.log"
       fi
-      # Reads the cleanroom the way a rebuild would: where am I, is the reference binary
-      # here, is the documentation here. Three facts, one exit status, no model tokens.
-      export REPO_AUTOMATION_SANDBOX_PROBE_COMMAND="${REPO_AUTOMATION_SANDBOX_PROBE_COMMAND:-pwd && test -x ./executable && test -f README.md}"
+      # Proves Hermes was handed the workspace the cleanroom already verified: where am I,
+      # is the reference binary here, is this the image's own Git worktree. Three facts,
+      # one exit status, no model tokens.
+      #
+      # Deliberately not a documentation check. cleanroom.py owns that invariant and owns
+      # it generically - it discovers docs by type and convention (man pages, extensionless
+      # README and FAQ), refuses any image whose list comes back empty, and records the
+      # exact filenames in the receipt. `test -f README.md` here was a second, weaker copy
+      # of that contract, and it refused cmatsuoka__figlet.202a0a8 - which ships FAQ,
+      # README and figlet.6 - aborting all of run 36724292484 over a filename.
+      export REPO_AUTOMATION_SANDBOX_PROBE_COMMAND="${REPO_AUTOMATION_SANDBOX_PROBE_COMMAND:-pwd && test -x ./executable && test -d .git}"
       set +e
       "$probe_python" - <<'PROBE' 2>&1 | tee "$probe_log"
 import json
