@@ -46,6 +46,14 @@ on:
         description: "Diagnostic only: run one research phase over the stream-json transport instead of any benchmark. Not a lane; its output is not comparable with a cell."
         type: boolean
         default: false
+      probe_max_turns:
+        description: "Diagnostic only: stop the probe session after N tool-calling iterations (empty = uncapped). 1 reads the first turn's accounting without paying for the whole phase."
+        type: string
+        default: ""
+      probe_budget:
+        description: "Diagnostic only: the probe's wall ceiling in seconds. Raise it above the phase ceiling when capping turns, so the cap is what ends the session."
+        type: string
+        default: "600"
   schedule:
     # 07:17 UTC nightly — off the top of the hour on purpose.
     - cron: "17 7 * * *"
@@ -284,6 +292,68 @@ jobs:
       # Without it every E cell is skipped, which would quietly turn an A-E experiment
       # into an A-D one, so provision it from the lock file and prove it resolves before
       # any agent budget is spent. The lock is the single source of the pin.
+      # Before spending a diagnostic on the research prompt, prove the two mechanisms it
+      # reports through actually work, on a prompt that costs a minute. Both have failed
+      # silently once already: a turn cap that the transport ignores produces a receipt
+      # saying max_turns=1 over a session that ran to the wall clock, and an accounting
+      # source that moved produces zero tokens, which reads exactly like a stalled provider.
+      #
+      # The prompt needs three sequential tool calls to finish. Uncapped that is four or more
+      # API calls and both files; capped at one iteration it is the capped turn plus the one
+      # toolless summary call Hermes makes on the way out (agent/turn_finalizer.py:157), and
+      # the third step never happens. So `api_calls <= 2` and a missing second file are the
+      # cap being consumed, not the model being brief.
+      - name: Prove the turn cap is consumed and the accounting is real
+        if: inputs.probe == true && inputs.preflight_only != true
+        run: |
+          set -o pipefail
+          rc=0
+          proof="$RUNNER_TEMP/cap-proof"
+          mkdir -p "$proof/repo"
+          git -C "$proof/repo" init --quiet
+          printf 'Do these in order, one tool call at a time: (1) write a file first.txt containing the word alpha, (2) read first.txt back, (3) write a file second.txt containing what you read. Then reply with the single word: done\n' > "$proof/prompt.md"
+          echo '{}' > "$proof/context.json"
+          REPO_AUTOMATION_HERMES_USAGE_DIR="$proof/session" \
+          REPO_AUTOMATION_HERMES_TRANSPORT=stream-json \
+          REPO_AUTOMATION_HERMES_MAX_TURNS=1 \
+            automation/supervisor/run_agent.sh \
+              --repo-root "$proof/repo" \
+              --prompt-file "$proof/prompt.md" \
+              --context-file "$proof/context.json" \
+              --handoff-file "$proof/handoff.json" \
+              --slice-id cap-proof 2>&1 | tail -40 || rc=$?
+          # A capped session need not exit 0 - the cap is a stop, not a success - so the
+          # receipts decide. Exit 64 is different in kind: the wrapper refused the cap, and
+          # nothing ran, so say that instead of reporting a missing session id.
+          if [ "${rc:-0}" = 64 ]; then
+            echo "::error::The wrapper refused the turn cap; see its message above." >&2
+            exit 1
+          fi
+          uv run python - "$proof" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          from automation.benchmark.probe import session_accounting
+
+          proof = Path(sys.argv[1])
+          session_id, usage = session_accounting(proof / "session")
+          print("cap proof session:", session_id)
+          print("cap proof accounting:", json.dumps(usage))
+
+          if not session_id:
+              sys.exit("::error::The capped session emitted no session id, so its accounting cannot be keyed.")
+          if not usage or usage.get("error"):
+              sys.exit("::error::No accounting row for the capped session - the diagnostic would report no tokens.")
+          if not (usage.get("input_tokens") and usage.get("output_tokens")):
+              sys.exit(f"::error::The accounting row is empty: {usage}. reasoning_tokens would be unreadable.")
+          calls = usage.get("api_calls") or 0
+          if not 1 <= calls <= 2:
+              sys.exit(f"::error::{calls} api calls under --max-turns 1: the cap was not consumed.")
+          if (proof / "repo/second.txt").exists():
+              sys.exit("::error::The capped session completed all three steps, so the cap did not stop it.")
+          print(f"cap proof ok: {calls} api calls, reasoning_tokens={usage.get('reasoning_tokens')}")
+          PY
+
       # A diagnostic, never a cell: one research phase at the lane's own 600s ceiling, run
       # through `hermes chat --format stream-json` so the events a killed session already
       # flushed survive it. Three A-E runs died here with a 0-byte log and no research.json,
@@ -298,7 +368,16 @@ jobs:
             echo "::error::The probe needs one instance id in the instances input." >&2
             exit 1
           fi
+          # Capped probes stop at the cap, not at the phase ceiling, so the budget is a wall
+          # and not the measurement. The flags stay empty unless asked for: an uncapped probe
+          # must keep running the phase exactly as a lane's ceiling would.
+          cap=""
+          if [ -n "${{ inputs.probe_max_turns }}" ]; then
+            cap="--max-turns ${{ inputs.probe_max_turns }}"
+          fi
+          # shellcheck disable=SC2086
           uv run python -m automation.benchmark.probe --instance "$instance" --out-dir out/probe \
+            --budget "${{ inputs.probe_budget || 600 }}" $cap \
             --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL | tee /tmp/probe.txt
           printf '```\n%s\n```\n' "$(cat /tmp/probe.txt)" >> "$GITHUB_STEP_SUMMARY"
 

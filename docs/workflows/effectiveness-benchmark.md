@@ -542,7 +542,7 @@ out/<lane>/r<repeat>/<instance>/run.json            provenance + process metrics
 out/<lane>/r<repeat>/<instance>/rpi/                phase artifacts (C–E)
 out/<lane>/r<repeat>/<instance>/agent-sessions/     per-session usage + controls + log + sandbox
 out/probe/probe.json | probe/cleanroom.json | probe/agent-sessions/*.stream.jsonl
-out/probe/agent-sessions/*.usage.json                 accounting slice only (--oneshot)
+out/probe/agent-sessions/*.usage.json                 --oneshot only; capped runs read state.db instead
                                                     diagnostic only, not a cell
 out/<lane>/r<repeat>/effectiveness-report.json      ProgramBench score for that cell
 out/lane-comparison.json | lane-comparison.md       the comparison
@@ -676,34 +676,64 @@ visible token records exactly one event, which looks identical to a provider tha
 answered. Run 36679174467 recorded that: init at ~6s, 599 seconds of silence, no tool call,
 no artifact.
 
-`reasoning_tokens` is what separates the two, and only `--oneshot` writes it, in the
-`--usage-file` report. Hence the accounting slice: the same lane-C research prompt in the
-same cleanroom on the default transport, capped at one turn.
+`reasoning_tokens` is what separates the two, and no single Hermes path hands over both the
+cap and the count:
+
+| | `--oneshot` (what a lane runs) | `chat -q --format stream-json` |
+| --- | --- | --- |
+| Turn cap | **ignored entirely** | `--max-turns`, consumed |
+| `--usage-file` report | written on every exit path | not written |
+| `reasoning_tokens` | in the report | in `state.db:session_model_usage` |
+
+So the cap goes on the transport that consumes it, and the accounting is read from Hermes'
+own session ledger.
 
 ```shell
 uv run python -m automation.benchmark.probe \
   --instance abishekvashok__cmatrix.5c082c6 --out-dir out/probe \
-  --transport oneshot --max-turns 1 --budget 1800 \
+  --transport stream-json --max-turns 1 --budget 1800 \
   --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
 ```
 
-The cap travels as **config, not a flag**. `--max-turns` is real and is honoured on the
-`chat` path, but `_run_oneshot_from_args` forwards seven kwargs and that is not one of them,
-and `run_oneshot` has no such parameter — so passing it to `--oneshot` parses fine and
-silently does nothing. The launcher appends `agent.max_turns` to the session's own copy of
-the config, which is the equivalent the flag's own help names. It is appended to the copy and
-never to `hermes-benchmark.yaml`, because that file is the posture every A–E lane shares and
-a lane must not be capped at one turn. A value that is not a positive integer is refused with
-exit 64.
+**The pinned `--oneshot` path honours no turn cap at all**, so asking for one there is
+refused rather than recorded. `hermes_cli/oneshot.py` constructs its `AIAgent` without
+passing `max_iterations`, which leaves `run_agent.py`'s default of `sys.maxsize`; and all
+three ways to set it — the `--max-turns` flag, `agent.max_turns` in `config.yaml`, and
+`HERMES_MAX_ITERATIONS` — are read in `cli_init_mixin._init_turn_limits` on the chat path
+that `--oneshot` bypasses ("Bypasses cli.py entirely"). A receipt reading `max_turns: 1` over
+a session that ran to the wall clock is a mislabelled measurement, which is worse than none,
+so both the launcher (exit 64) and the probe (`ValueError`) refuse the combination. On the
+chat path the cap is passed as the flag, never written into `hermes-benchmark.yaml`, because
+that file is the posture every A–E lane shares and a lane must not be capped at one turn.
 
-The report is read into the record's `usage` key and printed beside `elapsed_seconds`,
-because the finding is a ratio: ten minutes spent emitting a large hidden reasoning trace
-and ten minutes spent waiting to start a small one are the same wall clock. A missing report
-is printed as `NO USAGE REPORT` rather than omitted — silence there would read as a turn
-that cost nothing. `--usage-file` is written on every exit path including the iteration
-limit, so the receipt arrives when one turn completes instead of when the phase does. The
-report names a model and a provider; like the terminal `result`, that is what the CLI asked
-for, and the job-level preflight stays the check that compares served against asked.
+Because the capped path writes no `--usage-file` report, the accounting comes from
+`session_model_usage` in `$HERMES_HOME/state.db`, keyed on the session id the stream's own
+`system/init` names. That table is written through `update_token_counts`, the chokepoint every
+per-API-call delta flows through on every path, so a `chat -q` session lands there even
+though the report does not. It is opened read-only, by URI: the harness is reading evidence
+out of somebody else's database, not administering it. A fallback mid-session leaves a second
+row; the counters are summed, the busiest route is named, and `routes` travels with them so a
+blend is never read as one model's numbers. What the ledger does not carry is
+`turn_exit_reason` — on this transport the stream's terminal `result` is what says how the
+session ended.
+
+Whichever source was used is recorded as `usage_source` and printed, next to
+`elapsed_seconds` and a seconds-per-api-call line, because the finding is a ratio: ten
+minutes spent emitting a large hidden reasoning trace and ten minutes spent waiting to start
+a small one are the same wall clock. No accounting at all prints as `NO USAGE REPORT` rather
+than being omitted — silence there would read as a turn that cost nothing.
+
+Both mechanisms are proved before a probe run spends anything on them, in a CI step that
+takes about a minute. It drives a prompt needing three sequential tool calls under
+`--max-turns 1`: uncapped that is four or more API calls and two files, and capped it is the
+one turn plus the single toolless summary call Hermes makes on the way out
+(`agent/turn_finalizer.py:157`), with the third step never reached. So `api_calls <= 2` and a
+missing second file are the cap being consumed rather than the model being brief, and a
+ledger row carrying non-zero input and output tokens is the accounting source still being
+where the probe reads it. Both have a silent failure mode worth a minute: a cap the transport
+ignores produces a confident mislabel, and an accounting source that moved produces zero
+tokens, which reads exactly like a stalled provider. The step is gated on the probe input, so
+scheduled A–E runs are untouched.
 
 One research phase at the lane's own 600-second ceiling. `out/probe/probe.json` holds the
 phase result, the artifact and its schema errors, the tool-event timeline with offsets from

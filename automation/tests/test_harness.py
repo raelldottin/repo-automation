@@ -719,31 +719,54 @@ exit 7
             text=True,
         )
 
-    def test_agent_wrapper_caps_the_turn_through_config_because_the_flag_misses_this_path(self) -> None:
-        """The cap has to reach the session as `agent.max_turns`, and only for this session.
+    ARG_ECHO = '#!/usr/bin/env bash\nfor arg in "$@"; do printf \'arg:%s\\n\' "$arg"; done\ncat "$HERMES_HOME/config.yaml"\n'
 
-        `--max-turns` parses on --oneshot and then does nothing: _run_oneshot_from_args never
-        forwards it. The shared benchmark posture file must stay uncapped, so the cap is
-        appended to the per-session config copy instead.
+    def test_agent_wrapper_caps_the_turn_on_the_only_transport_that_consumes_a_cap(self) -> None:
+        """The cap reaches the session as the `--max-turns` flag on the chat path.
+
+        _CHAT_PASSTHROUGH carries it into the CLI, which hands it to AIAgent as
+        max_iterations. Config is not an alternative here: the same value in config.yaml is
+        read by the same chat-path resolver, so writing it there would cap nothing that the
+        flag does not already cap - and would cap it through the file every lane shares.
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             result = self._run_hermes_wrapper(
                 temp_path,
-                '#!/usr/bin/env bash\ncat "$HERMES_HOME/config.yaml"\n',
-                {"REPO_AUTOMATION_HERMES_MAX_TURNS": "1"},
+                self.ARG_ECHO,
+                {"REPO_AUTOMATION_HERMES_MAX_TURNS": "1", "REPO_AUTOMATION_HERMES_TRANSPORT": "stream-json"},
             )
 
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertIn("max_turns: 1", result.stdout)
+            self.assertIn("arg:--max-turns", result.stdout)
+            self.assertIn("arg:1", result.stdout)
+            controls = json.loads(sorted((temp_path / "sessions").glob("*.controls.json"))[0].read_text(encoding="utf-8"))
+            self.assertEqual(1, controls["max_turns"])
+            session_config = Path(controls["hermes_home"]) / "config.yaml"
+            self.assertNotIn("max_turns", session_config.read_text(encoding="utf-8"))
             shared = (self.repo_root / "automation/supervisor/hermes-benchmark.yaml").read_text(encoding="utf-8")
             self.assertNotIn("max_turns", shared)
-            controls = sorted((temp_path / "sessions").glob("*.controls.json"))
-            self.assertEqual(1, json.loads(controls[0].read_text(encoding="utf-8"))["max_turns"])
+
+    def test_agent_wrapper_refuses_a_turn_cap_the_oneshot_path_would_ignore(self) -> None:
+        """Ignoring it is the failure that matters. The pinned --oneshot builds its AIAgent
+        without max_iterations, so sys.maxsize stands and the flag, agent.max_turns and
+        HERMES_MAX_ITERATIONS are all read on the chat path it bypasses. A session that ran to
+        the wall clock under a receipt saying max_turns=1 would be a mislabelled measurement.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self._run_hermes_wrapper(
+                Path(temp_dir),
+                "#!/usr/bin/env bash\necho launched\n",
+                {"REPO_AUTOMATION_HERMES_MAX_TURNS": "1", "REPO_AUTOMATION_HERMES_TRANSPORT": "oneshot"},
+            )
+
+            self.assertEqual(64, result.returncode, result.stdout)
+            self.assertIn("only honoured on the stream-json transport", result.stderr)
+            self.assertNotIn("launched", result.stdout)
 
     def test_agent_wrapper_refuses_a_turn_cap_that_is_not_a_positive_integer(self) -> None:
-        """A cap of "one" would append a config line the agent reads as no cap at all, and the
-        diagnostic would then bill a full phase while claiming to have stopped after a turn."""
+        """`--max-turns one` would be rejected by the agent's own parser after the session had
+        already been set up, and `--max-turns 0` is not a cap the diagnostic can read."""
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             for bad in ("one", "0", "-1", "1.5"):
@@ -751,7 +774,10 @@ exit 7
                     result = self._run_hermes_wrapper(
                         (temp_path / bad.replace(".", "_")),
                         "#!/usr/bin/env bash\necho launched\n",
-                        {"REPO_AUTOMATION_HERMES_MAX_TURNS": bad},
+                        {
+                            "REPO_AUTOMATION_HERMES_MAX_TURNS": bad,
+                            "REPO_AUTOMATION_HERMES_TRANSPORT": "stream-json",
+                        },
                     )
 
                     self.assertEqual(64, result.returncode, result.stdout)
@@ -761,9 +787,10 @@ exit 7
     def test_agent_wrapper_leaves_the_turn_budget_alone_when_no_cap_is_asked_for(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            result = self._run_hermes_wrapper(temp_path, '#!/usr/bin/env bash\ncat "$HERMES_HOME/config.yaml"\n', {})
+            result = self._run_hermes_wrapper(temp_path, self.ARG_ECHO, {"REPO_AUTOMATION_HERMES_TRANSPORT": "stream-json"})
 
             self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn("max-turns", result.stdout)
             self.assertNotIn("max_turns", result.stdout)
             controls = sorted((temp_path / "sessions").glob("*.controls.json"))
             self.assertIsNone(json.loads(controls[0].read_text(encoding="utf-8"))["max_turns"])
