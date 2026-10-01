@@ -381,10 +381,10 @@ jobs:
             exit 1
           fi
           uv run python - "$proof" <<'PY'
-          import json, sys
+          import json, os, sys
           from pathlib import Path
 
-          from automation.benchmark.probe import session_accounting
+          from automation.benchmark.probe import attribution_error, session_accounting
 
           proof = Path(sys.argv[1])
           session_id, usage = session_accounting(proof / "session")
@@ -397,12 +397,24 @@ jobs:
               sys.exit("::error::No accounting row for the capped session - the diagnostic would report no tokens.")
           if not (usage.get("input_tokens") and usage.get("output_tokens")):
               sys.exit(f"::error::The accounting row is empty: {usage}. reasoning_tokens would be unreadable.")
+
+          # The same comparison the oneshot preflight has always made, now on the transport that
+          # skipped it. Before the cap is read: api_calls and reasoning_tokens from a model nobody
+          # asked for are not a weaker measurement, they are a measurement of something else.
+          mis_served = attribution_error(
+              usage, os.environ["HERMES_INFERENCE_MODEL"], os.environ["HERMES_INFERENCE_PROVIDER"]
+          )
+          if mis_served:
+              sys.exit(f"::error::The capped session was mis-served - {mis_served}.")
           calls = usage.get("api_calls") or 0
           if not 1 <= calls <= 2:
               sys.exit(f"::error::{calls} api calls under --max-turns 1: the cap was not consumed.")
           if (proof / "repo/second.txt").exists():
               sys.exit("::error::The capped session completed all three steps, so the cap did not stop it.")
-          print(f"cap proof ok: {calls} api calls, reasoning_tokens={usage.get('reasoning_tokens')}")
+          print(
+              f"cap proof ok: {calls} api calls, reasoning_tokens={usage.get('reasoning_tokens')},"
+              f" served by {usage.get('model')} on {usage.get('provider')}"
+          )
           PY
 
       # A diagnostic, never a cell: one research phase at the lane's own 600s ceiling, run

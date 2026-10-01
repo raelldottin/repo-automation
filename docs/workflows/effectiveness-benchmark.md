@@ -670,10 +670,13 @@ the agent, so a result produced on it is not comparable with an A–E cell measu
 `-z/--oneshot`, so the probe records no usage rather than an empty one that would read like
 a session that spent nothing. What accounting the transport does give is the terminal
 `result` event — exit code, wall duration and token counts — recorded as
-`stream.terminal_result`. It is not provenance: that event's `model` field came back empty,
-so nothing in a probe record may be read as evidence of which model served the turn. The
-job-level preflight remains the check that compares served against asked. The default
-transport stays `oneshot`; an unrecognised value is refused with exit 64 rather than
+`stream.terminal_result`. That event names no model, and `system/init` reported `model: ""`,
+which was not a gap in the protocol but the symptom of a dropped pin: `HERMES_INFERENCE_MODEL`
+is read only on `-z/--oneshot` and the TUI, so a chat session resolved
+`model or config.model.default or ""` and fell through to Hermes' own default. The launcher
+now passes `--model` and `--provider` on this transport, and the served model is read from the
+ledger and compared — see [First-turn accounting](#first-turn-accounting---max-turns). The
+default transport stays `oneshot`; an unrecognised value is refused with exit 64 rather than
 silently falling back.
 
 ```shell
@@ -725,8 +728,17 @@ terminal `result` and nothing else — its own `on_tool_progress` says reasoning
 not part of the protocol — and a reasoning model emits no text until it has finished
 reasoning. So a phase that reasons through its whole ceiling and is killed before its first
 visible token records exactly one event, which looks identical to a provider that never
-answered. Run 36679174467 recorded that: init at ~6s, 599 seconds of silence, no tool call,
-no artifact.
+answered. Run 36679174467 recorded that shape: init at ~6s, 599 seconds of silence, no tool
+call, no artifact.
+
+That run's **duration is not GLM-5.3 evidence**, and neither is any other stream-json timing
+taken before the pin was passed as a flag. Its `probe.json` records `controls.model:
+z-ai/glm-5.3` — the request — and `usage: null`, because the ledger read did not exist yet, so
+which model spent those 599 seconds cannot be recovered. The shape of the failure is still the
+reason this section exists; the number is not a latency measurement of the pinned model. What
+remains GLM-5.3 evidence is everything measured on `--oneshot`, which honours the pin: lane A's
+7–16 minute spacing between tool calls in run 36578712988, that run's 4m55s preflight, and the
+nine 1800-second cells of run 36724292484.
 
 `reasoning_tokens` is what separates the two, and no single Hermes path hands over both the
 cap and the count:
@@ -769,6 +781,42 @@ blend is never read as one model's numbers. What the ledger does not carry is
 `turn_exit_reason` — on this transport the stream's terminal `result` is what says how the
 session ended.
 
+#### The served model is compared to the requested one
+
+`controls.json` records what the harness **asked for**; the ledger row records what was
+**billed**. Run 36822804022 asked for `z-ai/glm-5.3` on the capped transport, was served
+`nvidia/nemotron-3-ultra-550b-a55b` with `routes: 1`, and reported success — so a receipt whose
+every number described a model nobody chose passed a green check. The oneshot preflight had
+compared served against asked since it was written; the stream-json checkpoints had not.
+
+Three conditions now hold before any capped measurement is reported, in
+`probe.attribution_error` so that a manual invocation cannot bypass the CI step that calls the
+same function:
+
+- the ledger's `model` equals `HERMES_INFERENCE_MODEL`;
+- the ledger's `provider` equals `HERMES_INFERENCE_PROVIDER`;
+- `routes` is 1 — the busiest route names the model, so a blend can satisfy the request on its
+  face while summing a second model's counters into it.
+
+The verdict is recorded as `attribution` in `probe.json` rather than raised on, for the same
+reason the sandbox observation is: the receipt is the deliverable and a mis-served model is a
+finding about it. It prints as `attribution WRONG MODEL: …`, and `python -m
+automation.benchmark.probe` exits **1**, so the evidence survives and nothing reports a
+measurement of a model it did not measure. A session that never reached an API call leaves no
+row and no verdict — that is a finding about the session, not a mis-served model. The pin is
+sent as a flag and never written into `hermes-benchmark.yaml`: that file is the runtime posture
+every lane shares, and `-f model=…` has to stay the experiment's control. At the pinned
+revision `DEFAULT_CONFIG["model"]` is a bare scalar, so a `model.default` key would also have
+to be taught to the recursive config verifier, for a seam the chat CLI already exposes.
+
+What the lineage therefore holds:
+
+| run | path | served | reading |
+| --- | --- | --- | --- |
+| 36679174467 | stream-json research | unrecoverable | not GLM-5.3 latency evidence |
+| 36822804022 | oneshot preflight | `z-ai/glm-5.3` / `nvidia` | GLM-5.3 access proven |
+| 36822804022 | stream-json cap + research | `nvidia/nemotron-3-ultra-550b-a55b` | accounting machinery proven, model treatment invalid |
+
 Whichever source was used is recorded as `usage_source` and printed, next to
 `elapsed_seconds` and a seconds-per-api-call line, because the finding is a ratio: ten
 minutes spent emitting a large hidden reasoning trace and ten minutes spent waiting to start
@@ -782,7 +830,9 @@ one turn plus the single toolless summary call Hermes makes on the way out
 (`agent/turn_finalizer.py:157`), with the third step never reached. So `api_calls <= 2` and a
 missing second file are the cap being consumed rather than the model being brief, and a
 ledger row carrying non-zero input and output tokens is the accounting source still being
-where the probe reads it. Both have a silent failure mode worth a minute: a cap the transport
+where the probe reads it. The same step runs the attribution comparison above, before it reads
+the cap at all: an `api_calls` count from a model nobody asked for is not a weaker measurement
+of the cap, it is a measurement of something else. Both have a silent failure mode worth a minute: a cap the transport
 ignores produces a confident mislabel, and an accounting source that moved produces zero
 tokens, which reads exactly like a stalled provider. The step is gated on the probe input, so
 an A–E dispatch is untouched.

@@ -418,6 +418,25 @@ PROBE
       if [[ -n "$max_turns" ]]; then
         hermes_args+=(--max-turns "$max_turns")
       fi
+      # The model travels as a flag here for the same reason, and it is not optional: the
+      # chat path is the one transport that never reads HERMES_INFERENCE_MODEL.
+      # cli_init_mixin.py resolves the model as `model or config.model.default or ""`, under a
+      # comment saying the environment is deliberately not consulted, so an unflagged chat
+      # session falls through to Hermes' own default. Run 36822804022 asked for z-ai/glm-5.3
+      # on this transport, emitted system/init.model "", and was billed
+      # nvidia/nemotron-3-ultra-550b-a55b. The flag is consumed - cmd_chat passes args.model
+      # into cli_main, and _CHAT_PASSTHROUGH carries provider beside max_turns. Still nothing
+      # in hermes-benchmark.yaml: the workflow's `model` input is the experiment's control and
+      # has to stay dispatchable, while that file stays the posture every lane shares.
+      if [[ -n "${HERMES_INFERENCE_MODEL:-}" ]]; then
+        hermes_args+=(--model "$HERMES_INFERENCE_MODEL")
+      fi
+      # Provider does fall back to the env var inside cli_init_mixin, so this is belt and
+      # braces - but the ledger is asserted on the pair, and a request that can be stated two
+      # ways should be stated the same way on both transports.
+      if [[ -n "${HERMES_INFERENCE_PROVIDER:-}" ]]; then
+        hermes_args+=(--provider "$HERMES_INFERENCE_PROVIDER")
+      fi
       # Removes the one avoidable difference from --oneshot, which sets this itself. Without
       # it `hermes chat -q` takes the unattended path, and approvals.single_query_mode
       # defaults to deny, so execute_code answers BLOCKED and the diagnostic measures a

@@ -811,6 +811,76 @@ exit 7
             shared = (self.repo_root / "automation/supervisor/hermes-benchmark.yaml").read_text(encoding="utf-8")
             self.assertNotIn("max_turns", shared)
 
+    def test_agent_wrapper_pins_the_model_on_the_transport_that_ignores_the_env_var(self) -> None:
+        """HERMES_INFERENCE_MODEL reaches --oneshot and the TUI and nothing else. On the chat
+        path cli_init_mixin resolves `model or config.model.default or ""` and says the
+        environment is deliberately not consulted, so run 36822804022 asked for z-ai/glm-5.3
+        here and was billed nvidia/nemotron-3-ultra-550b-a55b. The flag is the seam the pinned
+        CLI already offers: cmd_chat passes args.model into cli_main, and _CHAT_PASSTHROUGH
+        carries provider. Config is not used, so `-f model=...` stays the experiment's control.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            result = self._run_hermes_wrapper(
+                temp_path,
+                self.ARG_ECHO,
+                {
+                    "REPO_AUTOMATION_HERMES_TRANSPORT": "stream-json",
+                    "HERMES_INFERENCE_MODEL": "z-ai/glm-5.3",
+                    "HERMES_INFERENCE_PROVIDER": "nvidia",
+                },
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            args = [line.removeprefix("arg:") for line in result.stdout.splitlines() if line.startswith("arg:")]
+            self.assertEqual("z-ai/glm-5.3", args[args.index("--model") + 1])
+            self.assertEqual("nvidia", args[args.index("--provider") + 1])
+            session_config = (
+                Path(
+                    json.loads(sorted((temp_path / "sessions").glob("*.controls.json"))[0].read_text(encoding="utf-8"))[
+                        "hermes_home"
+                    ]
+                )
+                / "config.yaml"
+            )
+            self.assertNotIn("model:", session_config.read_text(encoding="utf-8"))
+
+    def test_agent_wrapper_sends_no_model_flag_when_no_model_was_asked_for(self) -> None:
+        """An empty pin must not become `--model ""`, which the CLI would take as a request."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self._run_hermes_wrapper(
+                Path(temp_dir),
+                self.ARG_ECHO,
+                {
+                    "REPO_AUTOMATION_HERMES_TRANSPORT": "stream-json",
+                    "HERMES_INFERENCE_MODEL": "",
+                    "HERMES_INFERENCE_PROVIDER": "",
+                },
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn("arg:--model", result.stdout)
+            self.assertNotIn("arg:--provider", result.stdout)
+
+    def test_the_lane_transport_argv_is_unchanged_by_the_diagnostic_pin(self) -> None:
+        """A-E is measured on --oneshot, which reads the env var itself. Adding the flags there
+        would change the argv of every lane to fix a transport no lane uses."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self._run_hermes_wrapper(
+                Path(temp_dir),
+                self.ARG_ECHO,
+                {
+                    "REPO_AUTOMATION_HERMES_TRANSPORT": "oneshot",
+                    "HERMES_INFERENCE_MODEL": "z-ai/glm-5.3",
+                    "HERMES_INFERENCE_PROVIDER": "nvidia",
+                },
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("arg:--oneshot", result.stdout)
+            self.assertNotIn("arg:--model", result.stdout)
+            self.assertNotIn("arg:--provider", result.stdout)
+
     def test_agent_wrapper_refuses_a_turn_cap_the_oneshot_path_would_ignore(self) -> None:
         """Ignoring it is the failure that matters. The pinned --oneshot builds its AIAgent
         without max_iterations, so sys.maxsize stands and the flag, agent.max_turns and
