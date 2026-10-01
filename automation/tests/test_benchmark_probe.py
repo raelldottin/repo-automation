@@ -904,7 +904,9 @@ class FirstTurnAccountingTests(unittest.TestCase):
 
     ROW = (SESSION_ID, "z-ai/glm-5.3", "nvidia", 2, 5852, 55, 0, 0, 35, 0.001)
 
-    def _run(self, out: Path, *, transport: str, max_turns=None, session: str = "ledger", rows=None):
+    PINNED = {"HERMES_INFERENCE_MODEL": "z-ai/glm-5.3", "HERMES_INFERENCE_PROVIDER": "nvidia"}
+
+    def _run(self, out: Path, *, transport: str, max_turns=None, session: str = "ledger", rows=None, env=None):
         """Run the probe against a fake session that leaves what that transport leaves.
 
         `session`: "ledger" writes a stream plus a controls receipt and a ledger row, as the
@@ -942,6 +944,7 @@ class FirstTurnAccountingTests(unittest.TestCase):
             cleanroom=False,
             transport=transport,
             max_turns=max_turns,
+            env=env,
         )
         return record, captured
 
@@ -1020,6 +1023,66 @@ class FirstTurnAccountingTests(unittest.TestCase):
             self.assertEqual(35, record["usage"]["reasoning_tokens"])
             self.assertEqual("z-ai/glm-5.3", record["usage"]["model"])
             self.assertIn("2 ROUTES summed", summarize(record))
+
+    NEMOTRON_ROW = (SESSION_ID, "nvidia/nemotron-3-ultra-550b-a55b", "nvidia", 1, 5661, 54, 0, 0, 0, 0.001)
+
+    def test_a_ledger_row_naming_another_model_fails_attribution(self) -> None:
+        """Run 36822804022, reproduced: the session asked for z-ai/glm-5.3 on the stream-json
+        transport and was billed nvidia/nemotron-3-ultra-550b-a55b. The receipt is still
+        written - the finding is in it - but nothing may report it as a measurement of the
+        pinned model."""
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw) / "probe"
+            record, _env = self._run(out, transport="stream-json", max_turns=1, rows=[self.NEMOTRON_ROW], env=self.PINNED)
+
+            self.assertEqual("z-ai/glm-5.3", record["attribution"]["asked_model"])
+            self.assertIn("ledger says 'nvidia/nemotron-3-ultra-550b-a55b'", record["attribution"]["error"])
+            self.assertIn("WRONG MODEL", summarize(record))
+            # On disk too: the verdict is evidence, not just a return value.
+            written = json.loads((out / "probe.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["attribution"], written["attribution"])
+
+    def test_a_fallback_route_fails_attribution_even_when_the_busiest_route_is_the_pinned_model(self) -> None:
+        """The busiest route names the model, so a blend can agree with the request and still be
+        two models' counters summed. The route count is what catches it."""
+        with tempfile.TemporaryDirectory() as raw:
+            record, _env = self._run(
+                Path(raw) / "probe",
+                transport="stream-json",
+                max_turns=1,
+                rows=[
+                    (self.SESSION_ID, "z-ai/glm-5.3", "nvidia", 3, 100, 10, 0, 0, 30, 0.001),
+                    (self.SESSION_ID, "nvidia/nemotron-3-ultra-550b-a55b", "nvidia", 1, 50, 5, 0, 0, 5, 0.002),
+                ],
+                env=self.PINNED,
+            )
+
+            self.assertEqual("z-ai/glm-5.3", record["usage"]["model"])  # the request is satisfied on its face
+            self.assertIn("2 model routes", record["attribution"]["error"])
+
+    def test_the_pinned_model_on_one_route_passes_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            record, env = self._run(Path(raw) / "probe", transport="stream-json", max_turns=1, env=self.PINNED)
+
+            self.assertIsNone(record["attribution"]["error"])
+            self.assertNotIn("WRONG MODEL", summarize(record))
+            # The wrapper is handed the request the ledger is then held to.
+            self.assertEqual("z-ai/glm-5.3", env["HERMES_INFERENCE_MODEL"])
+
+    def test_a_probe_that_asked_for_no_model_compares_nothing(self) -> None:
+        """Attribution is a comparison, and there is nothing to compare an unstated request to.
+        A route count is still a route count, so that half of the check stays on."""
+        with tempfile.TemporaryDirectory() as raw:
+            record, _env = self._run(
+                Path(raw) / "probe",
+                transport="stream-json",
+                max_turns=1,
+                rows=[self.NEMOTRON_ROW],
+                env={"HERMES_INFERENCE_MODEL": "", "HERMES_INFERENCE_PROVIDER": ""},
+            )
+
+            self.assertIsNone(record["attribution"]["error"])
+            self.assertIsNone(record["attribution"]["asked_model"])
 
     def test_a_session_that_never_called_the_api_leaves_no_row_and_says_so(self) -> None:
         from automation.benchmark.probe import ledger_usage

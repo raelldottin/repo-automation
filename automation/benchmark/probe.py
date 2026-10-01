@@ -262,6 +262,35 @@ def session_accounting(sessions_dir: Path) -> tuple[Optional[str], Optional[dict
     return session_id, ledger_usage(home, session_id)
 
 
+def attribution_error(usage: Optional[dict[str, Any]], asked_model: str, asked_provider: str) -> Optional[str]:
+    """Why this session's accounting does not describe the model that was asked for.
+
+    ``controls.json`` records the request; ``session_model_usage`` records what was billed.
+    Nothing compared the two until run 36822804022 asked for ``z-ai/glm-5.3`` on the
+    stream-json transport, was served ``nvidia/nemotron-3-ultra-550b-a55b``, and reported
+    success - so every number in that receipt described a model nobody chose. The oneshot
+    preflight has made this comparison since it was written; this is the same invariant for
+    the transport that skipped it.
+
+    None when the pair agrees, and when there is no accounting to compare: a session that
+    never reached an API call leaves no row, which is a finding about the session rather than
+    a mis-served model.
+    """
+    if not usage or usage.get("error"):
+        return None
+    served, provider = usage.get("model"), usage.get("provider")
+    if asked_model and served != asked_model:
+        return f"asked for model {asked_model!r}, ledger says {served!r}"
+    if asked_provider and provider != asked_provider:
+        return f"asked for provider {asked_provider!r}, ledger says {provider!r}"
+    # Checked whichever model was asked for, and checked even when none was: two rows are two
+    # models, and summed counters named after the busiest route are a blend presented as one.
+    routes = usage.get("routes")
+    if routes is not None and routes != 1:
+        return f"{routes} model routes in one session, so the counts are a blend"
+    return None
+
+
 def _refuse_pre_existing(path: Path) -> None:
     """Ownership is established by creation: what this run did not make, it does not clear."""
     if path.exists():
@@ -414,11 +443,23 @@ def run_probe(
         if usage is not None:
             usage_source = f"{SESSION_DB_FILENAME}:{LEDGER_TABLE}"
 
+    asked_model = environment.get("HERMES_INFERENCE_MODEL", "")
+    asked_provider = environment.get("HERMES_INFERENCE_PROVIDER", "")
+
     record = {
         "instance_id": task.instance_id,
         "phase": PROBE_PHASE,
         "transport": transport,
         "max_turns": max_turns,
+        # What was asked for, beside what was billed, with the verdict between them. Recorded
+        # rather than raised on, for the same reason the sandbox observation is: the receipt is
+        # the deliverable and a mis-served model is a finding about it. `main` exits non-zero on
+        # it, so nothing reports a measurement of a model it did not measure.
+        "attribution": {
+            "asked_model": asked_model or None,
+            "asked_provider": asked_provider or None,
+            "error": None,
+        },
         # Wall time beside the token counts, because the ratio is the finding: ten minutes
         # spent emitting a large hidden reasoning trace and ten minutes spent waiting to
         # start a small one look identical in a duration alone.
@@ -467,6 +508,8 @@ def run_probe(
         },
         "agent_sessions": sessions,
     }
+    record["attribution"]["error"] = attribution_error(usage, asked_model, asked_provider)
+
     # "x": a record written between the pre-flight refusal and here is still someone else's.
     record_path = out_dir / PROBE_FILENAME
     try:
@@ -536,6 +579,10 @@ def summarize(record: dict[str, Any]) -> str:
             lines.append(f"              {elapsed:.0f}s wall, {per_call:.0f}s per api call")
     else:
         lines.append("accounting    NO USAGE REPORT: no report and no ledger row, so no token counts to read")
+    attribution = record.get("attribution") or {}
+    if attribution.get("error"):
+        # Above the sandbox flags: a wrong model invalidates every number printed above it.
+        lines.append(f"attribution   WRONG MODEL: {attribution['error']}")
     for violation in record.get("sandbox", {}).get("violations", []):
         lines.append(f"sandbox flag  {violation}")
     rpi = record["rpi"]
@@ -622,7 +669,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         max_turns=args.max_turns,
     )
     print(summarize(record))
-    return 0
+    # The record is already on disk, so the evidence survives the failure. A probe that
+    # measured a model nobody asked for must not hand back success, or the next reader takes
+    # its latency and reasoning counts for the pinned model's.
+    return 1 if (record.get("attribution") or {}).get("error") else 0
 
 
 if __name__ == "__main__":
