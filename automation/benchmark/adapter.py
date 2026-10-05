@@ -321,7 +321,15 @@ def probe_sandbox(
     image, network and workspace mount. Only the order of inspection and removal is.
     """
     barrier = workspace / SANDBOX_PROBE_BARRIER_DIR
-    shutil.rmtree(barrier, ignore_errors=True)
+    # Creating it is what gives the harness the right to delete it. The workspace is
+    # ProgramBench's input, and clearing a path out of the way first would mean the harness
+    # modifying the benchmark before the agent ever sees it - so a collision fails the cell
+    # instead. No shipped image is known to carry this name; a reusable cleanroom harness
+    # should not be the thing that finds out by overwriting one.
+    try:
+        barrier.mkdir(exist_ok=False)
+    except FileExistsError as collision:
+        raise CleanroomError(f"the sandbox-probe barrier already exists in the cleanroom: {barrier}") from collision
     witness = SandboxWitness(
         sessions_dir, workspace, receipt.image, receipt.image_id, stem=SANDBOX_PROBE_STEM, release_dir=barrier
     )
@@ -334,6 +342,8 @@ def probe_sandbox(
         "REPO_AUTOMATION_SANDBOX_PROBE_BARRIER": f"{WORKSPACE_DIR}/{SANDBOX_PROBE_BARRIER_DIR}",
         "REPO_AUTOMATION_SANDBOX_PROBE_BARRIER_SECONDS": str(SANDBOX_PROBE_BARRIER_SECONDS),
     }
+    # Guarding the probe only, deliberately: a `finally` around the `mkdir` above would
+    # delete the very directory the collision check exists to protect.
     try:
         with witness.watching():
             returncode = runner(command, workspace, environment, SANDBOX_PROBE_TIMEOUT_SECONDS)
@@ -341,7 +351,7 @@ def probe_sandbox(
         # Before the agent's turn whatever happened, including a refusal: the workspace is
         # archived as the submission, and a cell must not inherit the previous phase's
         # releases either.
-        shutil.rmtree(barrier, ignore_errors=True)
+        shutil.rmtree(barrier)
     observation = witness.receipt
     failures = list(witness.violations)
     if returncode != 0:

@@ -339,7 +339,10 @@ it has `docker inspect`ed and recorded the *n*th container. Then the command exi
 Hermes tears the container down as it always would. The wait is bounded at 15 seconds per
 backend, so a witness that never records costs seconds and exits `75`, not a budget; and
 `probe_sandbox` removes the barrier directory before the agent's turn, refusal or not,
-because the workspace becomes the submission. What is proved is unchanged — the real
+because the workspace becomes the submission. It removes only a directory it created:
+`mkdir(exist_ok=False)` establishes that ownership, and a pre-existing
+`.sandbox-probe-barrier` refuses the cell untouched rather than being cleared out of the
+way — the workspace is ProgramBench's input, not the harness's scratch space. What is proved is unchanged — the real
 `container_persistent: false` backend, its real image, network mode and `/workspace` mount.
 Only the order of inspection and teardown is. Shortening the poll was rejected: it buys a
 faster coin flip, and a pre-budget proof that is nondeterministic is not a proof.

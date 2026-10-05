@@ -251,11 +251,38 @@ class SandboxProbeBarrierTests(unittest.TestCase):
         self.assertIn("the sandbox probe exited 1", str(refusal.exception))
         self.assertIn("no sound default container", str(refusal.exception))
 
+    def test_a_barrier_path_the_harness_did_not_create_is_refused_untouched(self) -> None:
+        # Creating the directory is what establishes the right to delete it. The workspace
+        # is ProgramBench's input, so a harness that cleared a colliding path out of its
+        # own way would be editing the benchmark before the agent ever saw it - and the
+        # cleanup is scoped to run only after a successful `mkdir`, or it would delete the
+        # very thing this refusal protects.
+        ran: list[str] = []
+
+        def runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            ran.append(command)
+            return 0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            sessions.mkdir()
+            squatter = workspace / ".sandbox-probe-barrier"
+            squatter.mkdir()
+            (squatter / "sentinel").write_text("shipped by the image", encoding="utf-8")
+
+            with unittest.mock.patch.object(benchmark_adapter, "SandboxWitness", stub_witnesses(StubWitness())):
+                with self.assertRaises(cleanroom.CleanroomError) as refusal:
+                    benchmark_adapter.probe_sandbox(self.repo_root, runner, workspace, {}, sessions, self.receipt)
+
+            self.assertIn("already exists in the cleanroom", str(refusal.exception))
+            self.assertEqual([], ran, "the probe ran against a barrier it does not own")
+            self.assertEqual("shipped by the image", (squatter / "sentinel").read_text(encoding="utf-8"))
+
     def test_a_refused_probe_still_clears_its_barrier(self) -> None:
         # A CleanroomError aborts the run, not just the cell, and the workspace it leaves
         # behind is read as evidence. Scaffolding in it would be read as the agent's.
         def refuses(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
-            (workspace / ".sandbox-probe-barrier").mkdir(exist_ok=True)
             return 1
 
         with tempfile.TemporaryDirectory() as temp_dir:
