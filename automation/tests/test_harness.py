@@ -723,7 +723,17 @@ class AutomationHarnessTests(unittest.TestCase):
         usage_dir = temp_path / "sessions"
         terminal_log = temp_path / "terminal.jsonl"
 
-        env = os.environ.copy()
+        # Everything this harness measures itself with, dropped: these two tests are the
+        # only ones that hand `run_agent.sh` a real interpreter, and pytest-cov's
+        # subprocess hook would have it write statement-coverage data into a run
+        # configured for branch coverage - which `coverage combine` refuses outright,
+        # failing the whole job after every test has passed. The child stands in for
+        # Hermes inside a cleanroom; it has no business inheriting our instrumentation.
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("COV_CORE_") and not name.startswith("COVERAGE_")
+        }
         env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
         env["PYTHONPATH"] = str(self.fake_hermes_importables(temp_path / "fake-hermes"))
         env["REPO_AUTOMATION_AGENT_RUNNER"] = "hermes"
