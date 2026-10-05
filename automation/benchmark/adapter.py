@@ -31,7 +31,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 
 from automation.context import build_context
 
-from .cleanroom import CleanroomError, CleanroomReceipt
+from .cleanroom import WORKSPACE_DIR, CleanroomError, CleanroomReceipt
 from .cleanroom import prepare as prepare_cleanroom
 from .witness import SandboxWitness
 from .instances import TaskSpec
@@ -165,6 +165,14 @@ SANDBOX_PROBE_STEM = "sandbox-probe"
 # One container start and one `docker exec`. Generous for that, and short enough that a
 # wedged daemon does not eat the cell it is protecting.
 SANDBOX_PROBE_TIMEOUT_SECONDS = 300
+# Where the probe and the witness meet, inside the workspace: the container sees it at
+# /workspace, the witness at the host path, and neither needs a second channel. Removed
+# again before the agent's turn - it is scaffolding, not part of the submission.
+SANDBOX_PROBE_BARRIER_DIR = ".sandbox-probe-barrier"
+# How long a probe container holds itself open waiting to be inspected. Room for a 0.5s
+# poll plus a `docker inspect` on a loaded runner, and bounded so a witness that never
+# releases costs the cell seconds rather than its budget.
+SANDBOX_PROBE_BARRIER_SECONDS = 15
 
 
 def _observed_task_ids(observation: Mapping[str, Any]) -> str:
@@ -303,12 +311,37 @@ def probe_sandbox(
 
     Refusing here costs two container starts. Refusing after the session costs the
     budget, which is how run 36485906813 spent 300 seconds to discover a tmpfs.
+
+    The two sides are synchronised rather than sampled. A probe container exists for one
+    `docker exec` and no longer, so whether the witness happens to see it is a race
+    against its own poll interval - run 37275443406 lost that race by 233ms and refused a
+    cleanroom whose own probe had just reported both backends sound. Each probe command
+    therefore holds its container open until the witness has inspected and recorded it.
+    What is proved is unchanged: the real `container_persistent: false` backend, its real
+    image, network and workspace mount. Only the order of inspection and removal is.
     """
-    witness = SandboxWitness(sessions_dir, workspace, receipt.image, receipt.image_id, stem=SANDBOX_PROBE_STEM)
+    barrier = workspace / SANDBOX_PROBE_BARRIER_DIR
+    shutil.rmtree(barrier, ignore_errors=True)
+    witness = SandboxWitness(
+        sessions_dir, workspace, receipt.image, receipt.image_id, stem=SANDBOX_PROBE_STEM, release_dir=barrier
+    )
     script = shlex.quote(str(repo_root / SUPERVISOR_SCRIPT))
     command = f"{script} --repo-root {shlex.quote(str(workspace))} --sandbox-probe"
-    with witness.watching():
-        returncode = runner(command, workspace, environment, SANDBOX_PROBE_TIMEOUT_SECONDS)
+    environment = {
+        **environment,
+        # The container's view of the barrier, which is the only view the waiting command
+        # has: /workspace is where the cleanroom is mounted.
+        "REPO_AUTOMATION_SANDBOX_PROBE_BARRIER": f"{WORKSPACE_DIR}/{SANDBOX_PROBE_BARRIER_DIR}",
+        "REPO_AUTOMATION_SANDBOX_PROBE_BARRIER_SECONDS": str(SANDBOX_PROBE_BARRIER_SECONDS),
+    }
+    try:
+        with witness.watching():
+            returncode = runner(command, workspace, environment, SANDBOX_PROBE_TIMEOUT_SECONDS)
+    finally:
+        # Before the agent's turn whatever happened, including a refusal: the workspace is
+        # archived as the submission, and a cell must not inherit the previous phase's
+        # releases either.
+        shutil.rmtree(barrier, ignore_errors=True)
     observation = witness.receipt
     failures = list(witness.violations)
     if returncode != 0:

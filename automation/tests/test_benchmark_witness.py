@@ -13,7 +13,7 @@ import time
 import unittest
 from pathlib import Path
 
-from automation.benchmark.witness import WITNESS_SUFFIX, SandboxWitness
+from automation.benchmark.witness import RELEASE_PREFIX, WITNESS_SUFFIX, SandboxWitness
 
 IMAGE = "programbench/abishekvashok_1776_cmatrix.5c082c6:task_cleanroom_v6"
 IMAGE_ID = "sha256:4ef6d754"
@@ -180,6 +180,66 @@ class WitnessTests(unittest.TestCase):
 
             witness = self.watch(docker, workspace, sessions, creates=(CONTAINER, SESSION_CONTAINER))
 
+            receipt = self.written(sessions)
+            self.assertTrue(receipt["default_backend_verified"])
+            self.assertTrue(receipt["session_backend_verified"])
+            self.assertEqual([], witness.violations)
+
+    def test_a_probe_backend_too_short_lived_to_poll_is_still_inspected(self) -> None:
+        """The barrier run 37275443406 needed: the container waits to be inspected.
+
+        A probe container lives for exactly one `docker exec` - 267ms for the
+        session-scoped one in that run, against a 500ms poll - so sampling decided whether
+        a sound cleanroom could be proved. Here each container is removed the instant it is
+        released, which is far inside the poll interval below, and both are witnessed
+        anyway. Without the release this test cannot pass: the probe never gets its marker
+        and reports the barrier timeout instead.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            barrier = workspace / ".sandbox-probe-barrier"
+            docker = FakeDocker(
+                containers=[],
+                inspect={
+                    CONTAINER: inspected(workspace),
+                    SESSION_CONTAINER: inspected(workspace, container=SESSION_CONTAINER, task_id=SESSION_TASK_ID),
+                },
+            )
+            witness = SandboxWitness(
+                sessions,
+                workspace,
+                IMAGE,
+                IMAGE_ID,
+                run=docker,
+                # Deliberately slower than anything the fake probe does: the only reason a
+                # container is still there to inspect is that it is waiting to be.
+                poll_seconds=0.2,
+                stem="sandbox-probe",
+                release_dir=barrier,
+            )
+            recorded_at_release = []
+
+            def probe(command, workspace_arg, env, timeout) -> int:
+                """What `run_agent.sh --sandbox-probe` does: two backends, one exec each."""
+                for release, container in enumerate((CONTAINER, SESSION_CONTAINER), start=1):
+                    marker = barrier / f"{RELEASE_PREFIX}{release}"
+                    self.assertFalse(marker.exists(), f"{marker.name} existed before the container it releases")
+                    docker.containers.append(container)
+                    deadline = time.monotonic() + 10
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if not marker.exists():
+                        return 75  # the bounded barrier timeout, as the probe reports it
+                    recorded_at_release.append(len(witness.containers))
+                    docker.containers.remove(container)
+                return 0
+
+            self.assertEqual(0, witness.wrap(probe)("hermes", workspace, {}, 300))
+
+            # Released once inspected, never before: the nth marker appears only after the
+            # nth container has been recorded with its `docker inspect` output.
+            self.assertEqual([1, 2], recorded_at_release)
             receipt = self.written(sessions)
             self.assertTrue(receipt["default_backend_verified"])
             self.assertTrue(receipt["session_backend_verified"])

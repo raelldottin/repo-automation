@@ -171,6 +171,103 @@ def _fake_prepare(instance_id: str, workspace: Path, repository: str, **_: objec
     )
 
 
+class SandboxProbeBarrierTests(unittest.TestCase):
+    """How the probe keeps its containers alive long enough for the witness to inspect them.
+
+    The probe's containers exist for one `docker exec` each, so whether the witness sees
+    them was a race against its own poll interval until run 37275443406 lost it by 233ms.
+    These are the adapter's half of the rendezvous: the barrier both sides are given, and
+    the fact that nothing is left in the workspace afterwards.
+    """
+
+    def setUp(self) -> None:
+        self.repo_root = Path(__file__).resolve().parents[2]
+        self.receipt = cleanroom.CleanroomReceipt(instance_id="owner__proj.abc1234", image="img", image_id="sha256:d1ge57")
+
+    def probe(self, runner, *, witness: StubWitness | None = None) -> list[str]:
+        """Run one probe against a stub witness, and say what it left in the workspace."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "agent-sessions"
+            workspace.mkdir()
+            sessions.mkdir()
+            stubs = stub_witnesses(witness or StubWitness())
+            with unittest.mock.patch.object(benchmark_adapter, "SandboxWitness", stubs):
+                benchmark_adapter.probe_sandbox(self.repo_root, runner, workspace, {}, sessions, self.receipt)
+            return sorted(entry.name for entry in workspace.iterdir())
+
+    def test_both_sides_of_the_barrier_are_the_same_directory_in_the_workspace(self) -> None:
+        # The witness writes to the host path and the waiting command reads /workspace, so
+        # a probe that cannot be released is one where these two disagree.
+        passed: dict[str, str] = {}
+
+        def runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            passed.update(env)
+            return 0
+
+        def witness_of(*args: object, **kwargs: object) -> StubWitness:
+            passed["release_dir"] = str(kwargs["release_dir"])
+            return StubWitness()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            sessions.mkdir()
+            with unittest.mock.patch.object(benchmark_adapter, "SandboxWitness", witness_of):
+                benchmark_adapter.probe_sandbox(self.repo_root, runner, workspace, {}, sessions, self.receipt)
+
+            self.assertEqual(str(workspace / ".sandbox-probe-barrier"), passed["release_dir"])
+            self.assertEqual("/workspace/.sandbox-probe-barrier", passed["REPO_AUTOMATION_SANDBOX_PROBE_BARRIER"])
+            # Bounded: a witness that never releases costs the cell seconds, not a budget.
+            self.assertEqual("15", passed["REPO_AUTOMATION_SANDBOX_PROBE_BARRIER_SECONDS"])
+
+    def test_the_barrier_is_gone_before_the_agent_gets_the_workspace(self) -> None:
+        # The workspace is archived as the submission, so the rendezvous has to leave it.
+        def runner(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            (workspace / ".sandbox-probe-barrier").mkdir(exist_ok=True)
+            (workspace / ".sandbox-probe-barrier" / "released-1").write_text("", encoding="utf-8")
+            return 0
+
+        self.assertEqual([], self.probe(runner))
+
+    def test_a_probe_that_was_never_released_is_refused_in_bounded_time(self) -> None:
+        # The barrier timeout as the probe reports it: the command exits 75 inside the
+        # container, so the probe program exits nonzero. A witness that cannot see the
+        # containers must fail the cell, not wait for the model to find out.
+        def timed_out(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            (workspace / ".sandbox-probe-barrier" / "stale").parent.mkdir(exist_ok=True)
+            return 1
+
+        unobserved = StubWitness(
+            receipt={
+                "observed": False,
+                "default_backend_verified": False,
+                "session_backend_verified": False,
+                "default_backend_removed_after_exit": None,
+                "containers": [],
+            }
+        )
+        with self.assertRaises(cleanroom.CleanroomError) as refusal:
+            self.probe(timed_out, witness=unobserved)
+        self.assertIn("the sandbox probe exited 1", str(refusal.exception))
+        self.assertIn("no sound default container", str(refusal.exception))
+
+    def test_a_refused_probe_still_clears_its_barrier(self) -> None:
+        # A CleanroomError aborts the run, not just the cell, and the workspace it leaves
+        # behind is read as evidence. Scaffolding in it would be read as the agent's.
+        def refuses(command: str, workspace: Path, env: Mapping[str, str], timeout: int) -> int:
+            (workspace / ".sandbox-probe-barrier").mkdir(exist_ok=True)
+            return 1
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            sessions.mkdir()
+            with unittest.mock.patch.object(benchmark_adapter, "SandboxWitness", stub_witnesses(StubWitness())):
+                with self.assertRaises(cleanroom.CleanroomError):
+                    benchmark_adapter.probe_sandbox(self.repo_root, refuses, workspace, {}, sessions, self.receipt)
+            self.assertEqual([], list(workspace.iterdir()))
+
+
 class AdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[2]
