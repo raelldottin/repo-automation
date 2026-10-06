@@ -394,9 +394,34 @@ apply_terminal_config_to_env()
 from tools.terminal_tool import terminal_tool
 
 command = os.environ["REPO_AUTOMATION_SANDBOX_PROBE_COMMAND"]
+# The rendezvous with SandboxWitness, composed per call rather than folded into the
+# command above: that command is the cleanroom contract and stays readable as one, while
+# this only decides when the container may be torn down. `container_persistent: false`
+# gives the session-scoped backend a container that lives exactly as long as this exec,
+# and in run 37275443406 that was 267ms against a 500ms poll - so the witness missed a
+# backend that had just reported /workspace sound, and the cell was refused for it.
+# Waiting by call number, not by task id: the witness writes the marker the moment it has
+# recorded a container, and only this side knows which of the two calls it is in.
+barrier = os.environ.get("REPO_AUTOMATION_SANDBOX_PROBE_BARRIER", "")
+barrier_seconds = int(os.environ.get("REPO_AUTOMATION_SANDBOX_PROBE_BARRIER_SECONDS", "15"))
+
+
+def held_open(release):
+    """The cleanroom checks, then a bounded wait for this container to be inspected."""
+    if not barrier:
+        return command
+    marker = f"{barrier}/released-{release}"
+    return (
+        f"{command} && {{ waited=0; while [ ! -e {marker} ]; do waited=$((waited+1)); "
+        f'if [ "$waited" -gt {barrier_seconds} ]; then '
+        f'echo "sandbox-probe: no witness recorded this container within {barrier_seconds}s" >&2; '
+        "exit 75; fi; sleep 1; done; }"
+    )
+
+
 failed = False
-for task_id in (None, f"probe-{uuid.uuid4()}"):
-    answer = json.loads(terminal_tool(command, task_id=task_id))
+for release, task_id in enumerate((None, f"probe-{uuid.uuid4()}"), start=1):
+    answer = json.loads(terminal_tool(held_open(release), task_id=task_id))
     print(json.dumps({"task_id": task_id or "default", "result": answer}))
     failed = failed or answer.get("exit_code") != 0
 sys.exit(1 if failed else 0)

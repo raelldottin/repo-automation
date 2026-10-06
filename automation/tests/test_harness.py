@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -680,6 +681,121 @@ class AutomationHarnessTests(unittest.TestCase):
             # The fix is the absence of a second documentation contract, so assert the
             # absence: a future edit that reintroduces a filename fails here.
             self.assertNotIn("README", probe_log)
+
+    def fake_hermes_importables(self, root: Path) -> Path:
+        """Enough of Hermes to run the probe program itself: the config bridge and one tool.
+
+        The other sandbox-probe tests stand in for Hermes' interpreter with a shell script,
+        which means the probe program on its stdin is discarded. These two are about what
+        that program composes, so it has to actually run - against a `terminal_tool` that
+        records the command it was handed and executes it where a container would.
+        """
+        (root / "hermes_cli").mkdir(parents=True)
+        (root / "hermes_cli" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "hermes_cli" / "config.py").write_text("def apply_terminal_config_to_env():\n    return None\n", encoding="utf-8")
+        (root / "tools").mkdir()
+        (root / "tools" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "tools" / "terminal_tool.py").write_text(
+            "import json\nimport os\nimport subprocess\n\n\n"
+            "def terminal_tool(command, task_id=None):\n"
+            "    with open(os.environ['FAKE_TERMINAL_LOG'], 'a', encoding='utf-8') as log:\n"
+            "        log.write(json.dumps({'task_id': task_id, 'command': command}) + '\\n')\n"
+            "    done = subprocess.run(['sh', '-c', command], capture_output=True, text=True)\n"
+            "    return json.dumps({'output': (done.stdout + done.stderr).strip(), 'exit_code': done.returncode})\n",
+            encoding="utf-8",
+        )
+        return root
+
+    def sandbox_probe_barrier_run(self, temp_path: Path, *, released: tuple[int, ...], seconds: str) -> tuple[Any, Path, Path]:
+        """Run `--sandbox-probe` for real, with only the witness's side of it faked."""
+        workspace = temp_path / "workspace"
+        (workspace / ".git").mkdir(parents=True)
+        self.write_fake_executable(workspace / "executable", "#!/usr/bin/env bash\nexit 0\n")
+        barrier = workspace / ".sandbox-probe-barrier"
+        barrier.mkdir()
+        for release in released:
+            (barrier / f"released-{release}").write_text("", encoding="utf-8")
+
+        bin_dir = temp_path / "bin"
+        bin_dir.mkdir()
+        self.write_fake_executable(bin_dir / "hermes", "#!/usr/bin/env bash\nexit 1\n")
+        self.write_fake_executable(bin_dir / "docker", "#!/usr/bin/env bash\nprintf 'sha256:c0ffee\\n'\n")
+        usage_dir = temp_path / "sessions"
+        terminal_log = temp_path / "terminal.jsonl"
+
+        # Everything this harness measures itself with, dropped: these two tests are the
+        # only ones that hand `run_agent.sh` a real interpreter, and pytest-cov's
+        # subprocess hook would have it write statement-coverage data into a run
+        # configured for branch coverage - which `coverage combine` refuses outright,
+        # failing the whole job after every test has passed. The child stands in for
+        # Hermes inside a cleanroom; it has no business inheriting our instrumentation.
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("COV_CORE_") and not name.startswith("COVERAGE_")
+        }
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+        env["PYTHONPATH"] = str(self.fake_hermes_importables(temp_path / "fake-hermes"))
+        env["REPO_AUTOMATION_AGENT_RUNNER"] = "hermes"
+        env["REPO_AUTOMATION_HERMES_PYTHON"] = sys.executable
+        env["REPO_AUTOMATION_HERMES_USAGE_DIR"] = str(usage_dir)
+        env["REPO_AUTOMATION_HERMES_SANDBOX_IMAGE"] = "programbench/x.1:task_cleanroom_v6"
+        # The path the waiting command sees. A cell passes the container's view,
+        # /workspace/...; with no container here, the command runs where the bind mount
+        # would have put it.
+        env["REPO_AUTOMATION_SANDBOX_PROBE_BARRIER"] = str(barrier)
+        env["REPO_AUTOMATION_SANDBOX_PROBE_BARRIER_SECONDS"] = seconds
+        env["FAKE_TERMINAL_LOG"] = str(terminal_log)
+
+        result = subprocess.run(
+            [str(self.repo_root / "automation/supervisor/run_agent.sh"), "--repo-root", str(workspace), "--sandbox-probe"],
+            cwd=workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        return result, terminal_log, usage_dir
+
+    def test_the_sandbox_probe_holds_each_container_open_until_it_is_released(self) -> None:
+        """Both backends wait on their own marker, and neither exits before it appears.
+
+        A probe container lives for exactly one `docker exec`, and in run 37275443406 the
+        session-scoped one lived 267ms against SandboxWitness's 500ms poll - so a cleanroom
+        whose own probe reported both backends sound was refused for the one nobody saw.
+        The wait is what orders the inspection before the teardown.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result, terminal_log, _ = self.sandbox_probe_barrier_run(Path(temp_dir), released=(1, 2), seconds="15")
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            calls = [json.loads(line) for line in terminal_log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(2, len(calls))
+            # One marker per call, in the order the witness records the containers: the
+            # witness knows the label it saw, only this side knows which call it is in.
+            self.assertIn("released-1", calls[0]["command"])
+            self.assertIn("released-2", calls[1]["command"])
+            # The default backend is task_id=None, the session-scoped one its own id.
+            self.assertIsNone(calls[0]["task_id"])
+            self.assertTrue(str(calls[1]["task_id"]).startswith("probe-"))
+            # The cleanroom contract is still the whole of what is being checked; the wait
+            # is appended to it and prints nothing of its own.
+            for call in calls:
+                self.assertIn("test -x ./executable", call["command"])
+            self.assertEqual(2, result.stdout.count('"exit_code": 0'))
+
+    def test_a_sandbox_probe_no_witness_releases_fails_in_bounded_time(self) -> None:
+        """A witness that never records the container must cost seconds, not the budget.
+
+        The failure has to stay loud and cheap: if waiting to be inspected could hang, the
+        protection against an unproved backend would cost more than the thing it protects.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result, _, usage_dir = self.sandbox_probe_barrier_run(Path(temp_dir), released=(), seconds="1")
+
+            self.assertNotEqual(0, result.returncode)
+            probe_log = (usage_dir / "sandbox-probe.log").read_text(encoding="utf-8")
+            self.assertEqual(2, probe_log.count('"exit_code": 75'))
+            self.assertIn("no witness recorded this container within 1s", probe_log)
 
     def test_agent_wrapper_keeps_the_session_output_beside_its_reports(self) -> None:
         """Why a session failed is only ever printed; the usage report never says.

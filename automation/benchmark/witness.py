@@ -49,6 +49,15 @@ PROMPT_PROBE_TASK_ID = "prompt-backend-probe"
 # The agent's first tool call is what creates the container, so the wait is the model's
 # first turn - seconds to a minute - and the poll is cheap.
 POLL_SECONDS = 0.5
+# The marker the sandbox probe waits on before letting its container go. Polling alone is
+# a race the witness loses there: the probe's container lives for exactly one `docker exec`
+# and nothing else, and in run 37275443406 the session-scoped one was created and removed
+# inside 267ms - between two polls - so a sound cleanroom was refused for a container
+# nobody got to inspect. A shorter poll only buys a faster coin flip; the marker orders the
+# inspection before the removal. Numbered rather than named for the backend, because this
+# has to be written the moment a container is recorded, while which backend it serves is
+# whatever Hermes labelled it - the probe knows which of its calls it is in.
+RELEASE_PREFIX = "released-"
 WITNESS_SUFFIX = ".sandbox.json"
 _CONTROLS_SUFFIX = ".controls.json"
 # Exactly the fields the receipt keeps. `docker inspect` without a format would hand back
@@ -115,6 +124,7 @@ class SandboxWitness:
         run: Optional[DockerRun] = None,
         poll_seconds: float = POLL_SECONDS,
         stem: Optional[str] = None,
+        release_dir: Optional[Path] = None,
     ) -> None:
         self._sessions_dir = Path(sessions_dir)
         self._workspace = Path(workspace).resolve()
@@ -123,6 +133,10 @@ class SandboxWitness:
         self._run = run or _subprocess_docker
         self._poll_seconds = poll_seconds
         self._stem = stem
+        # Set by the sandbox probe only. A model session's containers live for the whole
+        # turn and need no rendezvous, and nothing should be writing into a lane's
+        # workspace while the agent is rebuilding in it.
+        self._release_dir = Path(release_dir) if release_dir else None
         self._baseline: set[str] = set()
         self._seen: set[str] = set()
         self.containers: list[dict[str, object]] = []
@@ -220,6 +234,21 @@ class SandboxWitness:
         self.containers.append(record)
         self.violations.extend(violations)
         self._flush()
+        self._release()
+
+    def _release(self) -> None:
+        """Let the probe container that has now been inspected exit.
+
+        After `_record`, deliberately: the point of the barrier is that the container is
+        still there to be inspected, so the release is only sound once this witness has
+        the `docker inspect` output and the violations it implies. The marker goes in the
+        workspace because that bind mount is the one thing the witness and the inside of
+        the container already share.
+        """
+        if self._release_dir is None:
+            return
+        self._release_dir.mkdir(parents=True, exist_ok=True)
+        (self._release_dir / f"{RELEASE_PREFIX}{len(self.containers)}").write_text("", encoding="utf-8")
 
     def _after_exit(self) -> None:
         """What survived the session that made it.

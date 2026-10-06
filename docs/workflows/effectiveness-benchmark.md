@@ -328,6 +328,25 @@ the point: that bridge is where `docker_persist_across_processes` takes effect. 
 receipt and output land in `agent-sessions/sandbox-probe.sandbox.json` and
 `agent-sessions/sandbox-probe.log`.
 
+The probe and the witness **synchronise**; the witness does not sample them. A probe
+container exists for exactly one `docker exec` and nothing else, so whether the witness
+caught it was a race against its own 500ms poll — and in run `37275443406` the
+session-scoped container lived 267ms, so a cleanroom whose own probe had just reported both
+backends sound was refused for the one nobody managed to inspect. Each probe call therefore
+appends a barrier to the cleanroom checks: having proved `/workspace`, the command waits
+for `/workspace/.sandbox-probe-barrier/released-<n>`, which the witness writes the moment
+it has `docker inspect`ed and recorded the *n*th container. Then the command exits and
+Hermes tears the container down as it always would. The wait is bounded at 15 seconds per
+backend, so a witness that never records costs seconds and exits `75`, not a budget; and
+`probe_sandbox` removes the barrier directory before the agent's turn, refusal or not,
+because the workspace becomes the submission. It removes only a directory it created:
+`mkdir(exist_ok=False)` establishes that ownership, and a pre-existing
+`.sandbox-probe-barrier` refuses the cell untouched rather than being cleared out of the
+way — the workspace is ProgramBench's input, not the harness's scratch space. What is proved is unchanged — the real
+`container_persistent: false` backend, its real image, network mode and `/workspace` mount.
+Only the order of inspection and teardown is. Shortening the poll was rejected: it buys a
+faster coin flip, and a pre-budget proof that is nondeterministic is not a proof.
+
 What it deliberately does **not** check is the documentation, because the cleanroom
 preflight above already owns that invariant and owns it generically: it discovers docs by
 type and convention — man pages, extensionless `README` and `FAQ` — refuses any image whose
