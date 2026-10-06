@@ -342,6 +342,20 @@ class RequiredArtifactTests(unittest.TestCase):
                 self.assertIn("stopped at any moment", prompt)
                 self.assertNotIn("Write the file before you finish", prompt)
 
+    def test_the_research_prompt_bounds_exploration_against_the_durable_record(self) -> None:
+        """Run 37420620542 banked one artifact in 1800s: intent was there, cadence was not."""
+        agent, _, _ = run_lane("C")
+        # Unwrapped, so rewrapping the prompt cannot fail this.
+        flat = " ".join(agent.prompt_for("research").split())
+        self.assertIn("as your first tool action, before any investigative command", flat)
+        self.assertIn("never make more than three investigative tool calls", flat)
+        self.assertIn("Your chat response does not count as a checkpoint", flat)
+        # Scoped to research on purpose: the same bound in a later phase would interrupt
+        # every third edit to rewrite a summary.
+        for phase in ("plan", "implement"):
+            with self.subTest(phase=phase):
+                self.assertNotIn("three investigative tool calls", " ".join(agent.prompt_for(phase).split()))
+
 
 class BudgetTests(unittest.TestCase):
     def test_multi_phase_lanes_share_one_instance_budget(self) -> None:
