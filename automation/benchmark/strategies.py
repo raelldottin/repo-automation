@@ -333,6 +333,34 @@ Inspect whatever material is present in the workspace. Record what you do not kn
 than guessing.
 """
 
+# Run 37420620542 wrote research.json once, 116s in, then made 24 more terminal calls without
+# writing again: the flag surface, exit codes and terminfo dependency it discovered died with
+# the transcript. "Update it as you work" was already in the artifact instruction, so what was
+# missing is not the intent but the cadence - a bound on how far exploration may run ahead of
+# the durable record. Scoped to research deliberately: the same three-call bound in implement
+# would interrupt every third edit to rewrite a summary.
+_RESEARCH_CHECKPOINT = """## Checkpoint protocol
+
+Create `{RPI_DIR}/{filename}` as your first tool action, before any investigative command.
+Treat the artifact as the durable research record, not a final report.
+
+Whenever a tool result changes any finding, constraint, unknown, risk, or piece of evidence:
+
+1. update `{RPI_DIR}/{filename}` before issuing another investigative tool call;
+2. keep the file schema-valid at every update.
+
+You may batch closely related observations, but never make more than three investigative tool
+calls without writing an updated artifact.
+
+Before starting a command that may block, wait, invoke an interactive program, or consume
+substantial time, checkpoint everything you have learned so far. If a command fails or times out
+in a way that changes what you know, checkpoint that failure or uncertainty before trying
+something else.
+
+Your chat response does not count as a checkpoint. Information that exists only in the
+conversation is lost at the end of this phase.
+"""
+
 _PLAN_BODY = """## Phase: Plan
 
 Turn the research below into an implementation plan. Do **not** implement it.
@@ -420,6 +448,7 @@ def research_prompt(task: TaskSpec, jspace: Optional[JSpaceArtifact] = None) -> 
         envelope(task),
         _RESEARCH_BODY,
         artifact_instruction(RESEARCH_SPEC),
+        _RESEARCH_CHECKPOINT.format(RPI_DIR=RPI_DIR, filename=RESEARCH_ARTIFACT),
         jspace=jspace,
     )
 
