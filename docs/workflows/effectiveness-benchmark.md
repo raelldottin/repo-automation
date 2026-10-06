@@ -899,6 +899,25 @@ hand-in. The prompt asks for `research.json` / `plan.json` to be created immedia
 schema-valid, and updated as work proceeds, because the session can be stopped at any
 moment and whatever is in the file then is what the phase produced.
 
+Asking for that was not enough on its own. In run `37420620542` the research phase ran
+uncapped for its whole 1800-second ceiling and wrote `research.json` **once**, 116 seconds
+in, on its fourth model response; it then made 24 more terminal calls without writing again,
+and the reference binary's flag surface, exit codes and terminfo dependency that those calls
+established died with the transcript. The artifact was schema-valid and 971 characters, with
+`unknowns`, `risks` and `evidence` all empty. "Update it as you work" was already in the
+prompt, so what was missing was the cadence rather than the intent. The research prompt now
+carries a **checkpoint protocol**: write the artifact as the first tool action before any
+investigative command, update it before issuing another investigative call whenever a result
+changes a finding, and never make more than three investigative tool calls without writing
+again - plus a checkpoint before any command that may block and after a failure that changes
+what is known. It is scoped to research: the same three-call bound in implement would
+interrupt every third edit to rewrite a summary.
+
+`RESEARCH_SPEC` was deliberately left alone. Requiring non-empty `findings` or `evidence`
+would reject that stub but not the staleness behind it, since one superficial finding would
+pass while twenty minutes of discoveries stayed unbanked. Schema validity and checkpoint
+freshness are different contracts, and only the second one was broken.
+
 If a required artifact is absent or schema-invalid, the lane **stops**. It does not
 fabricate the handoff: the harness used to substitute a stub (`"research phase produced no
 artifact"`), which is how six multi-phase cells across two runs came to be scored on a
