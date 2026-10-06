@@ -58,6 +58,7 @@ from .strategies import (
     RESEARCH_SPEC,
     RPI_DIR,
     ExecutionContext,
+    agent_workspace_for,
     read_artifact,
     research_prompt,
     run_phase,
@@ -375,8 +376,9 @@ def run_probe(
         env=environment,
         timeout_seconds=budget_seconds,
         runner=session_runner,
+        agent_workspace=agent_workspace_for(cleanroom),
     )
-    prompt = research_prompt(task)
+    prompt = research_prompt(task, agent_workspace=ctx.agent_workspace)
     # Measured here because the phase result does not carry it, and a token count without the
     # time it took cannot say whether a long turn was spent generating or spent waiting.
     started = time.monotonic()

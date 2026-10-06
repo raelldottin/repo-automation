@@ -42,6 +42,7 @@ from .strategies import (
     ExecutionStrategy,
     SliceContextStrategy,
     StrategyResult,
+    agent_workspace_for,
 )
 
 DEFAULT_TIMEOUT_SECONDS = 1800
@@ -475,6 +476,7 @@ class SupervisorAgentAdapter:
                 env=environment,
                 timeout_seconds=self._timeout,
                 runner=runner,
+                agent_workspace=agent_workspace_for(self._cleanroom),
             )
         )
         if witness is not None and witness.violations:

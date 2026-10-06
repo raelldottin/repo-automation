@@ -15,6 +15,7 @@ from automation.benchmark.adapter import (
     AGENT_SESSIONS_DIR,
     SUBMISSION_MANIFEST_FILENAME,
     SupervisorAgentAdapter,
+    _default_command_template,
     build_context_bundle,
     build_queue_data,
     build_slice_record,
@@ -22,15 +23,21 @@ from automation.benchmark.adapter import (
 from automation.benchmark.instances import TaskSpec
 from automation.benchmark.scoring import EffectivenessReport, InstanceScore
 from automation.benchmark.jspace import JSpaceArtifact, JSpaceUnavailable
+from automation.benchmark.cleanroom import WORKSPACE_DIR
 from automation.benchmark.strategies import (
     ALL_LANES,
     LANE_CEILING_SECONDS,
     PHASE_CEILING_SECONDS,
     PLAN_ARTIFACT,
+    PLAN_COMPACT_ARTIFACT,
     RESEARCH_ARTIFACT,
+    RESEARCH_COMPACT_ARTIFACT,
     RPI_DIR,
+    ExecutionContext,
     RpiStrategy,
+    agent_workspace_for,
     build_strategy,
+    read_artifact,
 )
 from automation.supervisor.run_next import render_prompt
 
@@ -156,6 +163,30 @@ def run_lane(lane: str, agent: Optional[FakeAgent] = None, timeout_seconds: int 
     out_tar = Path(tmp) / "submission.tar.gz"
     result = adapter.produce_submission(TASK, out_tar)
     return agent, result, out_tar
+
+
+def run_rpi_in_sandbox(agent: Optional[FakeAgent] = None, timeout_seconds: int = 1800):
+    """Drive lanes D's phases with the agent's own view of the workspace set to the sandbox.
+
+    Built here rather than through ``run_lane`` because the real cleanroom path needs
+    Docker: what this exercises is the path translation, which is pure string work, against
+    an agent that still writes host-side exactly where the bind mount puts those bytes.
+    """
+    agent = agent or FakeAgent()
+    workspace = Path(tempfile.mkdtemp(prefix="sandbox-ws-"))
+    ctx = ExecutionContext(
+        repo_root=REPO_ROOT,
+        task=TASK,
+        workspace=workspace,
+        control_dir=Path(tempfile.mkdtemp(prefix="sandbox-control-")),
+        command_template=_default_command_template(REPO_ROOT),
+        env={},
+        timeout_seconds=timeout_seconds,
+        runner=agent,
+        agent_workspace=agent_workspace_for(cleanroom=True),
+    )
+    result = RpiStrategy(compaction=True).execute(ctx)
+    return agent, result, workspace
 
 
 class LaneBIsTheUnchangedHarnessTests(unittest.TestCase):
@@ -355,6 +386,77 @@ class RequiredArtifactTests(unittest.TestCase):
         for phase in ("plan", "implement"):
             with self.subTest(phase=phase):
                 self.assertNotIn("three investigative tool calls", " ".join(agent.prompt_for(phase).split()))
+
+
+class ModelVisibleArtifactPathTests(unittest.TestCase):
+    """Run 37440878348: eight schema-valid checkpoints written, zero of them collected.
+
+    The agent did what #66 asked. Every write reported ``verified`` with a growing byte
+    count, and all eight resolved to ``<host workspace>/.rpi/research.json`` *inside* the
+    container, where that path is not the bind mount. The harness had handed out a filename
+    whose meaning differed between the model's own two tool families, so the phase read as
+    artifact-absent and the lane would have been void. These pin the path, not the cadence.
+    """
+
+    def test_a_sandboxed_phase_is_told_the_absolute_artifact_path(self) -> None:
+        agent, _, _ = run_rpi_in_sandbox()
+        expected = {
+            "research": f"{WORKSPACE_DIR}/{RPI_DIR}/{RESEARCH_ARTIFACT}",
+            "research_compact": f"{WORKSPACE_DIR}/{RPI_DIR}/{RESEARCH_COMPACT_ARTIFACT}",
+            "plan": f"{WORKSPACE_DIR}/{RPI_DIR}/{PLAN_ARTIFACT}",
+            "plan_compact": f"{WORKSPACE_DIR}/{RPI_DIR}/{PLAN_COMPACT_ARTIFACT}",
+        }
+        for phase, path in expected.items():
+            with self.subTest(phase=phase):
+                self.assertIn(path, agent.prompt_for(phase))
+
+    def test_no_sandboxed_phase_asks_for_a_relative_artifact_path(self) -> None:
+        """The failure was an *also*: the absolute path appearing somewhere is not enough."""
+        agent, _, _ = run_rpi_in_sandbox()
+        for phase in ("research", "research_compact", "plan", "plan_compact"):
+            with self.subTest(phase=phase):
+                prompt = agent.prompt_for(phase)
+                for filename in (RESEARCH_ARTIFACT, RESEARCH_COMPACT_ARTIFACT, PLAN_ARTIFACT, PLAN_COMPACT_ARTIFACT):
+                    self.assertNotIn(f"`{RPI_DIR}/{filename}`", prompt)
+
+    def test_the_checkpoint_protocol_names_the_same_path_the_artifact_contract_does(self) -> None:
+        """Two sections, one file: a cadence that checkpoints a different path banks nothing."""
+        agent, _, _ = run_rpi_in_sandbox()
+        research = agent.prompt_for("research")
+        absolute = f"{WORKSPACE_DIR}/{RPI_DIR}/{RESEARCH_ARTIFACT}"
+        protocol = research.split("## Checkpoint protocol", 1)[1]
+        self.assertIn(f"Create `{absolute}` as your first tool action", protocol)
+        self.assertIn(f"update `{absolute}` before issuing another investigative tool call", protocol)
+
+    def test_a_sandboxed_phase_is_told_where_the_graded_files_go(self) -> None:
+        """`compile.sh` has the same two meanings, and no harness-chosen path to hand over."""
+        agent, _, _ = run_rpi_in_sandbox()
+        implement = agent.prompt_for("implement")
+        self.assertIn(f"Workspace root: `{WORKSPACE_DIR}`", implement)
+        self.assertIn("Write files by absolute path", implement)
+
+    def test_the_host_reads_back_what_the_agent_was_told_to_write(self) -> None:
+        """The two paths are two views of one bind mount, so collection stays host-side."""
+        _, result, workspace = run_rpi_in_sandbox()
+        data, raw = read_artifact(workspace, RESEARCH_ARTIFACT)
+        self.assertIsNotNone(data, "the artifact the prompt named absolutely was not found host-side")
+        self.assertGreater(len(raw), 0)
+        self.assertTrue(all(phase.artifact_valid for phase in result.phases if phase.phase != "implement"))
+
+    def test_local_execution_keeps_the_relative_path_it_always_had(self) -> None:
+        """No container, no disagreement: a relative path is unambiguous and stays."""
+        self.assertEqual("", agent_workspace_for(cleanroom=False))
+        agent, _, _ = run_lane("D")
+        for phase, filename in (
+            ("research", RESEARCH_ARTIFACT),
+            ("research_compact", RESEARCH_COMPACT_ARTIFACT),
+            ("plan", PLAN_ARTIFACT),
+            ("plan_compact", PLAN_COMPACT_ARTIFACT),
+        ):
+            with self.subTest(phase=phase):
+                prompt = agent.prompt_for(phase)
+                self.assertIn(f"`{RPI_DIR}/{filename}`", prompt)
+                self.assertNotIn(WORKSPACE_DIR, prompt)
 
 
 class BudgetTests(unittest.TestCase):

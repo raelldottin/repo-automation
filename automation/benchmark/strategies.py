@@ -31,11 +31,13 @@ from typing import Any, Mapping, Optional, Protocol
 from automation.supervisor import run_next
 
 from . import jspace as jspace_module
+from .cleanroom import WORKSPACE_DIR
 from .instances import TaskSpec
 from .jspace import JSpaceArtifact, JSpaceUnavailable
 
 # Phase artifacts live here, inside the workspace so the agent sandbox can write them,
-# and are stripped from the graded submission.
+# and are stripped from the graded submission. Host-side; what the *agent* is told to write
+# is ``artifact_path`` below, which is not always the same string.
 RPI_DIR = ".rpi"
 
 # What timeout(1) reports, so the code means the same thing here as it does in a shell.
@@ -226,6 +228,11 @@ class ExecutionContext:
     env: Mapping[str, str]
     timeout_seconds: int
     runner: Any  # CommandRunner; typed in adapter.py, kept loose to avoid a cycle.
+    # The agent's own view of the workspace root, which is not always ``workspace``: under
+    # the cleanroom the model's tools live in a container that binds ``workspace`` at
+    # /workspace. Empty means local execution, where the agent stands in the workspace
+    # itself and nothing needs translating. Set from ``agent_workspace_for``.
+    agent_workspace: str = ""
 
 
 class ExecutionStrategy(Protocol):
@@ -278,8 +285,38 @@ PLAN_SPEC = ArtifactSpec(
 )
 
 
+def agent_workspace_for(cleanroom: bool) -> str:
+    """The workspace root as the *agent's* tools resolve it, or "" when that is just its cwd.
+
+    One function so the diagnostic probe and a real cell cannot disagree about it: a probe
+    that resolves paths differently from lane C is measuring a different treatment.
+    """
+    return WORKSPACE_DIR if cleanroom else ""
+
+
+def artifact_path(filename: str, agent_workspace: str = "") -> str:
+    """Where to tell the agent to write ``filename``, in the agent's own terms.
+
+    Absolute under a sandbox, because a relative path there has two answers. Hermes remaps
+    the terminal tool's cwd to the container's /workspace, while the file tool resolves
+    relative paths against ``TERMINAL_CWD`` - the *host* workspace path, which inside the
+    container is not the mount but an empty directory in the container's own layer. Run
+    37440878348 wrote eight schema-valid checkpoints to ``.rpi/research.json``, every one
+    reported ``verified`` with a growing byte count, and the host workspace never saw one of
+    them: the probe collected nothing and the phase read as artifact-absent. The bytes were
+    never lost by the model, only addressed to a directory that dies with the container.
+    """
+    directory = f"{agent_workspace.rstrip('/')}/{RPI_DIR}" if agent_workspace else RPI_DIR
+    return f"{directory}/{filename}"
+
+
 def read_artifact(workspace: Path, filename: str) -> tuple[Optional[Any], str]:
-    """Return ``(parsed_or_None, raw_text)`` for a phase artifact the agent should have written."""
+    """Return ``(parsed_or_None, raw_text)`` for a phase artifact the agent should have written.
+
+    Host-side, and deliberately so: the sandbox binds this directory at /workspace, so
+    ``artifact_path``'s absolute string and this path are two views of the same bytes, and
+    collection stays outside the container that is about to be removed.
+    """
     path = Path(workspace) / RPI_DIR / filename
     if not path.is_file():
         return None, ""
@@ -299,7 +336,7 @@ _ENVELOPE = """## Objective (immutable)
 {objective}
 
 - Task: `{public_id}`
-- Workspace root: the current working directory. Only files here are graded.
+- Workspace root: {workspace_root}. Only files here are graded.
 - A working `compile.sh` at the workspace root that builds `./executable` is mandatory.
 
 This objective is fixed. Do not reinterpret, narrow, or soften it in any later phase.
@@ -307,14 +344,14 @@ This objective is fixed. Do not reinterpret, narrow, or soften it in any later p
 
 _ARTIFACT_INSTRUCTION = """## Required output artifact
 
-Write your result as JSON to `{RPI_DIR}/{filename}` (create the directory if needed).
+Write your result as JSON to `{path}` (create the directory if needed).
 It must be a single JSON object with exactly these keys:
 
 ```json
 {template}
 ```
 
-Create `{RPI_DIR}/{filename}` immediately, as a schema-valid initial checkpoint: every key
+Create `{path}` immediately, as a schema-valid initial checkpoint: every key
 present, lists empty where you have nothing yet. Update it as you work, and keep every
 update schema-valid. The artifact is this phase's durable state; your chat output is not,
 and nothing else you produce here is read by the next phase.
@@ -333,7 +370,7 @@ Inspect whatever material is present in the workspace. Record what you do not kn
 than guessing.
 """
 
-# Run 37420620542 wrote research.json once, 116s in, then made 24 more terminal calls without
+# Run 37420620542 wrote research.json once, 116s in, then made 21 more tool calls without
 # writing again: the flag surface, exit codes and terminfo dependency it discovered died with
 # the transcript. "Update it as you work" was already in the artifact instruction, so what was
 # missing is not the intent but the cadence - a bound on how far exploration may run ahead of
@@ -341,12 +378,12 @@ than guessing.
 # would interrupt every third edit to rewrite a summary.
 _RESEARCH_CHECKPOINT = """## Checkpoint protocol
 
-Create `{RPI_DIR}/{filename}` as your first tool action, before any investigative command.
+Create `{path}` as your first tool action, before any investigative command.
 Treat the artifact as the durable research record, not a final report.
 
 Whenever a tool result changes any finding, constraint, unknown, risk, or piece of evidence:
 
-1. update `{RPI_DIR}/{filename}` before issuing another investigative tool call;
+1. update `{path}` before issuing another investigative tool call;
 2. keep the file schema-valid at every update.
 
 You may batch closely related observations, but never make more than three investigative tool
@@ -406,7 +443,7 @@ next phase needs:
 Drop everything else: narration, rejected hypotheses, restated context, detail the next
 phase cannot act on. Losing information is the point; losing a constraint is not.
 
-Write the compacted JSON to `{RPI_DIR}/{out_filename}`, keeping the same top-level keys as
+Write the compacted JSON to `{out_path}`, keeping the same top-level keys as
 the input. Do not add commentary.
 
 ## Artifact to compact
@@ -417,14 +454,25 @@ the input. Do not add commentary.
 """
 
 
-def envelope(task: TaskSpec) -> str:
-    return _ENVELOPE.format(objective=task.objective, public_id=task.public_id)
+# Named rather than implied, for the same reason the artifact path is absolute: the two bullets
+# below are the only place the graded output's location is stated, and `compile.sh` written to a
+# relative path under the sandbox lands in the container layer exactly as .rpi/research.json did.
+# A filename the harness never sees cannot be handed over as a path, so the envelope says where,
+# and says why relying on the working directory is not enough.
+_SANDBOX_ROOT = (
+    "`{root}`, which is also your shell's working directory. Write files by absolute path under "
+    "it: your file tool and your shell do not resolve a relative path to the same place"
+)
 
 
-def artifact_instruction(spec: ArtifactSpec, filename: Optional[str] = None) -> str:
+def envelope(task: TaskSpec, agent_workspace: str = "") -> str:
+    root = _SANDBOX_ROOT.format(root=agent_workspace) if agent_workspace else "the current working directory"
+    return _ENVELOPE.format(objective=task.objective, public_id=task.public_id, workspace_root=root)
+
+
+def artifact_instruction(spec: ArtifactSpec, filename: Optional[str] = None, agent_workspace: str = "") -> str:
     return _ARTIFACT_INSTRUCTION.format(
-        RPI_DIR=RPI_DIR,
-        filename=filename or spec.filename,
+        path=artifact_path(filename or spec.filename, agent_workspace),
         template=json.dumps(spec.template(), indent=2),
     )
 
@@ -437,18 +485,21 @@ def compose_prompt(*sections: str, jspace: Optional[JSpaceArtifact] = None) -> s
     return "\n\n".join(blocks) + "\n"
 
 
-def research_prompt(task: TaskSpec, jspace: Optional[JSpaceArtifact] = None) -> str:
+def research_prompt(task: TaskSpec, jspace: Optional[JSpaceArtifact] = None, agent_workspace: str = "") -> str:
     """The research phase's prompt, byte for byte.
 
     A diagnostic that asks what the research session did has to ask it the same question a
-    lane does; composing a near-copy somewhere else would measure the near-copy.
+    lane does; composing a near-copy somewhere else would measure the near-copy. That now
+    includes the artifact's path: the checkpoint protocol is handed the path the artifact
+    instruction resolved, so the two sections cannot name different files.
     """
+    path = artifact_path(RESEARCH_ARTIFACT, agent_workspace)
     return compose_prompt(
         f"# Research: {task.public_id}",
-        envelope(task),
+        envelope(task, agent_workspace),
         _RESEARCH_BODY,
-        artifact_instruction(RESEARCH_SPEC),
-        _RESEARCH_CHECKPOINT.format(RPI_DIR=RPI_DIR, filename=RESEARCH_ARTIFACT),
+        artifact_instruction(RESEARCH_SPEC, agent_workspace=agent_workspace),
+        _RESEARCH_CHECKPOINT.format(path=path),
         jspace=jspace,
     )
 
@@ -563,7 +614,7 @@ class OneSessionStrategy:
     def execute(self, ctx: ExecutionContext) -> StrategyResult:
         prompt = compose_prompt(
             f"# Rebuild {ctx.task.public_id}",
-            envelope(ctx.task),
+            envelope(ctx.task, ctx.agent_workspace),
             "## Phase: Implement\n\nBuild the program now. Finish with a working `compile.sh`.",
         )
         run = _BudgetedRun(ctx)
@@ -654,12 +705,11 @@ class RpiStrategy:
         raw_json = json.dumps(data, indent=2, ensure_ascii=False)
         prompt = compose_prompt(
             f"# Compact the {label} artifact",
-            envelope(ctx.task),
+            envelope(ctx.task, ctx.agent_workspace),
             _COMPACT_BODY.format(
                 label=label,
                 budget=COMPACT_BUDGET_CHARS,
-                RPI_DIR=RPI_DIR,
-                out_filename=out_filename,
+                out_path=artifact_path(out_filename, ctx.agent_workspace),
                 artifact=raw_json,
             ),
             jspace=self.jspace,
@@ -708,7 +758,7 @@ class RpiStrategy:
         run = _BudgetedRun(ctx, ceilings=PHASE_CEILING_SECONDS)
         compaction_stats: dict[str, Any] = {}
 
-        prompt = research_prompt(ctx.task, self.jspace)
+        prompt = research_prompt(ctx.task, self.jspace, ctx.agent_workspace)
         research_result = run.phase("research", prompt, {"objective": ctx.task.objective})
         research = self._validate(research_result, RESEARCH_SPEC, ctx.workspace, RESEARCH_ARTIFACT)
         if not research_result.artifact_valid:
@@ -723,9 +773,9 @@ class RpiStrategy:
 
         plan_prompt = compose_prompt(
             f"# Plan: {ctx.task.public_id}",
-            envelope(ctx.task),
+            envelope(ctx.task, ctx.agent_workspace),
             _PLAN_BODY.format(research=json.dumps(research, indent=2, ensure_ascii=False)),
-            artifact_instruction(PLAN_SPEC),
+            artifact_instruction(PLAN_SPEC, agent_workspace=ctx.agent_workspace),
             jspace=self.jspace,
         )
         plan_result = run.phase("plan", plan_prompt, {"research": research})
@@ -739,7 +789,7 @@ class RpiStrategy:
 
         implement_prompt = compose_prompt(
             f"# Implement: {ctx.task.public_id}",
-            envelope(ctx.task),
+            envelope(ctx.task, ctx.agent_workspace),
             _IMPLEMENT_BODY.format(plan=json.dumps(plan, indent=2, ensure_ascii=False)),
             jspace=self.jspace,
         )
@@ -792,6 +842,8 @@ __all__ = [
     "StrategyResult",
     "TREATMENT_INVALID",
     "TREATMENT_VALID",
+    "agent_workspace_for",
+    "artifact_path",
     "build_strategy",
     "envelope",
     "phase_state",
