@@ -949,11 +949,25 @@ So the harness now names the path instead of leaving it to be inferred.
 workspace and nothing needs translating - and `artifact_path()` is the one place that turns
 it into the string a prompt shows. Every RPI-writing phase goes through it, not just
 research: `plan.json` and both compaction outputs carried the same ambiguity and would have
-failed the same way one phase later. The immutable envelope names the root for the same
-reason, because `compile.sh` and the sources the implement phase writes have two meanings
-too and no harness-chosen path to hand over. `read_artifact()` stays host-side: the absolute
-path and the host workspace are two views of one bind mount, and collection must outlive the
+failed the same way one phase later. `read_artifact()` stays host-side: the absolute path and
+the host workspace are two views of one bind mount, and collection must outlive the
 container.
+
+`compile.sh` and the sources the implement phase writes have the same two meanings and no
+harness-chosen path to hand over, so the sandbox root is stated instead, by
+`workspace_instruction()` - one sentence, one helper, **all five lanes**. This is a fact
+about the ProgramBench environment rather than a context treatment, and a lane that had to
+infer where the graded files go would make its comparison partly a measure of that
+inference: if only the envelope lanes knew, `B - A` would stop being the harness's bounded
+context. A, C, D and E receive it in the immutable envelope. B's prompt is the shipped
+`base.md`/`slice.md` rendering and never sees the envelope, so `SliceContextStrategy`
+appends the same sentence to the bundle's `execution_constraints`. Those documents are
+generic harness documents and are not edited to carry a benchmark environment fact; the
+bundle the renderer receives is the one the context helpers built plus that line.
+
+So the two contracts are layered: every lane is told the model-visible workspace root, and
+the RPI lanes are additionally told the absolute path of each artifact they owe the next
+phase.
 
 If a required artifact is absent or schema-invalid, the lane **stops**. It does not
 fabricate the handoff: the harness used to substitute a stub (`"research phase produced no

@@ -336,7 +336,7 @@ _ENVELOPE = """## Objective (immutable)
 {objective}
 
 - Task: `{public_id}`
-- Workspace root: {workspace_root}. Only files here are graded.
+- {workspace_root}
 - A working `compile.sh` at the workspace root that builds `./executable` is mandatory.
 
 This objective is fixed. Do not reinterpret, narrow, or soften it in any later phase.
@@ -454,19 +454,32 @@ the input. Do not add commentary.
 """
 
 
-# Named rather than implied, for the same reason the artifact path is absolute: the two bullets
-# below are the only place the graded output's location is stated, and `compile.sh` written to a
-# relative path under the sandbox lands in the container layer exactly as .rpi/research.json did.
-# A filename the harness never sees cannot be handed over as a path, so the envelope says where,
-# and says why relying on the working directory is not enough.
-_SANDBOX_ROOT = (
-    "`{root}`, which is also your shell's working directory. Write files by absolute path under "
-    "it: your file tool and your shell do not resolve a relative path to the same place"
-)
+_LOCAL_WORKSPACE_ROOT = "Workspace root: the current working directory. Only files here are graded."
+
+
+def workspace_instruction(agent_workspace: str) -> str:
+    """The environment fact every lane needs, in one place so no lane can be told less.
+
+    Named rather than implied, for the same reason the artifact path is absolute: a phase
+    artifact has a harness-chosen path to hand over, but `compile.sh` and the sources the
+    implement phase writes do not, and a relative path for those lands in the container layer
+    exactly as `.rpi/research.json` did. This is a fact about the ProgramBench sandbox rather
+    than a treatment, so it reaches all five lanes identically: the envelope carries it to A
+    and C/D/E, and ``SliceContextStrategy`` appends it to B's execution constraints, because
+    B's prompt is the shipped renderer and never sees the envelope. If only the envelope
+    lanes knew where to write, ``B - A`` would partly measure that knowledge.
+    """
+    if not agent_workspace:
+        return ""
+    return (
+        f"Workspace root is `{agent_workspace}`. Write graded files by absolute path under it: "
+        "the file tool and the shell do not resolve relative paths to the same place."
+    )
 
 
 def envelope(task: TaskSpec, agent_workspace: str = "") -> str:
-    root = _SANDBOX_ROOT.format(root=agent_workspace) if agent_workspace else "the current working directory"
+    instruction = workspace_instruction(agent_workspace)
+    root = f"{instruction} Only files here are graded." if instruction else _LOCAL_WORKSPACE_ROOT
     return _ENVELOPE.format(objective=task.objective, public_id=task.public_id, workspace_root=root)
 
 
@@ -643,6 +656,17 @@ class SliceContextStrategy:
         slice_record = build_slice_record(ctx.task)
         queue_data = build_queue_data(slice_record, ctx.command_template, ctx.timeout_seconds)
         context_bundle = build_context_bundle(queue_data, slice_record)
+        # The one addition to the shipped rendering, and not a context treatment: B's agent
+        # faces the same sandbox as every other lane's, and `base.md`/`slice.md` are generic
+        # harness documents that cannot carry a ProgramBench environment fact. Appended to the
+        # bundle rather than written into those documents, and composed rather than mutated so
+        # the bundle the renderer gets is the bundle the helpers built plus one line.
+        instruction = workspace_instruction(ctx.agent_workspace)
+        if instruction:
+            context_bundle = {
+                **context_bundle,
+                "execution_constraints": [*context_bundle["execution_constraints"], instruction],
+            }
 
         control = Path(ctx.control_dir) / "implement"
         control.mkdir(parents=True, exist_ok=True)
@@ -848,4 +872,5 @@ __all__ = [
     "envelope",
     "phase_state",
     "read_artifact",
+    "workspace_instruction",
 ]

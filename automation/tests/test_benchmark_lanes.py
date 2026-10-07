@@ -38,6 +38,7 @@ from automation.benchmark.strategies import (
     agent_workspace_for,
     build_strategy,
     read_artifact,
+    workspace_instruction,
 )
 from automation.supervisor.run_next import render_prompt
 
@@ -165,8 +166,8 @@ def run_lane(lane: str, agent: Optional[FakeAgent] = None, timeout_seconds: int 
     return agent, result, out_tar
 
 
-def run_rpi_in_sandbox(agent: Optional[FakeAgent] = None, timeout_seconds: int = 1800):
-    """Drive lanes D's phases with the agent's own view of the workspace set to the sandbox.
+def run_in_sandbox(lane: str, agent: Optional[FakeAgent] = None, timeout_seconds: int = 1800):
+    """Drive one lane with the agent's own view of the workspace set to the sandbox's root.
 
     Built here rather than through ``run_lane`` because the real cleanroom path needs
     Docker: what this exercises is the path translation, which is pure string work, against
@@ -185,7 +186,10 @@ def run_rpi_in_sandbox(agent: Optional[FakeAgent] = None, timeout_seconds: int =
         runner=agent,
         agent_workspace=agent_workspace_for(cleanroom=True),
     )
-    result = RpiStrategy(compaction=True).execute(ctx)
+    # Lane E's own factory resolves the canonical J-Space checkout; the fixture stands in for
+    # that checkout here exactly as it does in ``run_lane``.
+    strategy = RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT) if lane == "E" else build_strategy(lane)
+    result = strategy.execute(ctx)
     return agent, result, workspace
 
 
@@ -399,7 +403,7 @@ class ModelVisibleArtifactPathTests(unittest.TestCase):
     """
 
     def test_a_sandboxed_phase_is_told_the_absolute_artifact_path(self) -> None:
-        agent, _, _ = run_rpi_in_sandbox()
+        agent, _, _ = run_in_sandbox("D")
         expected = {
             "research": f"{WORKSPACE_DIR}/{RPI_DIR}/{RESEARCH_ARTIFACT}",
             "research_compact": f"{WORKSPACE_DIR}/{RPI_DIR}/{RESEARCH_COMPACT_ARTIFACT}",
@@ -412,7 +416,7 @@ class ModelVisibleArtifactPathTests(unittest.TestCase):
 
     def test_no_sandboxed_phase_asks_for_a_relative_artifact_path(self) -> None:
         """The failure was an *also*: the absolute path appearing somewhere is not enough."""
-        agent, _, _ = run_rpi_in_sandbox()
+        agent, _, _ = run_in_sandbox("D")
         for phase in ("research", "research_compact", "plan", "plan_compact"):
             with self.subTest(phase=phase):
                 prompt = agent.prompt_for(phase)
@@ -421,23 +425,51 @@ class ModelVisibleArtifactPathTests(unittest.TestCase):
 
     def test_the_checkpoint_protocol_names_the_same_path_the_artifact_contract_does(self) -> None:
         """Two sections, one file: a cadence that checkpoints a different path banks nothing."""
-        agent, _, _ = run_rpi_in_sandbox()
+        agent, _, _ = run_in_sandbox("D")
         research = agent.prompt_for("research")
         absolute = f"{WORKSPACE_DIR}/{RPI_DIR}/{RESEARCH_ARTIFACT}"
         protocol = research.split("## Checkpoint protocol", 1)[1]
         self.assertIn(f"Create `{absolute}` as your first tool action", protocol)
         self.assertIn(f"update `{absolute}` before issuing another investigative tool call", protocol)
 
-    def test_a_sandboxed_phase_is_told_where_the_graded_files_go(self) -> None:
-        """`compile.sh` has the same two meanings, and no harness-chosen path to hand over."""
-        agent, _, _ = run_rpi_in_sandbox()
-        implement = agent.prompt_for("implement")
-        self.assertIn(f"Workspace root: `{WORKSPACE_DIR}`", implement)
-        self.assertIn("Write files by absolute path", implement)
+    def test_every_lane_is_told_where_the_graded_files_go(self) -> None:
+        """`compile.sh` has the same two meanings, and no harness-chosen path to hand over.
+
+        All five lanes, because this is a fact about the sandbox rather than a treatment: a
+        B that had to infer where to write, against an A that was told, would make ``B - A``
+        partly a measure of that knowledge instead of bounded context. B reaches it by a
+        different road - the shipped renderer never sees the envelope - so the sentence is
+        asserted to be the same sentence, not merely a similar one.
+        """
+        expected = workspace_instruction(WORKSPACE_DIR)
+        self.assertIn(WORKSPACE_DIR, expected)
+        for lane in ALL_LANES:
+            with self.subTest(lane=lane):
+                agent, _, _ = run_in_sandbox(lane)
+                self.assertIn(expected, agent.prompt_for("implement"))
+
+    def test_lane_b_carries_the_contract_in_its_execution_constraints(self) -> None:
+        """Where it lands in B's prompt, since B's road is the bundle rather than the envelope."""
+        agent, _, _ = run_in_sandbox("B")
+        prompt = agent.prompt_for("implement")
+        constraints = prompt.split("Execution constraints", 1)[1]
+        self.assertIn(workspace_instruction(WORKSPACE_DIR), constraints)
+        # Still the shipped rendering, with one line added rather than a rewrite.
+        self.assertIn("Stay within allowed_paths: ./", constraints)
+
+    def test_local_execution_tells_no_lane_about_a_workspace_root(self) -> None:
+        """The sentence is a sandbox fact; without a sandbox there is nothing to translate."""
+        self.assertEqual("", workspace_instruction(""))
+        for lane in ALL_LANES:
+            with self.subTest(lane=lane):
+                agent, _, _ = run_lane(
+                    lane, strategy=RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT) if lane == "E" else None
+                )
+                self.assertNotIn(WORKSPACE_DIR, agent.prompt_for("implement"))
 
     def test_the_host_reads_back_what_the_agent_was_told_to_write(self) -> None:
         """The two paths are two views of one bind mount, so collection stays host-side."""
-        _, result, workspace = run_rpi_in_sandbox()
+        _, result, workspace = run_in_sandbox("D")
         data, raw = read_artifact(workspace, RESEARCH_ARTIFACT)
         self.assertIsNotNone(data, "the artifact the prompt named absolutely was not found host-side")
         self.assertGreater(len(raw), 0)
