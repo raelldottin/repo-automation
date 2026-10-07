@@ -901,7 +901,7 @@ moment and whatever is in the file then is what the phase produced.
 
 Asking for that was not enough on its own. In run `37420620542` the research phase ran
 uncapped for its whole 1800-second ceiling and wrote `research.json` **once**, 116 seconds
-in, on its fourth model response; it then made 24 more terminal calls without writing again,
+in, on its fourth model response; it then made 21 more tool calls without writing again,
 and the reference binary's flag surface, exit codes and terminfo dependency that those calls
 established died with the transcript. The artifact was schema-valid and 971 characters, with
 `unknowns`, `risks` and `evidence` all empty. "Update it as you work" was already in the
@@ -917,6 +917,60 @@ interrupt every third edit to rewrite a summary.
 would reject that stub but not the staleness behind it, since one superficial finding would
 pass while twenty minutes of discoveries stayed unbanked. Schema validity and checkpoint
 freshness are different contracts, and only the second one was broken.
+
+The protocol held - and uncovered a path bug underneath it. Run `37440878348` administered
+it against the same instance, model, transport and 1800-second ceiling: the artifact was
+written as the **first** tool action at 4.8 seconds and updated **eight** times, with at most
+four investigative calls between the first seven writes. It then stopped: the session spent
+its last 927 seconds probing the reference binary through a pseudo-terminal and banked none
+of it, so the cadence holds under ordinary exploration and lapses once the model locks onto
+one hard sub-problem. One of the eight checkpoints was schema-invalid for 24.7 seconds
+(`"relevant_files": "see files"`), which a kill inside that window would have turned into a
+void lane.
+
+None of the eight were collected. Every write reported `verified` with a growing byte count,
+and every one resolved to `<host workspace>/.rpi/research.json`, which inside the container
+is not the bind mount but an empty directory in the container's own writable layer: the bytes
+died with the container and the phase read as artifact-absent. Hermes remaps the terminal
+tool's working directory to the sandbox's `/workspace`, while the file tool resolves a
+relative path against `TERMINAL_CWD` - the host path. In the same session, seconds apart,
+`terminal` running `pwd` answered `/workspace` and `write_file` given `.rpi/research.json`
+answered `/tmp/pb-probe-task-.../.rpi/research.json`. The harness had handed out a filename
+whose meaning differed between the model's own two tool families.
+
+The trap was latent until the checkpoint protocol reached it. Before the protocol the model
+explored first - `pwd && ls -la /workspace` - and wrote the absolute path it had just seen,
+which is why run `37420620542`'s single stale artifact was nevertheless collected. "First
+tool action, before any investigative command" removed the step that taught it the path.
+
+So the harness now names the path instead of leaving it to be inferred.
+`ExecutionContext.agent_workspace` is the agent's own view of the workspace root -
+`/workspace` under the cleanroom, empty for local execution, where the agent stands in the
+workspace and nothing needs translating - and `artifact_path()` is the one place that turns
+it into the string a prompt shows. Every RPI-writing phase goes through it, not just
+research: `plan.json` and both compaction outputs carried the same ambiguity and would have
+failed the same way one phase later. `read_artifact()` stays host-side: the absolute path and
+the host workspace are two views of one bind mount, and collection must outlive the
+container.
+
+`compile.sh` and the sources the implement phase writes have the same two meanings and no
+harness-chosen path to hand over, so the sandbox root is stated instead, by
+`workspace_instruction()` - one sentence, one helper, **all five lanes**. This is a fact
+about the ProgramBench environment rather than a context treatment, and a lane that had to
+infer where the graded files go would make its comparison partly a measure of that
+inference: if only the envelope lanes knew, `B - A` would stop being the harness's bounded
+context. A, C, D and E receive it in the immutable envelope. B's prompt is the shipped
+`base.md`/`slice.md` rendering and never sees the envelope, so `SliceContextStrategy`
+appends the same sentence after the rendered prompt. Not inside the bundle: the renderer
+prints the bundle twice - as the execution-constraints list and again inside the compact
+context JSON - so a sentence placed there reached B twice while every other lane got it
+once, and extra salience for a fact meant to be held constant is itself a difference
+between lanes. B's bundle therefore stays byte-for-byte the shipped one, and the generic
+`base.md`/`slice.md` are not edited to carry a benchmark environment fact.
+
+So the two contracts are layered: every lane is told the model-visible workspace root,
+exactly once, and the RPI lanes are additionally told the absolute path of each artifact
+they owe the next phase.
 
 If a required artifact is absent or schema-invalid, the lane **stops**. It does not
 fabricate the handoff: the harness used to substitute a stub (`"research phase produced no
