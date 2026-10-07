@@ -49,6 +49,11 @@ first-class flags, so nothing has to be translated through a second vendor's con
 or wire protocol. `REPO_AUTOMATION_AGENT_RUNNER=codex|claude` still work; they are just
 more setup for the same thing.
 
+The runner is set explicitly because a benchmark host is headless: the wrapper inherits its
+runner from an enclosing agent harness, and CI has none, so there it must be named. The same
+command run from inside Claude Code or Codex is refused (exit 78) - a run started from one
+agent is run by that agent - so launch local benchmark runs from a plain shell.
+
 ```shell
 export REPO_AUTOMATION_AGENT_RUNNER=hermes
 export HERMES_INFERENCE_PROVIDER=nvidia

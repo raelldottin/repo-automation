@@ -211,9 +211,19 @@ This applies even in multi-agent workspaces. If another agent leaves dirt in a r
 
 ## Agent Runner Selection
 
-`automation/supervisor/run_agent.sh` is the reusable launch wrapper for fresh slice agents. Its default `auto` mode supports both Codex and Claude Code without changing `policy.agent_command_template` in every consumer queue.
+`automation/supervisor/run_agent.sh` is the reusable launch wrapper for fresh slice agents. The runner it launches is the agent harness the invocation came from, one to one, so no consumer queue has to change `policy.agent_command_template` per agent:
 
-The wrapper chooses Claude Code when it detects that the supervisor was invoked from a Claude Code process tree and a `claude` executable is available. Outside Claude Code it preserves the previous Codex-first behavior: use `codex` when present, then `claude`, then `hermes`. Operators can pin a runner with:
+```text
+originating harness     repo-automation runner
+Codex                -> Codex
+Claude Code          -> Claude Code
+Hermes               -> Hermes
+CI / cron / a shell  -> REPO_AUTOMATION_AGENT_RUNNER, which is then required
+```
+
+The default, `auto`, walks the wrapper's ancestors and takes the **nearest** one that is a harness, so Claude Code driving a Hermes session that runs the supervisor launches Hermes. A process counts by its executable's own name - or, under `node`/`python`/`bun`, its script's - never by a word on its command line: `headroom wrap claude` is a wrapper, and a path under `~/.claude` is not Claude Code. Inherited markers such as `CLAUDECODE` are not consulted, because a Hermes child inherits them from a Claude Code above it.
+
+An explicit runner is honoured when no harness encloses the invocation, or when it names the one that does. One that contradicts the enclosing harness is refused (exit 78) rather than silently obeyed or silently overridden. A headless invocation with no explicit runner also exits 78: there is no original agent to preserve, and picking whichever CLI happens to be installed is exactly what let a Hermes-originated run launch Codex. Headless operators choose with:
 
 ```bash
 REPO_AUTOMATION_AGENT_RUNNER=claude python3 automation/supervisor/run_next.py
