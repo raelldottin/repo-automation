@@ -417,9 +417,9 @@ Run the supervisor with the repo-owned default agent command:
 python3 automation/supervisor/run_next.py
 ```
 
-The live queue points `policy.agent_command_template` at `automation/supervisor/run_agent.sh`. That wrapper launches a fresh non-interactive agent process with the rendered prompt on stdin. In `auto` mode it selects Claude Code when the supervisor is already running inside a Claude Code process tree, otherwise it prefers Codex when `codex` is available, then Claude Code, then Hermes. The prompt still requires the run to write the JSON handoff at the supervisor-provided handoff path.
+The live queue points `policy.agent_command_template` at `automation/supervisor/run_agent.sh`. That wrapper launches a fresh non-interactive agent process with the rendered prompt on stdin. The runner is the agent harness the invocation came from, one to one: in `auto` mode it is the nearest enclosing Codex, Claude Code or Hermes process. An explicit `REPO_AUTOMATION_AGENT_RUNNER` that contradicts that harness is refused, and a headless invocation (CI, cron, a plain shell) has no harness to inherit from, so it must name a runner or the wrapper exits 78 rather than launch whichever CLI is installed. See `docs/workflows/repo-automation.md` for the rules. The prompt still requires the run to write the JSON handoff at the supervisor-provided handoff path.
 
-Runner selection can be pinned with:
+A headless runner is chosen with:
 
 ```bash
 REPO_AUTOMATION_AGENT_RUNNER=claude python3 automation/supervisor/run_next.py

@@ -17,7 +17,14 @@ Launch a fresh agent run for one supervisor-selected slice, or - with
 config to prove what the tools' default backend is, and exit.
 
 Runner selection:
+  The runner is the agent harness this invocation runs inside, one to one: from
+  Codex it is Codex, from Claude Code Claude Code, from Hermes Hermes - the
+  nearest enclosing one when they nest.
   REPO_AUTOMATION_AGENT_RUNNER=auto|codex|claude|hermes (default: auto)
+    auto      the enclosing harness; with none (CI, cron, a shell) this is an
+              error, because there is no original agent to preserve.
+    explicit  honoured when no harness encloses the invocation, or when it
+              names the one that does; refused if it names a different one.
   REPO_AUTOMATION_CODEX_BIN overrides the Codex executable.
   REPO_AUTOMATION_CLAUDE_BIN overrides the Claude Code executable.
   REPO_AUTOMATION_CLAUDE_PERMISSION_MODE overrides the Claude permission mode.
@@ -30,22 +37,57 @@ Legacy OWLORY_CODEX_BIN remains supported for Codex executable overrides.
 USAGE
 }
 
-process_tree_contains() {
-  local needle="$1"
+# The agent harness this invocation runs inside, by its nearest ancestor that is one - codex,
+# claude, hermes - or nothing. Nearest, because harnesses nest: Claude Code driving a Hermes
+# session that calls this is Hermes's call. That is also why inherited markers such as CLAUDECODE
+# are not consulted: a Hermes child inherits them from the Claude Code above it, and an
+# environment variable cannot say how far up it was set.
+originating_harness() {
   local pid="${PPID:-}"
-  local command=""
-  local args=""
+  local hops=0
+  local name=""
 
-  while [[ -n "$pid" && "$pid" != "0" ]]; do
-    command="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
-    args="$(ps -o args= -p "$pid" 2>/dev/null || true)"
-    if [[ "$command" == *"$needle"* || "$args" == *"$needle"* ]]; then
+  # ponytail: bounded walk, so a ps that reports a cycle cannot hang the wrapper.
+  while [[ -n "$pid" && "$pid" != "0" && "$hops" -lt 64 ]]; do
+    name="$(harness_named_by "$pid")"
+    if [[ -n "$name" ]]; then
+      printf '%s\n' "$name"
       return 0
     fi
     pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    hops=$((hops + 1))
   done
+}
 
-  return 1
+# Which harness a process *is*, judged by the executable's own name and never by a substring of
+# its command line: `headroom wrap claude` is a wrapper, and a path under ~/.claude is not Claude
+# Code. comm is the executable (a full path on macOS, so a versioned Claude Code binary reads as
+# 2.1.3 there); argv[0] keeps the name it was launched by. An interpreter runs the harness as its
+# first argument - Codex under node, Hermes under python - so that argument is the name there.
+harness_named_by() {
+  local comm=""
+  local args=""
+  local first=""
+  local second=""
+  local candidate=""
+
+  comm="$(ps -o comm= -p "$1" 2>/dev/null || true)"
+  args="$(ps -o args= -p "$1" 2>/dev/null || true)"
+  # ponytail: args split on whitespace, so an interpreter whose script path holds a space is
+  # missed; comm still identifies native executables whatever their path.
+  read -r first second _ <<<"$args" || true
+  case "${first##*/}" in
+    node | nodejs | bun | deno | python | python3 | python3.*) second="${second##*/}" ;;
+    *) second="" ;;
+  esac
+  for candidate in "${comm##*/}" "${first##*/}" "$second"; do
+    case "$candidate" in
+      codex | claude | hermes)
+        printf '%s\n' "$candidate"
+        return 0
+        ;;
+    esac
+  done
 }
 
 command_exists() {
@@ -63,41 +105,38 @@ sha256_of() {
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-running_under_claude_code() {
-  [[ -n "${CLAUDECODE:-}" || -n "${CLAUDE_CODE:-}" || -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]] ||
-    process_tree_contains "claude"
-}
-
 select_agent_runner() {
   local requested_runner="$1"
-  local codex_bin="$2"
-  local claude_bin="$3"
-  local hermes_bin="$4"
+  local harness="$2"
 
   case "$requested_runner" in
-    auto)
-      if running_under_claude_code && command_exists "$claude_bin"; then
-        printf 'claude\n'
-      elif command_exists "$codex_bin"; then
-        printf 'codex\n'
-      elif command_exists "$claude_bin"; then
-        printf 'claude\n'
-      elif command_exists "$hermes_bin"; then
-        printf 'hermes\n'
-      else
-        echo "No supported agent CLI found. Install Codex, Claude Code or Hermes, or set REPO_AUTOMATION_AGENT_RUNNER with a matching binary override." >&2
-        return 69
-      fi
-      ;;
-    codex|claude|hermes)
-      printf '%s\n' "$requested_runner"
-      ;;
+    auto | codex | claude | hermes) ;;
     *)
       echo "Unsupported REPO_AUTOMATION_AGENT_RUNNER: $requested_runner" >&2
       echo "Expected one of: auto, codex, claude, hermes." >&2
       return 64
       ;;
   esac
+
+  if [[ -n "$harness" ]]; then
+    if [[ "$requested_runner" != "auto" && "$requested_runner" != "$harness" ]]; then
+      echo "Refusing REPO_AUTOMATION_AGENT_RUNNER=$requested_runner inside $harness: a run started from $harness is run by $harness." >&2
+      echo "Unset REPO_AUTOMATION_AGENT_RUNNER, or invoke this outside any agent harness." >&2
+      return 78
+    fi
+    printf '%s\n' "$harness"
+    return 0
+  fi
+
+  # Headless: CI, cron, a plain shell. There is no original agent to preserve, so whichever CLI
+  # happens to be installed is not an answer - picking one is what let a Hermes-originated run
+  # launch Codex.
+  if [[ "$requested_runner" == "auto" ]]; then
+    echo "No enclosing agent harness (Codex, Claude Code or Hermes) to inherit the runner from." >&2
+    echo "Set REPO_AUTOMATION_AGENT_RUNNER=codex|claude|hermes to choose one explicitly." >&2
+    return 78
+  fi
+  printf '%s\n' "$requested_runner"
 }
 
 repo_root=""
@@ -160,7 +199,9 @@ if [[ ! -d "$repo_root/.git" ]]; then
 fi
 
 if [[ "$sandbox_probe" == "1" ]]; then
-  # A Hermes sandbox is the only thing there is to probe; no other runner has one.
+  # A Hermes sandbox is the only thing there is to probe; no other runner has one. Not a runner
+  # choice either: the probe makes one no-model terminal call and launches no agent, so the
+  # one-to-one rule has nothing to apply to.
   agent_runner_override="hermes"
 fi
 
@@ -182,7 +223,7 @@ fi
 codex_bin="${REPO_AUTOMATION_CODEX_BIN:-${OWLORY_CODEX_BIN:-codex}}"
 claude_bin="${REPO_AUTOMATION_CLAUDE_BIN:-claude}"
 hermes_bin="${REPO_AUTOMATION_HERMES_BIN:-hermes}"
-agent_runner="${agent_runner_override:-$(select_agent_runner "${REPO_AUTOMATION_AGENT_RUNNER:-auto}" "$codex_bin" "$claude_bin" "$hermes_bin")}"
+agent_runner="${agent_runner_override:-$(select_agent_runner "${REPO_AUTOMATION_AGENT_RUNNER:-auto}" "$(originating_harness)")}"
 
 export REPO_AUTOMATION_SUPERVISOR_CONTEXT_FILE="$context_file"
 export REPO_AUTOMATION_SUPERVISOR_HANDOFF_FILE="$handoff_file"

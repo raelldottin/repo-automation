@@ -264,6 +264,11 @@ class AutomationHarnessTests(unittest.TestCase):
         self.assertTrue(os.access(script_path, os.X_OK))
 
     def test_agent_wrapper_auto_selects_claude_for_claude_code_context(self) -> None:
+        """Claude Code as the nearest enclosing harness, end to end: the fake CLI really runs.
+
+        Described by ancestry, not by CLAUDE_CODE=1 - an inherited marker cannot say whether
+        Claude Code is the nearest harness. ``test_runner_selection`` covers the rules.
+        """
         script_path = self.repo_root / "automation/supervisor/run_agent.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -297,7 +302,11 @@ class AutomationHarnessTests(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
             env["CAPTURE_FILE"] = str(capture_path)
-            env["CLAUDE_CODE"] = "1"
+            tree = temp_path / "tree.tsv"
+            tree.write_text(
+                "100\t101\t-zsh\t-zsh\n101\t0\t/opt/homebrew/bin/claude\t/opt/homebrew/bin/claude\n", encoding="utf-8"
+            )
+            env["FAKE_PS_TREE"] = str(tree)
             env.pop("REPO_AUTOMATION_AGENT_RUNNER", None)
 
             result = subprocess.run(
