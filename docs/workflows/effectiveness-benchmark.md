@@ -961,13 +961,16 @@ infer where the graded files go would make its comparison partly a measure of th
 inference: if only the envelope lanes knew, `B - A` would stop being the harness's bounded
 context. A, C, D and E receive it in the immutable envelope. B's prompt is the shipped
 `base.md`/`slice.md` rendering and never sees the envelope, so `SliceContextStrategy`
-appends the same sentence to the bundle's `execution_constraints`. Those documents are
-generic harness documents and are not edited to carry a benchmark environment fact; the
-bundle the renderer receives is the one the context helpers built plus that line.
+appends the same sentence after the rendered prompt. Not inside the bundle: the renderer
+prints the bundle twice - as the execution-constraints list and again inside the compact
+context JSON - so a sentence placed there reached B twice while every other lane got it
+once, and extra salience for a fact meant to be held constant is itself a difference
+between lanes. B's bundle therefore stays byte-for-byte the shipped one, and the generic
+`base.md`/`slice.md` are not edited to carry a benchmark environment fact.
 
-So the two contracts are layered: every lane is told the model-visible workspace root, and
-the RPI lanes are additionally told the absolute path of each artifact they owe the next
-phase.
+So the two contracts are layered: every lane is told the model-visible workspace root,
+exactly once, and the RPI lanes are additionally told the absolute path of each artifact
+they owe the next phase.
 
 If a required artifact is absent or schema-invalid, the lane **stops**. It does not
 fabricate the handoff: the harness used to substitute a stub (`"research phase produced no

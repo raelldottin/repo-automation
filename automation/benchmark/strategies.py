@@ -641,11 +641,13 @@ class OneSessionStrategy:
 
 
 class SliceContextStrategy:
-    """Lane B: the shipped harness behaviour, unchanged.
+    """Lane B: the shipped bounded-context rendering, plus the environment contract every lane gets.
 
-    This is the control for the existing harness, so it renders exactly what
+    This is the control for the existing harness, so its context is exactly what
     ``SupervisorAgentAdapter`` rendered before lanes existed: one schema-valid slice, the
-    normal bounded context bundle, and the real ``base.md`` + ``slice.md`` prompt.
+    normal bounded context bundle, and the real ``base.md`` + ``slice.md`` prompt. Under a
+    sandbox, ``workspace_instruction`` follows that rendering once - the same sentence, the
+    same number of times, that A and C/D/E receive through the envelope.
     """
 
     name = "B"
@@ -656,17 +658,6 @@ class SliceContextStrategy:
         slice_record = build_slice_record(ctx.task)
         queue_data = build_queue_data(slice_record, ctx.command_template, ctx.timeout_seconds)
         context_bundle = build_context_bundle(queue_data, slice_record)
-        # The one addition to the shipped rendering, and not a context treatment: B's agent
-        # faces the same sandbox as every other lane's, and `base.md`/`slice.md` are generic
-        # harness documents that cannot carry a ProgramBench environment fact. Appended to the
-        # bundle rather than written into those documents, and composed rather than mutated so
-        # the bundle the renderer gets is the bundle the helpers built plus one line.
-        instruction = workspace_instruction(ctx.agent_workspace)
-        if instruction:
-            context_bundle = {
-                **context_bundle,
-                "execution_constraints": [*context_bundle["execution_constraints"], instruction],
-            }
 
         control = Path(ctx.control_dir) / "implement"
         control.mkdir(parents=True, exist_ok=True)
@@ -676,6 +667,16 @@ class SliceContextStrategy:
             context_bundle=context_bundle,
             handoff_path=control / "handoff.json",
         )
+        # After the rendering, not inside the bundle. The renderer prints the bundle twice -
+        # once as the "Execution constraints" list, once inside the compact context JSON - so a
+        # sentence added there reached B's agent twice while every other lane got it once, and
+        # the extra salience for a fact meant to be held constant is itself a difference
+        # between lanes. Appended here, B's bundle stays byte-for-byte the shipped one and the
+        # environment contract arrives exactly once. `base.md`/`slice.md` stay generic: this
+        # is a ProgramBench sandbox fact, not harness policy.
+        instruction = workspace_instruction(ctx.agent_workspace)
+        if instruction:
+            prompt_text = f"{prompt_text.rstrip()}\n\n{instruction}\n"
         run = _BudgetedRun(ctx)
         result = run.phase("implement", prompt_text, context_bundle)
         return StrategyResult(

@@ -448,14 +448,41 @@ class ModelVisibleArtifactPathTests(unittest.TestCase):
                 agent, _, _ = run_in_sandbox(lane)
                 self.assertIn(expected, agent.prompt_for("implement"))
 
-    def test_lane_b_carries_the_contract_in_its_execution_constraints(self) -> None:
-        """Where it lands in B's prompt, since B's road is the bundle rather than the envelope."""
+    def test_lane_b_gets_the_contract_once_after_an_untouched_shipped_rendering(self) -> None:
+        """Once, like every other lane, and nowhere inside the bundle.
+
+        The first amendment put the sentence in the bundle's execution constraints, and the
+        renderer prints that bundle twice - as the constraints list and again inside the
+        compact context JSON - so B was told twice what A and C/D/E were told once.
+        """
         agent, _, _ = run_in_sandbox("B")
-        prompt = agent.prompt_for("implement")
-        constraints = prompt.split("Execution constraints", 1)[1]
-        self.assertIn(workspace_instruction(WORKSPACE_DIR), constraints)
-        # Still the shipped rendering, with one line added rather than a rewrite.
-        self.assertIn("Stay within allowed_paths: ./", constraints)
+        session = agent.sessions[0]
+        instruction = workspace_instruction(WORKSPACE_DIR)
+        self.assertEqual(1, session["prompt"].count(instruction))
+
+        # The bundle B's session was handed is the shipped one, byte for byte.
+        slice_record = build_slice_record(TASK)
+        shipped_bundle = build_context_bundle(build_queue_data(slice_record, "unused-template", 1800), slice_record)
+        handed = json.loads(Path(session["options"]["--context-file"]).read_text(encoding="utf-8"))
+        self.assertEqual(shipped_bundle, handed)
+        self.assertNotIn(instruction, handed["execution_constraints"])
+
+        # And the prompt is the shipped rendering with the contract after it - nothing else.
+        shipped_prompt = render_prompt(
+            repo_root=REPO_ROOT,
+            slice_record=slice_record,
+            context_bundle=shipped_bundle,
+            handoff_path=Path(session["options"]["--handoff-file"]),
+        )
+        self.assertEqual(f"{shipped_prompt.rstrip()}\n\n{instruction}\n", session["prompt"])
+
+    def test_every_lane_gets_the_contract_exactly_once(self) -> None:
+        """Held constant means the same number of times too, not only the same words."""
+        instruction = workspace_instruction(WORKSPACE_DIR)
+        for lane in ALL_LANES:
+            with self.subTest(lane=lane):
+                agent, _, _ = run_in_sandbox(lane)
+                self.assertEqual(1, agent.prompt_for("implement").count(instruction))
 
     def test_local_execution_tells_no_lane_about_a_workspace_root(self) -> None:
         """The sentence is a sandbox fact; without a sandbox there is nothing to translate."""
