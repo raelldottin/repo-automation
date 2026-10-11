@@ -94,7 +94,7 @@ Precedence during an incident: **original live evidence and committed source + c
 3. **Shadow compare:** compare projected slices and statuses against the live JSON queue; enumerate mismatches, unresolved IDs and dependencies. Do not claim dual canonical authority.
 4. **Authorized cutover:** back up and pin state, verify idempotent one-writer status reconciliation, then enable board-driven intake per consumer, with rollback. The cutover is a separate explicitly reviewed PR/deployment.
 5. **Canary and scale:** run a bounded scoped canary per project/profile using public Kanban/Swarm interfaces; independently verify memory and wiki, run negative permission/stale-state tests, and preserve existing history.
-6. **Resume roadmap:** only after the top-layer acceptance gate passes, proceed to remaining supervisor hardening, consumer smoke proofs and effectiveness calibration as laid out in [the roadmap](roadmap.md).
+6. **Resume roadmap:** only after the top-layer acceptance gate passes, proceed to remaining supervisor hardening, consumer smoke proofs and effectiveness calibration as laid out in [the roadmap](../roadmap.md).
 
 Existing CI/cleanroom benchmark experiments remain isolated: do not connect them to live boards, memory stores or wiki infrastructure. The pinned NVIDIA/`z-ai/glm-5.3` effectiveness experiment and phase-budget decisions are not changed by this specification.
 
