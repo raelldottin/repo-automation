@@ -1,5 +1,7 @@
 # Reusable Repo Automation
 
+> **Migration note (proposed):** [SPEC-001](../architecture/control-plane.md) and the [roadmap](../roadmap.md) introduce a Kanban / ByteRover / generated Swarm Wiki control plane above this existing harness. The JSON queue remains operational authority until a reviewed and reversible Kanban adapter cutover. The rules below continue to describe the present reusable supervisor and consumer snapshot contract; no top-layer integration is implied to be deployed.
+
 This workflow defines how the reusable slice harness is owned and how a repository consumes it.
 
 ## Ownership
