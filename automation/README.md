@@ -1,5 +1,7 @@
 # Automation Harness
 
+> **Current implementation and proposed target:** The JSON queue is the operational source of truth for this harness *today*. The new [control-plane specification](../docs/architecture/control-plane.md) makes Hermes Kanban the canonical work-state layer **after** an explicitly reviewed adapter/cutover, with ByteRover for durable project knowledge and the generated Swarm Wiki for audit/navigation. Until that cutover is implemented, do not interpret the new architecture as a working Kanban, memory or wiki integration. The supervisor retains sole execution authority throughout.
+
 This directory holds the supervised slice-chaining harness.
 
 Its job is narrow:
