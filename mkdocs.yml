@@ -33,6 +33,8 @@ theme:
 
 nav:
   - Home: index.md
+  - Control Plane Specification: architecture/control-plane.md
+  - Roadmap: roadmap.md
   - Workflow: workflows/repo-automation.md
   - Effectiveness Benchmark: workflows/effectiveness-benchmark.md
 
