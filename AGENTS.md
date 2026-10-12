@@ -1,3 +1,15 @@
+## Control-plane architecture and roadmap priority
+
+Before architecture or new feature work, read [SPEC-001](docs/architecture/control-plane.md) and [the roadmap](docs/roadmap.md). The target top layer is **Hermes Kanban + **self-hosted Hindsight memory** + generated Swarm Wiki**, with distinct canonical owners and a deterministic repo-automation supervisor beneath it. **This is a proposed target, not an installed integration.**
+
+- Prioritize the P0 adapter/inventory/canary acceptance gate before expanding the roadmap.
+- Do not add a parallel queue, task store, memory database, coordination daemon or wiki write authority without a separate explicit design decision.
+- Today the file-based slice queue remains operational authority; do not silently migrate or dual-write it and Kanban. A future cutover requires explicit approval, independent verification, provenance and rollback.
+- Never treat wiki/memory summaries as independent live verification; do not allow workers to self-chain or bypass supervisor gates.
+- The deployed Swarm Wiki currently reads ByteRover-specific `.brv/context-tree` files. Do not claim the wiki is Hindsight-compatible until a separately reviewed upstream migration adapter preserves source hashes and evidence.
+- Enforce a fully open-source production profile: license all first-party repos with owner approval, pin/audit OSS dependencies and model licenses, use local inference/embeddings/reranking and verify operation without external APIs. Proprietary development assistants and the existing hosted benchmark are optional/outside that production profile.
+- Keep benchmarks and pinned experiment settings isolated from live control-plane integrations. Documentation-only changes do not require synthetic CodSpeed measurements.
+
 ## Performance Evidence and CodSpeed
 
 Performance testing is an evidence requirement, not a repository-wide benchmark-count target.
