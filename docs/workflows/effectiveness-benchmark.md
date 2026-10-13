@@ -922,8 +922,8 @@ budget, flag or transport. For each session it records the following:
   it. Examples: a 0-byte `--oneshot` log, no usage report, an empty stream, a `HERMES_HOME` that is
   gone or never got a `state.db`.
 - **A `verdict`.** This is the furthest stage the evidence proves the session reached. The values
-  are `startup_incomplete`, `no_completed_model_call`, `model_answered_without_tool_calls`,
-  `tool_call_without_result`, `active_until_budget`, `exited_without_artifact`, `completed`, and
+  are `no_turn_start_recorded`, `no_completed_model_call`, `no_tool_call_recorded`,
+  `tool_call_without_recorded_result`, `active_until_budget`, `exited_without_artifact`, `completed`, and
   `evidence_unavailable` when there is neither a ledger nor a stream.
 
 The source that makes this work on `--oneshot` is Hermes' own `state.db` in the session's throwaway
@@ -941,7 +941,10 @@ neither transport reports reasoning in progress. `no_completed_model_call` says 
 than choosing one. Individual provider requests are not observable either: only completed calls
 are. Hermes opens its store best-effort, so a missing `state.db` leans towards a session that never
 reached the turn, but a store that failed to open looks the same. That case is reported as
-`evidence_unavailable`, not `startup_incomplete`. The ledger lives on the runner and is read there,
+`evidence_unavailable`. Two more verdicts name what was recorded, not what happened. An empty
+ledger is `no_turn_start_recorded`, because Hermes logs and swallows a failed turn-start write. No
+recorded tool call is `no_tool_call_recorded`, because a tool call is persisted only after the tool
+makes progress. The ledger lives on the runner and is read there,
 in the same job. Records from earlier runs cannot be re-diagnosed from the uploaded artifacts:
 running it over run `38248084765`'s download gives `evidence_unavailable` for both sessions,
 correctly. It also attributes research's one container to research and none to plan.

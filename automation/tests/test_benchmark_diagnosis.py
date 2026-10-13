@@ -119,13 +119,26 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(diagnosis.EVIDENCE_UNAVAILABLE, record["verdict"])
         self.assertTrue(any("never created state.db" in item for item in record["missing_evidence"]))
 
-    def test_a_store_without_a_session_row_is_a_startup_stall(self) -> None:
+    def test_an_empty_ledger_is_not_read_as_a_startup_stall(self) -> None:
+        """Hermes swallows a failed turn-start write, so an empty store has two readings."""
         with tempfile.TemporaryDirectory() as tmp:
             session = Session(Path(tmp))
             session.ledger(row=False)
             record = diagnose(session, phase(124, 1080.0, False))
-        self.assertEqual(diagnosis.STARTUP_INCOMPLETE, record["verdict"])
+        self.assertEqual(diagnosis.NO_TURN_START_RECORDED, record["verdict"])
+        self.assertIn("never started", record["explanation"])
+        self.assertIn("persistence failed", record["explanation"])
+        self.assertNotIn("never reached the model", record["explanation"])
         self.assertTrue(record["terminated"]["by_budget"])
+
+    def test_a_failed_turn_start_write_with_later_evidence_is_not_a_startup_stall(self) -> None:
+        """The session row was swallowed, but a completed call and a tool call were persisted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            session.ledger(row=False, calls=2, messages=(("assistant", 60, True), ("tool", 70, False)))
+            record = diagnose(session, phase(124, 1080.0, False))
+        self.assertEqual(0, record["observed"]["session_rows"])
+        self.assertEqual(diagnosis.ACTIVE_UNTIL_BUDGET, record["verdict"])
 
     def test_a_turn_with_no_completed_call_names_what_it_cannot_split(self) -> None:
         """A provider stall and one long reasoning call look the same, and the verdict says so."""
@@ -154,7 +167,18 @@ class VerdictTests(unittest.TestCase):
             session = Session(Path(tmp))
             session.ledger(calls=2, messages=(("assistant", 200, False),))
             record = diagnose(session, phase(124, 1080.0, False))
-        self.assertEqual(diagnosis.NO_TOOL_CALL, record["verdict"])
+        self.assertEqual(diagnosis.NO_TOOL_CALL_RECORDED, record["verdict"])
+
+    def test_a_killed_oneshot_with_completed_calls_and_no_messages_claims_no_inactivity(self) -> None:
+        """A tool requested and stalled before Hermes flushed its message leaves exactly this."""
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            session.ledger(calls=1)
+            record = diagnose(session, phase(124, 1080.0, False))
+        self.assertEqual(diagnosis.NO_TOOL_CALL_RECORDED, record["verdict"])
+        self.assertEqual((1, 0), (record["observed"]["completed_model_calls"], record["observed"]["messages"]))
+        self.assertIn("stalling", record["explanation"])
+        self.assertNotIn("never called", record["explanation"])
 
     def test_a_tool_call_that_never_returned_is_named(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -308,7 +332,7 @@ class CellRecordTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cell = lanes_module.Cell("C", 1, "abishekvashok__cmatrix.5c082c6")
             provenance = lanes_module.run_cell(cell, Path(tmp), Adapter(), Path(tmp))
-        self.assertEqual([diagnosis.STARTUP_INCOMPLETE], [d["verdict"] for d in provenance["session_diagnoses"]])
+        self.assertEqual([diagnosis.NO_TURN_START_RECORDED], [d["verdict"] for d in provenance["session_diagnoses"]])
 
 
 if __name__ == "__main__":

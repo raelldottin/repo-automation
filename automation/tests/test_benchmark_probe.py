@@ -1203,6 +1203,44 @@ class PlanProbeTests(unittest.TestCase):
         self.assertEqual(("plan", 7, "evidence_unavailable"), (diagnosis["phase"], diagnosis["pid"], diagnosis["verdict"]))
         self.assertIn("event stream: empty - not even system/init was flushed", diagnosis["missing_evidence"])
 
+    def test_an_exit_0_is_completed_only_when_the_owed_artifact_is_valid(self) -> None:
+        """run_phase leaves artifact_valid unset; the probe must judge it before the diagnosis does."""
+        from automation.benchmark.probe import run_probe
+        from automation.benchmark.strategies import PLAN_SPEC
+
+        cases = {
+            "absent": (None, "treatment_invalid", "evidence_unavailable"),
+            "invalid": ("{not json", "treatment_invalid", "evidence_unavailable"),
+            "valid": (json.dumps(PLAN_SPEC.template()), "completed", "completed"),
+        }
+        for name, (plan_text, state, verdict) in cases.items():
+
+            def runner(_command: str, workspace: Path, env, _timeout: int, plan_text=plan_text) -> int:
+                if plan_text is not None:
+                    (workspace / ".rpi" / "plan.json").write_text(plan_text, encoding="utf-8")
+                sessions = Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"])
+                sessions.mkdir(parents=True, exist_ok=True)
+                (sessions / "20260101T000000Z-8.controls.json").write_text(
+                    json.dumps({"transport": "stream-json", "slice_id": "task:plan"}), encoding="utf-8"
+                )
+                return 0
+
+            with self.subTest(plan=name), tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                record = run_probe(
+                    self.INSTANCE,
+                    tmp / "probe",
+                    repo_root=REPO_ROOT,
+                    cleanroom=False,
+                    runner=runner,
+                    phase="plan",
+                    research_artifact=self._research_file(tmp, self.RESEARCH),
+                )
+                self.assertEqual(name == "valid", record["phase_result"]["artifact_valid"])
+                self.assertEqual(state, record["phase_result"]["state"])
+                self.assertEqual(record["artifact"]["schema_errors"], record["phase_result"]["artifact_errors"])
+                self.assertEqual(verdict, record["diagnosis"][0]["verdict"])
+
     def test_research_a_lane_would_stop_on_is_refused_before_any_session(self) -> None:
         from automation.benchmark.probe import run_probe
 

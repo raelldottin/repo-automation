@@ -442,6 +442,13 @@ def run_probe(
     elapsed_seconds = round(time.monotonic() - started, 1)
 
     data, text = read_artifact(workspace, artifact_filename)
+    schema_errors = artifact_spec.validate(data) if data is not None else ["absent"]
+    # The verdict the lane would give, set on the result before anything reads it. run_phase
+    # leaves artifact_valid at None - "owed nothing" - and the diagnosis took an exit 0 with
+    # no plan.json for a completed phase.
+    result.artifact_chars = len(text)
+    result.artifact_valid = not schema_errors
+    result.artifact_errors = tuple(schema_errors)
     copied: list[str] = []
     skipped_links: list[str] = []
     skipped_non_files: list[str] = []
@@ -566,7 +573,7 @@ def run_probe(
             "path": artifact_path(artifact_filename, ctx.agent_workspace),
             "present": data is not None,
             "chars": len(text),
-            "schema_errors": artifact_spec.validate(data) if data is not None else ["absent"],
+            "schema_errors": schema_errors,
         },
         "stream": {
             "file": streams[0].name if streams else None,

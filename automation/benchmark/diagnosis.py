@@ -48,10 +48,10 @@ _STEM = re.compile(r"^(\d{8}T\d{6}Z)-(\d+)$")
 # The verdicts, in the order the evidence is checked. Each names only what was observed.
 COMPLETED = "completed"
 EVIDENCE_UNAVAILABLE = "evidence_unavailable"
-STARTUP_INCOMPLETE = "startup_incomplete"
+NO_TURN_START_RECORDED = "no_turn_start_recorded"
 NO_COMPLETED_MODEL_CALL = "no_completed_model_call"
-NO_TOOL_CALL = "model_answered_without_tool_calls"
-TOOL_CALL_UNANSWERED = "tool_call_without_result"
+NO_TOOL_CALL_RECORDED = "no_tool_call_recorded"
+TOOL_CALL_UNANSWERED = "tool_call_without_recorded_result"
 ACTIVE_UNTIL_BUDGET = "active_until_budget"
 EXITED_WITHOUT_ARTIFACT = "exited_without_artifact"
 FAILED = "failed"
@@ -295,6 +295,8 @@ def diagnose_session(
 
     observed = {
         "session_rows": len(rows),
+        "usage_rows": len(usage_rows),
+        "messages": len(messages),
         "completed_model_calls": api_calls,
         "reasoning_tokens": sum(int(row.get("reasoning_tokens") or 0) for row in usage_rows) if usage_rows else None,
         "assistant_messages": len(assistant),
@@ -343,21 +345,33 @@ def _verdict(
     """The furthest stage the evidence proves the session reached, and nothing past it."""
     if phase_result is not None and phase_result.get("artifact_valid") is not False and not phase_result.get("returncode"):
         return COMPLETED, "the phase exited 0 and owed no artifact it failed to leave"
-    started = observed["session_rows"] > 0 or bool(events)
+    # Any later write proves the turn started, even when the turn-start row itself is missing.
+    started = observed["session_rows"] > 0 or observed["usage_rows"] > 0 or observed["messages"] > 0 or bool(events)
     if not ledger_available and not events:
         return EVIDENCE_UNAVAILABLE, ("no session ledger and no event stream, so nothing here can say how far the session got")
     if not started:
-        return STARTUP_INCOMPLETE, (
-            "the ledger exists but holds no session row, and Hermes writes that row at turn start "
-            "before the first model call - so the process never reached the model"
+        # Not "never reached the model": _ensure_session_row goes through _persist_under_lock,
+        # which logs and swallows a failed write, so an empty ledger is also what a turn whose
+        # persistence failed would leave.
+        return NO_TURN_START_RECORDED, (
+            "the ledger exists but records nothing: Hermes writes a session row at turn start, before "
+            "the first model call, but logs and swallows a failed write - so either the turn never "
+            "started or its persistence failed"
         )
     if observed["completed_model_calls"] == 0 and observed["assistant_messages"] == 0 and not observed["tool_calls"]:
         return NO_COMPLETED_MODEL_CALL, f"the turn started but no model call ever completed; {_UNSPLITTABLE}"
     if observed["tool_calls"] == 0:
-        return NO_TOOL_CALL, "the model answered but never called a tool, so it could not have written the artifact"
+        # Not "never called a tool": the tool-call message is flushed after the tool makes
+        # progress, so a tool requested and then stalled before that flush leaves this too.
+        return NO_TOOL_CALL_RECORDED, (
+            "a model call completed but no tool call was recorded; Hermes persists a tool call only after "
+            "the tool makes progress, so the model answering without tools and a requested tool stalling "
+            "before that flush leave the same evidence"
+        )
     if observed["tool_results"] < observed["tool_calls"]:
         return TOOL_CALL_UNANSWERED, (
-            f"{observed['tool_calls']} tool calls, {observed['tool_results']} results: the last tool never returned"
+            f"{observed['tool_calls']} tool calls recorded, {observed['tool_results']} results: "
+            "no result was recorded for the last one"
         )
     if phase_result is None:
         return FAILED, "the session called tools; without its phase result there is no termination to judge"
