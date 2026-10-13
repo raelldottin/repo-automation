@@ -1,4 +1,4 @@
-"""One research phase, one session, one event stream: what the matrix cannot show.
+"""One phase, one session, one event stream: what the matrix cannot show.
 
 Runs 35715428932, 35736569601 and 35788842735 all ended the same way in lanes C, D and E:
 the research phase burned its whole 600-second ceiling and left no ``research.json``, and
@@ -7,6 +7,9 @@ write the artifact, tried and failed, or tried too late. Under ``--oneshot`` the
 will be - Hermes redirects the turn's stdout and stderr to ``/dev/null`` and prints only
 the final response - so this probe runs the same phase over the ``stream-json`` transport,
 which flushes one JSON line per text delta, tool call and tool result.
+
+Plan joined research after runs 37775851881 and 38248084765: ``--phase plan`` takes the
+research a lane would hand it and asks plan the lane's own question.
 
 This is a diagnostic, never a lane. ``hermes chat`` is a different execution path from
 ``hermes --oneshot``, and it carries no ``--usage-file`` receipt, so nothing it produces is
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -49,16 +53,23 @@ from .adapter import (
     probe_sandbox,
 )
 from .cleanroom import prepare as prepare_cleanroom
+from .diagnosis import diagnose_sessions
+from .diagnosis import summarize as summarize_diagnosis
 from .instances import task_spec
 from .lanes import _agent_sessions
 from .run import resolve_agent_env
 from .strategies import (
     PHASE_CEILING_SECONDS,
+    PLAN_ARTIFACT,
+    PLAN_SPEC,
     RESEARCH_ARTIFACT,
     RESEARCH_SPEC,
     RPI_DIR,
+    ArtifactSpec,
     ExecutionContext,
     agent_workspace_for,
+    artifact_path,
+    plan_prompt,
     read_artifact,
     research_prompt,
     run_phase,
@@ -89,6 +100,13 @@ PROBE_RPI_DIRNAME = "rpi"
 # The phase the campaign is stuck on, at the ceiling the campaign gives it.
 PROBE_PHASE = "research"
 PROBE_BUDGET_SECONDS = PHASE_CEILING_SECONDS[PROBE_PHASE]
+# The phases a probe can administer, and the artifact each owes. Plan joined research after
+# runs 37775851881 and 38248084765 lost it identically: killed at 1080s, no plan.json, no
+# container, a 0-byte log - and on --oneshot nothing that could say where the time went.
+PHASE_ARTIFACTS: dict[str, tuple[str, ArtifactSpec]] = {
+    "research": (RESEARCH_ARTIFACT, RESEARCH_SPEC),
+    "plan": (PLAN_ARTIFACT, PLAN_SPEC),
+}
 
 
 def _events(path: Path) -> list[dict[str, Any]]:
@@ -145,10 +163,10 @@ def timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return entries
 
 
-def artifact_mentions(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def artifact_mentions(events: list[dict[str, Any]], filename: str = RESEARCH_ARTIFACT) -> list[dict[str, Any]]:
     """Every event naming the required artifact - the write attempt, or its absence."""
     named = [event for event in events if not _is_text(event)]
-    return [entry for entry, event in zip(timeline(events), named) if RESEARCH_ARTIFACT in json.dumps(event)]
+    return [entry for entry, event in zip(timeline(events), named) if filename in json.dumps(event)]
 
 
 def terminal_result(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
@@ -303,14 +321,40 @@ def run_probe(
     out_dir: Path,
     *,
     repo_root: Path,
-    budget_seconds: int = PROBE_BUDGET_SECONDS,
+    budget_seconds: Optional[int] = None,
     runner: Optional[CommandRunner] = None,
     env: Optional[dict[str, str]] = None,
     cleanroom: bool = True,
     transport: str = "stream-json",
     max_turns: Optional[int] = None,
+    phase: str = PROBE_PHASE,
+    research_artifact: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Administer the research phase once and keep everything it left behind."""
+    """Administer one phase once and keep everything it left behind.
+
+    ``plan`` needs the research the lane would have handed it: ``research_artifact`` is read,
+    held to the same schema the lane holds it to - an invalid one stops a lane before plan,
+    so a probe of plan on it would measure a phase no lane runs - and seeded at the path the
+    lane's research session would have left it. Its bytes are never altered.
+    """
+    if phase not in PHASE_ARTIFACTS:
+        raise ValueError(f"unknown phase {phase!r}; expected one of {', '.join(PHASE_ARTIFACTS)}")
+    if (phase == "plan") != (research_artifact is not None):
+        raise ValueError("the plan phase needs --research-artifact, and only the plan phase takes one")
+    research_bytes = b""
+    research_data: Any = None
+    if research_artifact is not None:
+        research_bytes = Path(research_artifact).read_bytes()
+        try:
+            research_data = json.loads(research_bytes)
+        except ValueError:
+            raise ValueError(f"{research_artifact} is not JSON") from None
+        errors = RESEARCH_SPEC.validate(research_data)
+        if errors:
+            raise ValueError(f"{research_artifact} would stop a lane before plan: {errors}")
+    if budget_seconds is None:
+        budget_seconds = PHASE_CEILING_SECONDS[phase]
+    artifact_filename, artifact_spec = PHASE_ARTIFACTS[phase]
     if transport not in TRANSPORTS:
         raise ValueError(f"unknown transport {transport!r}; expected one of {', '.join(TRANSPORTS)}")
     if max_turns is not None and max_turns < 1:
@@ -367,6 +411,13 @@ def run_probe(
         witness = SandboxWitness(sessions_dir, workspace, receipt.image, receipt.image_id)
         session_runner = witness.wrap(session_runner)
 
+    if research_artifact is not None:
+        # Where the lane's research session left it, so plan starts in the workspace the lane
+        # gives it - after the cleanroom is materialized, which would otherwise not have it.
+        seeded = workspace / RPI_DIR / RESEARCH_ARTIFACT
+        seeded.parent.mkdir(parents=True, exist_ok=True)
+        seeded.write_bytes(research_bytes)
+
     ctx = ExecutionContext(
         repo_root=Path(repo_root),
         task=task,
@@ -378,14 +429,26 @@ def run_probe(
         runner=session_runner,
         agent_workspace=agent_workspace_for(cleanroom),
     )
-    prompt = research_prompt(task, agent_workspace=ctx.agent_workspace)
+    if phase == "plan":
+        prompt = plan_prompt(task, research_data, agent_workspace=ctx.agent_workspace)
+        context_data: dict[str, Any] = {"research": research_data}
+    else:
+        prompt = research_prompt(task, agent_workspace=ctx.agent_workspace)
+        context_data = {"objective": task.objective}
     # Measured here because the phase result does not carry it, and a token count without the
     # time it took cannot say whether a long turn was spent generating or spent waiting.
     started = time.monotonic()
-    result = run_phase(ctx, PROBE_PHASE, prompt, {"objective": task.objective}, budget_seconds)
+    result = run_phase(ctx, phase, prompt, context_data, budget_seconds)
     elapsed_seconds = round(time.monotonic() - started, 1)
 
-    data, text = read_artifact(workspace, RESEARCH_ARTIFACT)
+    data, text = read_artifact(workspace, artifact_filename)
+    schema_errors = artifact_spec.validate(data) if data is not None else ["absent"]
+    # The verdict the lane would give, set on the result before anything reads it. run_phase
+    # leaves artifact_valid at None - "owed nothing" - and the diagnosis took an exit 0 with
+    # no plan.json for a completed phase.
+    result.artifact_chars = len(text)
+    result.artifact_valid = not schema_errors
+    result.artifact_errors = tuple(schema_errors)
     copied: list[str] = []
     skipped_links: list[str] = []
     skipped_non_files: list[str] = []
@@ -450,8 +513,19 @@ def run_probe(
 
     record = {
         "instance_id": task.instance_id,
-        "phase": PROBE_PHASE,
+        "phase": phase,
         "transport": transport,
+        # What plan was handed, by hash: the probe must not be read as describing research it
+        # never saw, and the file it came from is not this run's to copy or keep.
+        "research_input": (
+            {
+                "path": str(research_artifact),
+                "sha256": hashlib.sha256(research_bytes).hexdigest(),
+                "chars": len(research_bytes.decode("utf-8", errors="replace")),
+            }
+            if research_artifact is not None
+            else None
+        ),
         "max_turns": max_turns,
         # What was asked for, beside what was billed, with the verdict between them. Recorded
         # rather than raised on, for the same reason the sandbox observation is: the receipt is
@@ -495,20 +569,24 @@ def run_probe(
             "container_skipped": container_skipped,
         },
         "artifact": {
-            "filename": RESEARCH_ARTIFACT,
+            "filename": artifact_filename,
+            "path": artifact_path(artifact_filename, ctx.agent_workspace),
             "present": data is not None,
             "chars": len(text),
-            "schema_errors": RESEARCH_SPEC.validate(data) if data is not None else ["absent"],
+            "schema_errors": schema_errors,
         },
         "stream": {
             "file": streams[0].name if streams else None,
             "events": len(events),
             "text_deltas": sum(1 for event in events if event.get("type") == "text"),
             "timeline": timeline(events),
-            "artifact_mentions": artifact_mentions(events),
+            "artifact_mentions": artifact_mentions(events, artifact_filename),
             "terminal_result": terminal_result(events),
         },
         "agent_sessions": sessions,
+        # The same read-only diagnosis a lane cell gets, so a probe and a cell are judged by
+        # one rule. The probe's own witness spans only this phase, but the window still applies.
+        "diagnosis": diagnose_sessions(sessions_dir, [result.to_dict()]),
     }
     record["attribution"]["error"] = attribution_error(usage, asked_model, asked_provider)
 
@@ -597,7 +675,7 @@ def summarize(record: dict[str, Any]) -> str:
     if rpi["skipped_non_files"]:
         lines.append(f"skipped dirs  {_rendered(rpi['skipped_non_files'])} (not regular files in {RPI_DIR})")
     mentions = stream["artifact_mentions"]
-    named = f"{len(mentions)} events name {RESEARCH_ARTIFACT}" if mentions else "none"
+    named = f"{len(mentions)} events name {artifact['filename']}" if mentions else "none"
     lines.append(f"write attempt {named}")
     for entry in mentions[:10]:
         lines.append(f"  at {entry['at_seconds']:>7.1f}s  {entry.get('type')} {entry.get('name') or entry.get('tool') or ''}")
@@ -605,6 +683,8 @@ def summarize(record: dict[str, Any]) -> str:
         lines.append("first tool activity:")
         for entry in stream["timeline"][:10]:
             lines.append(f"  at {entry['at_seconds']:>7.1f}s  {entry.get('type')} {entry.get('name') or entry.get('tool') or ''}")
+    for diagnosis in record.get("diagnosis") or []:
+        lines.extend(summarize_diagnosis(diagnosis))
     return "\n".join(lines)
 
 
@@ -614,14 +694,26 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--instance", required=True, help="ProgramBench instance id to research.")
+    parser.add_argument("--instance", required=True, help="ProgramBench instance id to probe.")
+    parser.add_argument(
+        "--phase",
+        choices=tuple(PHASE_ARTIFACTS),
+        default=PROBE_PHASE,
+        help="The phase to administer. plan needs --research-artifact.",
+    )
+    parser.add_argument(
+        "--research-artifact",
+        type=Path,
+        default=None,
+        help="plan only: the research.json the lane would hand plan. Read, never modified.",
+    )
     parser.add_argument("--out-dir", type=Path, required=True, help="Where to write the probe record.")
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2], help="Harness repo root.")
     parser.add_argument(
         "--budget",
         type=int,
-        default=PROBE_BUDGET_SECONDS,
-        help=f"Phase ceiling in seconds (default: {PROBE_BUDGET_SECONDS}, the lane's own).",
+        default=None,
+        help="Phase ceiling in seconds (default: the phase's own unscaled ceiling).",
     )
     parser.add_argument(
         "--agent-env",
@@ -669,6 +761,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         cleanroom=args.cleanroom,
         transport=args.transport,
         max_turns=args.max_turns,
+        phase=args.phase,
+        research_artifact=args.research_artifact,
     )
     print(summarize(record))
     # The record is already on disk, so the evidence survives the failure. A probe that

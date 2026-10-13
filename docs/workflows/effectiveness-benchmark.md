@@ -897,6 +897,66 @@ authority over the whole host filesystem, which is not what it is for. Skipping 
 refusing keeps a session from halting its own diagnostic by leaving a link or a directory,
 and naming the skip keeps it from reading as "the agent wrote nothing".
 
+### Session diagnosis, and probing plan
+
+Runs `37775851881` and `38248084765` lost lane C's plan phase the same way. Plan was killed at its
+1080s ceiling with no `plan.json`, a 0-byte log and no usage report. The lane-wide witness held one
+container, created at 12:21:57Z, which was during research, 35 minutes before plan launched at
+12:56:44Z. Plan's `.sandbox.json` was a byte-for-byte copy of research's. Nothing the lane kept could
+say whether Hermes reached the model, whether the model answered, or whether a tool ran.
+
+Every cell's `run.json` now carries `session_diagnoses`, built by `automation/benchmark/diagnosis.py`.
+It only reads what each session already left behind, so it adds no model call and changes no prompt,
+budget, flag or transport. For each session it records the following:
+
+- **Phase and pid.** It matches the session to its phase through the `:phase` suffix of the slice id,
+  not through ordering. The pid comes from the stem.
+- **One clock.** All times are offsets from launch: `turn_started`, `first_stream_event`,
+  `first_completed_model_call`, `last_completed_model_call`, `first_model_output`, `first_tool_call`,
+  `first_tool_result`, `last_activity` and `first_container`. Termination comes from the phase
+  result: return code, offset, whether the budget killed it, and whether the artifact was valid.
+- **Its own containers only.** These are the witness's containers whose `created_at` falls inside
+  the session's launch-to-termination window. Containers from other sessions are counted but not
+  credited.
+- **`missing_evidence`.** Every absent source is named, with the reason when the transport explains
+  it. Examples: a 0-byte `--oneshot` log, no usage report, an empty stream, a `HERMES_HOME` that is
+  gone or never got a `state.db`.
+- **A `verdict`.** This is the furthest stage the evidence proves the session reached. The values
+  are `no_turn_start_recorded`, `no_completed_model_call`, `no_tool_call_recorded`,
+  `tool_call_without_recorded_result`, `active_until_budget`, `exited_without_artifact`, `completed`, and
+  `evidence_unavailable` when there is neither a ledger nor a stream.
+
+The source that makes this work on `--oneshot` is Hermes' own `state.db` in the session's throwaway
+`HERMES_HOME`. It is read read-only, and message content is never copied. At the pinned revision
+Hermes writes three things while the turn runs, so a budget kill leaves them on disk:
+
+- the `sessions` row at turn start, before the first model call (`agent/turn_context.py`,
+  `_ensure_session_row`);
+- a `session_model_usage` update for each completed call, with `first_seen` and `last_seen`;
+- `messages` rows after each tool result (`agent/tool_executor.py`).
+
+**Limits.** No source available here can tell a provider that never answered apart from a model
+reasoning through one unfinished call. The usage row is written only when a call completes, and
+neither transport reports reasoning in progress. `no_completed_model_call` says exactly that rather
+than choosing one. Individual provider requests are not observable either: only completed calls
+are. Hermes opens its store best-effort, so a missing `state.db` leans towards a session that never
+reached the turn, but a store that failed to open looks the same. That case is reported as
+`evidence_unavailable`. Two more verdicts name what was recorded, not what happened. An empty
+ledger is `no_turn_start_recorded`, because Hermes logs and swallows a failed turn-start write. No
+recorded tool call is `no_tool_call_recorded`, because a tool call is persisted only after the tool
+makes progress. The ledger lives on the runner and is read there,
+in the same job. Records from earlier runs cannot be re-diagnosed from the uploaded artifacts:
+running it over run `38248084765`'s download gives `evidence_unavailable` for both sessions,
+correctly. It also attributes research's one container to research and none to plan.
+
+The probe can now administer plan: `--phase plan --research-artifact PATH`. The research file is held
+to the schema the lane holds it to, since an invalid one stops a lane before plan. It is seeded at
+`.rpi/research.json` without being altered and recorded by sha256 under `research_input`. The prompt
+is the one `plan_prompt()` composes for the lane. In CI, `probe_phase: plan` first runs research
+exactly as lane C does, on `--oneshot` at research's share of `timeout`. It then probes plan over
+`stream-json` on that research. Only plan's transport differs from the lane, and the plan probe's
+`probe.json` carries the same `diagnosis` a cell gets.
+
 ### The phase artifact contract
 
 A phase that owes the next one a typed artifact must write it *as a checkpoint*, not as a

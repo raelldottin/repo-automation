@@ -54,7 +54,7 @@ on:
         type: boolean
         default: false
       probe:
-        description: "Diagnostic only: run one research phase over the stream-json transport instead of any benchmark. Not a lane; its output is not comparable with a cell."
+        description: "Diagnostic only: run one phase (see probe_phase) over the stream-json transport instead of any benchmark. Not a lane; its output is not comparable with a cell."
         type: boolean
         default: false
       probe_max_turns:
@@ -65,6 +65,11 @@ on:
         description: "Diagnostic only: the probe's wall ceiling in seconds. Raise it above the phase ceiling when capping turns, so the cap is what ends the session."
         type: string
         default: "600"
+      probe_phase:
+        description: "Diagnostic only: research, or plan - which first runs research exactly as lane C does (oneshot, its share of the timeout input) and then probes plan over stream-json on that research."
+        type: choice
+        options: [research, plan]
+        default: research
 
 permissions:
   contents: read
@@ -422,7 +427,7 @@ jobs:
       # flushed survive it. Three A-E runs died here with a 0-byte log and no research.json,
       # and --oneshot can never say why. Nothing this step produces belongs in a comparison:
       # the transport is a different execution path in the agent and leaves no usage receipt.
-      - name: Run the stream-json research probe (diagnostic)
+      - name: Run the stream-json phase probe (diagnostic)
         if: inputs.probe == true && inputs.preflight_only != true
         run: |
           set -o pipefail
@@ -438,9 +443,24 @@ jobs:
           if [ -n "${{ inputs.probe_max_turns }}" ]; then
             cap="--max-turns ${{ inputs.probe_max_turns }}"
           fi
+          phase="--phase research"
+          if [ "${{ inputs.probe_phase }}" = "plan" ]; then
+            # Plan is probed on the research a lane would hand it, produced the way lane C
+            # produces it: --oneshot, at research's share of the timeout input. Only plan's
+            # transport differs from the lane, and only plan's session is the measurement.
+            research_budget=$(uv run python -c "import sys; from automation.benchmark.strategies import PHASE_CEILING_SECONDS, _scaled_ceilings; print(_scaled_ceilings(PHASE_CEILING_SECONDS, int(sys.argv[1]))['research'])" "${{ inputs.timeout }}")
+            uv run python -m automation.benchmark.probe --instance "$instance" --out-dir out/probe-research \
+              --phase research --transport oneshot --budget "$research_budget" \
+              --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL | tee /tmp/probe-research.txt
+            if [ ! -f out/probe-research/rpi/research.json ]; then
+              echo "::error::Research left no research.json, so a lane would never have reached plan." >&2
+              exit 1
+            fi
+            phase="--phase plan --research-artifact out/probe-research/rpi/research.json"
+          fi
           # shellcheck disable=SC2086
           uv run python -m automation.benchmark.probe --instance "$instance" --out-dir out/probe \
-            --budget "${{ inputs.probe_budget || 600 }}" $cap \
+            $phase --budget "${{ inputs.probe_budget || 600 }}" $cap \
             --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL | tee /tmp/probe.txt
           printf '```\n%s\n```\n' "$(cat /tmp/probe.txt)" >> "$GITHUB_STEP_SUMMARY"
 
@@ -496,4 +516,6 @@ jobs:
             out/probe/probe.json
             out/probe/agent-sessions/*.stream.jsonl
             out/probe/agent-sessions/*.controls.json
+            out/probe-research/probe.json
+            out/probe-research/agent-sessions/*.controls.json
           if-no-files-found: warn
