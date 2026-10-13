@@ -517,6 +517,20 @@ def research_prompt(task: TaskSpec, jspace: Optional[JSpaceArtifact] = None, age
     )
 
 
+def plan_prompt(
+    task: TaskSpec, research: Any, jspace: Optional[JSpaceArtifact] = None, agent_workspace: str = ""
+) -> str:
+    """The plan phase's prompt, byte for byte, for the same reason ``research_prompt`` exists:
+    the plan probe has to ask the question the lane asks, not a near-copy of it."""
+    return compose_prompt(
+        f"# Plan: {task.public_id}",
+        envelope(task, agent_workspace),
+        _PLAN_BODY.format(research=json.dumps(research, indent=2, ensure_ascii=False)),
+        artifact_instruction(PLAN_SPEC, agent_workspace=agent_workspace),
+        jspace=jspace,
+    )
+
+
 # --------------------------------------------------------------------------------------
 # Session plumbing shared by every lane
 # --------------------------------------------------------------------------------------
@@ -796,14 +810,8 @@ class RpiStrategy:
         if run.exhausted:
             return self._not_administered(run, compaction_stats, phase="plan")
 
-        plan_prompt = compose_prompt(
-            f"# Plan: {ctx.task.public_id}",
-            envelope(ctx.task, ctx.agent_workspace),
-            _PLAN_BODY.format(research=json.dumps(research, indent=2, ensure_ascii=False)),
-            artifact_instruction(PLAN_SPEC, agent_workspace=ctx.agent_workspace),
-            jspace=self.jspace,
-        )
-        plan_result = run.phase("plan", plan_prompt, {"research": research})
+        prompt = plan_prompt(ctx.task, research, self.jspace, ctx.agent_workspace)
+        plan_result = run.phase("plan", prompt, {"research": research})
         plan = self._validate(plan_result, PLAN_SPEC, ctx.workspace, PLAN_ARTIFACT)
         if not plan_result.artifact_valid:
             return self._not_administered(run, compaction_stats)

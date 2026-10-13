@@ -1137,3 +1137,89 @@ class FirstTurnAccountingTests(unittest.TestCase):
                     transport="stream-json",
                     max_turns=0,
                 )
+
+
+class PlanProbeTests(unittest.TestCase):
+    """Plan, probed on the research a lane would hand it, asking the lane's own question."""
+
+    INSTANCE = "abishekvashok__cmatrix.5c082c6"
+    RESEARCH = {
+        "task": "rebuild cmatrix",
+        "relevant_files": ["README.md"],
+        "findings": ["curses"],
+        "constraints": [],
+        "unknowns": [],
+        "risks": [],
+        "evidence": [],
+    }
+
+    def _research_file(self, tmp: Path, data: object) -> Path:
+        path = tmp / "research.json"
+        path.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+        return path
+
+    def test_the_plan_probe_seeds_research_and_sends_the_lanes_own_prompt(self) -> None:
+        from automation.benchmark.probe import run_probe
+        from automation.benchmark.strategies import plan_prompt
+
+        seen: dict[str, object] = {}
+
+        def runner(command: str, workspace: Path, env, _timeout: int) -> int:
+            seen["seeded"] = json.loads((workspace / ".rpi" / "research.json").read_text(encoding="utf-8"))
+            seen["prompt"] = next(Path(part).read_text(encoding="utf-8") for part in command.split() if part.endswith("prompt.md"))
+            sessions = Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"])
+            sessions.mkdir(parents=True, exist_ok=True)
+            (sessions / "20260101T000000Z-7.controls.json").write_text(
+                json.dumps({"transport": "stream-json", "slice_id": "task:plan"}), encoding="utf-8"
+            )
+            (sessions / f"20260101T000000Z-7{STREAM_JSON_SUFFIX}").write_text("", encoding="utf-8")
+            return AGENT_TIMEOUT_RETURNCODE
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            research = self._research_file(tmp, self.RESEARCH)
+            before = research.read_bytes()
+            record = run_probe(
+                self.INSTANCE, tmp / "probe", repo_root=REPO_ROOT, cleanroom=False, runner=runner,
+                phase="plan", research_artifact=research,
+            )
+            self.assertEqual(before, research.read_bytes(), "the research input was modified")
+
+        self.assertEqual(self.RESEARCH, seen["seeded"])
+        self.assertEqual(plan_prompt(task_spec(self.INSTANCE), self.RESEARCH), seen["prompt"])
+        self.assertEqual("plan", record["phase"])
+        self.assertEqual("plan.json", record["artifact"]["filename"])
+        self.assertFalse(record["artifact"]["present"])
+        self.assertEqual(64, len(record["research_input"]["sha256"]))
+        self.assertEqual(300, record["budget_seconds"])
+        [diagnosis] = record["diagnosis"]
+        self.assertEqual(("plan", 7, "evidence_unavailable"), (diagnosis["phase"], diagnosis["pid"], diagnosis["verdict"]))
+        self.assertIn("event stream: empty - not even system/init was flushed", diagnosis["missing_evidence"])
+
+    def test_research_a_lane_would_stop_on_is_refused_before_any_session(self) -> None:
+        from automation.benchmark.probe import run_probe
+
+        def unreachable(*_args) -> int:
+            raise AssertionError("a session was launched")
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            for bad in ({"task": "only"}, "not an object"):
+                with self.subTest(research=bad), self.assertRaises(ValueError):
+                    run_probe(
+                        self.INSTANCE, tmp / "probe", repo_root=REPO_ROOT, cleanroom=False, runner=unreachable,
+                        phase="plan", research_artifact=self._research_file(tmp, bad),
+                    )
+
+    def test_plan_without_research_and_research_with_it_are_both_refused(self) -> None:
+        from automation.benchmark.probe import run_probe
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            with self.assertRaises(ValueError):
+                run_probe(self.INSTANCE, tmp / "a", repo_root=REPO_ROOT, cleanroom=False, phase="plan")
+            with self.assertRaises(ValueError):
+                run_probe(
+                    self.INSTANCE, tmp / "b", repo_root=REPO_ROOT, cleanroom=False,
+                    research_artifact=self._research_file(tmp, self.RESEARCH),
+                )
