@@ -167,7 +167,9 @@ class VerdictTests(unittest.TestCase):
     def test_a_session_working_when_the_budget_ran_out(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             session = Session(Path(tmp))
-            session.ledger(calls=9, messages=(("assistant", 60, True), ("tool", 70, False), ("assistant", 1070, True), ("tool", 1075, False)))
+            session.ledger(
+                calls=9, messages=(("assistant", 60, True), ("tool", 70, False), ("assistant", 1070, True), ("tool", 1075, False))
+            )
             record = diagnose(session, phase(124, 1080.0, False))
         self.assertEqual(diagnosis.ACTIVE_UNTIL_BUDGET, record["verdict"])
         self.assertEqual(1075.0, record["timeline_seconds"]["last_activity"])
@@ -203,7 +205,10 @@ class MissingEvidenceTests(unittest.TestCase):
     def test_a_stream_that_only_initialised_has_started_but_completed_no_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             session = Session(Path(tmp), transport="stream-json")
-            session.file(".stream.jsonl", json.dumps({"type": "system", "subtype": "init", "timestamp": (LAUNCH + 6) * 1000}) + "\n{\"type\": \"te")
+            session.file(
+                ".stream.jsonl",
+                json.dumps({"type": "system", "subtype": "init", "timestamp": (LAUNCH + 6) * 1000}) + '\n{"type": "te',
+            )
             record = diagnose(session, phase(124, 1080.0, False))
         self.assertEqual(1, record["observed"]["stream_events"])
         self.assertEqual(6.0, record["timeline_seconds"]["first_stream_event"])

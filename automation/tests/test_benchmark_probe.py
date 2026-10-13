@@ -1166,7 +1166,9 @@ class PlanProbeTests(unittest.TestCase):
 
         def runner(command: str, workspace: Path, env, _timeout: int) -> int:
             seen["seeded"] = json.loads((workspace / ".rpi" / "research.json").read_text(encoding="utf-8"))
-            seen["prompt"] = next(Path(part).read_text(encoding="utf-8") for part in command.split() if part.endswith("prompt.md"))
+            seen["prompt"] = next(
+                Path(part).read_text(encoding="utf-8") for part in command.split() if part.endswith("prompt.md")
+            )
             sessions = Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"])
             sessions.mkdir(parents=True, exist_ok=True)
             (sessions / "20260101T000000Z-7.controls.json").write_text(
@@ -1180,8 +1182,13 @@ class PlanProbeTests(unittest.TestCase):
             research = self._research_file(tmp, self.RESEARCH)
             before = research.read_bytes()
             record = run_probe(
-                self.INSTANCE, tmp / "probe", repo_root=REPO_ROOT, cleanroom=False, runner=runner,
-                phase="plan", research_artifact=research,
+                self.INSTANCE,
+                tmp / "probe",
+                repo_root=REPO_ROOT,
+                cleanroom=False,
+                runner=runner,
+                phase="plan",
+                research_artifact=research,
             )
             self.assertEqual(before, research.read_bytes(), "the research input was modified")
 
@@ -1207,8 +1214,13 @@ class PlanProbeTests(unittest.TestCase):
             for bad in ({"task": "only"}, "not an object"):
                 with self.subTest(research=bad), self.assertRaises(ValueError):
                     run_probe(
-                        self.INSTANCE, tmp / "probe", repo_root=REPO_ROOT, cleanroom=False, runner=unreachable,
-                        phase="plan", research_artifact=self._research_file(tmp, bad),
+                        self.INSTANCE,
+                        tmp / "probe",
+                        repo_root=REPO_ROOT,
+                        cleanroom=False,
+                        runner=unreachable,
+                        phase="plan",
+                        research_artifact=self._research_file(tmp, bad),
                     )
 
     def test_plan_without_research_and_research_with_it_are_both_refused(self) -> None:
@@ -1220,6 +1232,9 @@ class PlanProbeTests(unittest.TestCase):
                 run_probe(self.INSTANCE, tmp / "a", repo_root=REPO_ROOT, cleanroom=False, phase="plan")
             with self.assertRaises(ValueError):
                 run_probe(
-                    self.INSTANCE, tmp / "b", repo_root=REPO_ROOT, cleanroom=False,
+                    self.INSTANCE,
+                    tmp / "b",
+                    repo_root=REPO_ROOT,
+                    cleanroom=False,
                     research_artifact=self._research_file(tmp, self.RESEARCH),
                 )

@@ -517,9 +517,7 @@ def research_prompt(task: TaskSpec, jspace: Optional[JSpaceArtifact] = None, age
     )
 
 
-def plan_prompt(
-    task: TaskSpec, research: Any, jspace: Optional[JSpaceArtifact] = None, agent_workspace: str = ""
-) -> str:
+def plan_prompt(task: TaskSpec, research: Any, jspace: Optional[JSpaceArtifact] = None, agent_workspace: str = "") -> str:
     """The plan phase's prompt, byte for byte, for the same reason ``research_prompt`` exists:
     the plan probe has to ask the question the lane asks, not a near-copy of it."""
     return compose_prompt(

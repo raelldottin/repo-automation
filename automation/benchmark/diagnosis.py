@@ -224,9 +224,7 @@ def diagnose_session(
 
     if phase_result is not None and launched is not None:
         window_end = launched + float(phase_result.get("seconds") or 0) + float(phase_result.get("grace_seconds") or 0)
-    containers, foreign = _containers_in_window(
-        _load_json(sessions_dir / f"{stem}{SANDBOX_SUFFIX}"), launched, window_end
-    )
+    containers, foreign = _containers_in_window(_load_json(sessions_dir / f"{stem}{SANDBOX_SUFFIX}"), launched, window_end)
 
     missing: list[str] = []
     if controls is None:
@@ -235,8 +233,7 @@ def diagnose_session(
         missing.append("session log: absent")
     elif log_bytes == 0:
         missing.append(
-            "session log: 0 bytes"
-            + (" - --oneshot writes nothing until the turn returns" if transport == "oneshot" else "")
+            "session log: 0 bytes" + (" - --oneshot writes nothing until the turn returns" if transport == "oneshot" else "")
         )
     if usage_report is None:
         missing.append(
@@ -279,12 +276,8 @@ def diagnose_session(
         "first_model_output": _first(
             [m.get("timestamp") for m in assistant] + [stamp(e) for e in stream if e.get("type") == "text"]
         ),
-        "first_tool_call": _first(
-            [m.get("timestamp") for m in tool_calls] + [stamp(e) for e in stream_tool_uses]
-        ),
-        "first_tool_result": _first(
-            [m.get("timestamp") for m in tool_results] + [stamp(e) for e in stream_tool_results]
-        ),
+        "first_tool_call": _first([m.get("timestamp") for m in tool_calls] + [stamp(e) for e in stream_tool_uses]),
+        "first_tool_result": _first([m.get("timestamp") for m in tool_results] + [stamp(e) for e in stream_tool_results]),
         "last_activity": max(
             [
                 value
@@ -352,9 +345,7 @@ def _verdict(
         return COMPLETED, "the phase exited 0 and owed no artifact it failed to leave"
     started = observed["session_rows"] > 0 or bool(events)
     if not ledger_available and not events:
-        return EVIDENCE_UNAVAILABLE, (
-            "no session ledger and no event stream, so nothing here can say how far the session got"
-        )
+        return EVIDENCE_UNAVAILABLE, ("no session ledger and no event stream, so nothing here can say how far the session got")
     if not started:
         return STARTUP_INCOMPLETE, (
             "the ledger exists but holds no session row, and Hermes writes that row at turn start "

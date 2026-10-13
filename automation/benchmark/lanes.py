@@ -275,9 +275,7 @@ def run_cell(cell: Cell, run_dir: Path, adapter: AgentAdapter, repo_root: Path) 
         # cell nothing: a killed --oneshot phase leaves a 0-byte log and no usage report, and
         # this is the only record of how far it got. Matched to phases by slice id, with
         # containers attributed by creation time, because the witness spans the whole lane.
-        "session_diagnoses": diagnose_sessions(
-            instance_dir / AGENT_SESSIONS_DIR, (strategy or {}).get("phases") or []
-        ),
+        "session_diagnoses": diagnose_sessions(instance_dir / AGENT_SESSIONS_DIR, (strategy or {}).get("phases") or []),
         "provider_validity": classify_provider_validity(sessions),
         # Two separate questions about the same cell: whether the provider served it, and
         # whether the lane administered its own treatment. Either one being no is enough to
