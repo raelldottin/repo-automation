@@ -64,13 +64,23 @@ _UNSPLITTABLE = (
 )
 
 # What Hermes was doing the last time it persisted ``sessions.last_activity_description``, from
-# the labels pinned ``b6a87db`` stamps on the chat-completions streaming path. The write is
-# rate-limited to once per 60s and overwrites, so this is one late sample, never a history.
-# "waiting for stream response (Ns, no chunks yet)" is deliberately ``other``: despite its
-# wording, the stream monitor writes it whenever the last chunk - or the stream's opening - is
-# under 60s old, so it cannot say whether a chunk ever arrived.
+# the labels pinned ``b6a87db`` stamps on the chat-completions path. The write is rate-limited to
+# once per 60s, overwrites, and clamps to 120 characters, so this is one late sample, never a
+# history. "waiting for stream response (Ns, no chunks yet)" is deliberately ``other``: despite
+# its wording, the stream monitor writes it whenever it has been under 60s since the last chunk
+# or since the stream opened, so it cannot say whether a chunk ever arrived.
+#
+# NULL and '' are different findings. NULL: no description was ever persisted. '': one was, and
+# was then cleared - the turn's ``finally`` clears it on every exit, including the one a SIGTERM
+# causes, and a blank wait notice writes '' too. That is why the adapter snapshots the row just
+# before it signals the session (``snapshot_activity``), and why the diagnosis prefers it.
 ACTIVITY_UNAVAILABLE = "unavailable"
+ACTIVITY_NEVER_PERSISTED = "never_persisted"
+ACTIVITY_CLEARED = "cleared"
 ACTIVITY_OTHER = "other"
+ACTIVITY_SUFFIX = ".activity.json"
+# A read-only open that cannot hold up the budget kill it precedes.
+SNAPSHOT_TIMEOUT_SECONDS = 0.5
 _ACTIVITY_STATES = (
     ("receiving_chunks", re.compile(r"^receiving stream response$")),
     (
@@ -85,7 +95,26 @@ _ACTIVITY_STATES = (
         "silent_after_chunks",
         re.compile(r"^waiting for stream response \(\d+s, post_chunk\)$|stream open; \d+s without stream output"),
     ),
-    ("reconnecting", re.compile(r"^stale stream detected after \d+s, reconnecting$|^stream retry \d+/\d+ after ")),
+    (
+        "reconnecting",
+        re.compile(
+            r"^stale stream detected after \d+s, reconnecting$|^stream retry \d+/\d+ after "
+            r"|no output from provider for \d+s — reconnecting"
+        ),
+    ),
+    (
+        "retry_backoff",
+        re.compile(
+            r"^(?:error |empty response )?retry backoff \(\d+/\d+\), \d+s remaining$"
+            r"|^auto-recovery wait \(\d+/\d+\), \d+s remaining$"
+            r"|^API error recovery \(attempt \d+/\d+\)$"
+            r"|retrying in \d+s \(attempt \d+/\d+\)"
+        ),
+    ),
+    (
+        "non_streaming",
+        re.compile(r"^waiting for non-streaming API response$|^stale non-streaming call killed after \d+s$"),
+    ),
 )
 
 
@@ -298,6 +327,11 @@ def diagnose_session(
         missing.append("sandbox observation: no witness receipt, or no launch time to place it")
     if ledger["available"] and not ledger.get("has_activity_description"):
         missing.append("activity description: this state.db predates sessions.last_activity_description")
+    snapshot = _load_json(sessions_dir / f"{stem}{ACTIVITY_SUFFIX}")
+    if snapshot is not None and snapshot.get("error"):
+        missing.append(f"activity snapshot: {snapshot['error']}")
+    elif snapshot is None and phase_result is not None and phase_result.get("returncode") == TIMEOUT_RETURNCODE:
+        missing.append("activity snapshot: none taken before the budget kill, so SIGTERM may have cleared the label")
 
     rows = ledger.get("sessions") or []
     messages = ledger.get("messages") or []
@@ -376,7 +410,7 @@ def diagnose_session(
         ),
         "timeline_seconds": timeline,
         "observed": observed,
-        "last_persisted_activity": _last_persisted_activity(rows, launched),
+        "last_persisted_activity": _last_persisted_activity(rows, launched, snapshot),
         "containers": containers,
         "containers_from_other_sessions": foreign,
         "missing_evidence": missing,
@@ -386,21 +420,71 @@ def diagnose_session(
 
 
 def classify_activity(description: Optional[str]) -> str:
-    """Name the streaming state a persisted activity description shows, or ``other``/``unavailable``."""
-    if not description:
-        return ACTIVITY_UNAVAILABLE
+    """Name the state a persisted activity description shows: NULL and '' are their own states."""
+    if description is None:
+        return ACTIVITY_NEVER_PERSISTED
+    if description == "":
+        return ACTIVITY_CLEARED
     return next((state for state, pattern in _ACTIVITY_STATES if pattern.search(description)), ACTIVITY_OTHER)
 
 
-def _last_persisted_activity(rows: list[dict[str, Any]], launched: Optional[float]) -> dict[str, Any]:
-    """The latest session row's activity stamp: one sample up to 60s old, never a history."""
-    row = max(rows, key=lambda r: r.get("last_activity_at") or 0, default={})
+def controls_stems(sessions_dir: Path) -> frozenset[str]:
+    """The sessions that have announced themselves so far, to tell the next one apart."""
+    return frozenset(path.name[: -len(CONTROLS_SUFFIX)] for path in sessions_dir.glob(f"*{CONTROLS_SUFFIX}"))
+
+
+def snapshot_activity(sessions_dir: Path, before: frozenset[str]) -> None:
+    """Keep the activity row of the one session launched since ``before``, ahead of its SIGTERM.
+
+    Hermes clears the description in the turn's ``finally``, so a graceful stop erases the very
+    label a budget kill should explain. One read-only open with a short timeout; any failure is
+    written down for the diagnosis to name, and nothing here ever raises into the kill.
+    """
+    try:
+        new = sorted(controls_stems(sessions_dir) - before)
+        if len(new) != 1:
+            return
+        stem = new[0]
+        snapshot: dict[str, Any] = {"captured_at": datetime.now(timezone.utc).timestamp()}
+        try:
+            home = (_load_json(sessions_dir / f"{stem}{CONTROLS_SUFFIX}") or {}).get("hermes_home")
+            if not home:
+                raise FileNotFoundError("controls receipt names no HERMES_HOME")
+            database = Path(home) / SESSION_DB_FILENAME
+            if not database.is_file():
+                raise FileNotFoundError(f"{database} does not exist")
+            uri = f"file:{database}?mode=ro"
+            with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=SNAPSHOT_TIMEOUT_SECONDS)) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT last_activity_at, last_activity_description, last_activity_provenance "
+                    "FROM sessions ORDER BY last_activity_at DESC LIMIT 1"
+                ).fetchone()
+            snapshot["row"] = dict(row) if row is not None else None
+        except (OSError, sqlite3.Error, ValueError) as error:
+            snapshot["error"] = f"{type(error).__name__}: {error}"
+        (sessions_dir / f"{stem}{ACTIVITY_SUFFIX}").write_text(json.dumps(snapshot) + "\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001 - observation must never stand between a budget and its kill
+        return
+
+
+def _last_persisted_activity(
+    rows: list[dict[str, Any]], launched: Optional[float], snapshot: Optional[dict[str, Any]]
+) -> dict[str, Any]:
+    """One activity stamp, up to 60s old: the pre-SIGTERM snapshot when there is one, else the row."""
+    if snapshot is not None and snapshot.get("row"):
+        row, source = snapshot["row"], "pre_sigterm_snapshot"
+    else:
+        row = max(rows, key=lambda r: r.get("last_activity_at") or 0, default={})
+        source = "state_db_after_exit" if row else None
+    present = "last_activity_description" in row
     description = row.get("last_activity_description")
     return {
+        "source": source,
         "at_seconds": _offset(row.get("last_activity_at"), launched),
         "description": description,
         "provenance": row.get("last_activity_provenance"),
-        "state": classify_activity(description),
+        "state": classify_activity(description) if present else ACTIVITY_UNAVAILABLE,
     }
 
 
@@ -485,7 +569,9 @@ def summarize(record: dict[str, Any]) -> list[str]:
         f" {record['containers_from_other_sessions']} from other sessions",
     ]
     activity = record["last_persisted_activity"]
-    if activity["description"]:
-        lines.append(f"last activity {activity['state']} at {activity['at_seconds']}s: {activity['description']}")
+    if activity["source"]:
+        lines.append(
+            f"last activity {activity['state']} at {activity['at_seconds']}s ({activity['source']}): {activity['description']!r}"
+        )
     lines += [f"missing       {item}" for item in record["missing_evidence"]]
     return lines

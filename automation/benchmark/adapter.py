@@ -33,6 +33,7 @@ from automation.context import build_context
 
 from .cleanroom import WORKSPACE_DIR, CleanroomError, CleanroomReceipt
 from .cleanroom import prepare as prepare_cleanroom
+from .diagnosis import controls_stems, snapshot_activity
 from .witness import SandboxWitness
 from .instances import TaskSpec
 from .strategies import (
@@ -199,6 +200,8 @@ def _subprocess_runner(command: str, workspace: Path, env: Mapping[str, str], ti
     """
     # Its own process group, so the timeout can collect the whole session: the agent spawns
     # tool subprocesses, and one left behind would spend the next cell's wall clock too.
+    sessions_dir = Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]) if env.get("REPO_AUTOMATION_HERMES_USAGE_DIR") else None
+    announced = controls_stems(sessions_dir) if sessions_dir is not None else frozenset()
     with subprocess.Popen(command, cwd=workspace, shell=True, env=dict(env), start_new_session=True) as agent:
         try:
             return agent.wait(timeout=timeout)
@@ -206,7 +209,10 @@ def _subprocess_runner(command: str, workspace: Path, env: Mapping[str, str], ti
             # Ask before compelling. SIGTERM lets the session flush what it has written and
             # the tee drain the pipe, so a censored phase still leaves its checkpointed
             # artifact and a readable log; SIGKILL after the grace so a session that ignores
-            # the signal still cannot outlive its budget.
+            # the signal still cannot outlive its budget. The activity snapshot comes first: the
+            # turn Hermes unwinds on SIGTERM clears the label that says what it was doing.
+            if sessions_dir is not None:
+                snapshot_activity(sessions_dir, announced)
             os.killpg(agent.pid, signal.SIGTERM)
             try:
                 agent.wait(timeout=AGENT_TERMINATION_GRACE_SECONDS)
