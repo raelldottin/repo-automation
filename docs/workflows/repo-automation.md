@@ -235,6 +235,26 @@ Codex runs with the existing no-approval, workspace-write invocation. Claude Cod
 
 Consumer repositories can override executable names with `REPO_AUTOMATION_CODEX_BIN` or `REPO_AUTOMATION_CLAUDE_BIN`. `OWLORY_CODEX_BIN` remains supported for existing Codex setups. Consumers that require a stricter Claude local policy can set `REPO_AUTOMATION_CLAUDE_PERMISSION_MODE` to another Claude Code permission mode.
 
+### Exit codes
+
+| Invocation | `REPO_AUTOMATION_AGENT_RUNNER` | Result |
+| --- | --- | --- |
+| Inside Hermes, Claude Code or Codex | unset or `auto` | the nearest enclosing harness runs the slice |
+| Inside Hermes, Claude Code or Codex | names that same harness | that harness runs the slice |
+| Inside Hermes, Claude Code or Codex | names a different harness | refused, exit 78 |
+| Headless (CI, cron, a plain shell) | unset or `auto` | exit 78; headless runs must name a runner |
+| Headless (CI, cron, a plain shell) | `codex`, `claude` or `hermes` | that runner runs the slice |
+| Anywhere | any other value | exit 64 |
+
+### Direction, not current behavior
+
+The points below describe where the harness is heading. None of them changes what `run_agent.sh` does today.
+
+- **Hermes as orchestration engine.** Hermes is the preferred orchestration engine for the proposed Kanban/Hindsight/Swarm Wiki control plane (open PRs #69 and #70). It is **not** the supervisor's default runner: the default stays `auto`, which follows the originating harness. Claude Code and Codex remain supported execution options.
+- **Roles are responsibilities.** Researcher, implementer, tester and reviewer are logical responsibilities within a run. They are not fixed assignments to a particular product; any supported runner may carry any of them.
+- **Delegation is proposed, not implemented.** A supervisor-controlled sub-agent system is proposed. Nothing in the supervisor or the wrapper implements it today, and the Hermes toolset pin still removes `delegate_task`. Implementing it requires its own design, authorization and testing.
+- **The benchmark is unchanged.** Every effectiveness-benchmark lane continues to run on an explicitly selected runner: `.github/workflows/effectiveness-benchmark.yml` sets `REPO_AUTOMATION_AGENT_RUNNER: hermes`, and each lane session (one per phase for the multi-phase lanes) runs as a separate, fresh Hermes process.
+
 ## Bootstrap Status
 
 As of 2026-05-21, `/Users/raelldottin/Documents/Personal/repo-automation` is initialized as a Git repository on `main`. The bootstrap commit is `6ab871bbf957df24e648b02ef002c0efa2d7c609`. Exact publication commits are recorded in Owlory handoffs so this manifest-synced workflow doc does not have to change for every external commit.
