@@ -10,6 +10,7 @@ without the artifact, and succeeding.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import tempfile
@@ -433,7 +434,18 @@ class ActivitySnapshotTests(unittest.TestCase):
         self.assertIn("does not exist", snapshot["error"])
 
     def test_the_budget_kill_snapshots_before_it_signals(self) -> None:
-        """The real kill path: a session that announces itself, then outlives its budget."""
+        """The real kill path, with a child that clears its label on SIGTERM the way Hermes does.
+
+        The child's handler blanks ``last_activity_description`` and then drops a marker, and the
+        test's ``killpg`` waits for that marker after delivering SIGTERM. So a snapshot taken after
+        the signal reliably reads ``''``, and only one taken before it keeps the label.
+        """
+        import os
+        import signal
+        import sys
+        import time
+        from unittest import mock
+
         from automation.benchmark import adapter
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -441,18 +453,58 @@ class ActivitySnapshotTests(unittest.TestCase):
             sessions.mkdir()
             home = Path(tmp) / "home"
             home.mkdir()
-            with sqlite3.connect(home / "state.db") as conn:
+            database = home / "state.db"
+            with sqlite3.connect(database) as conn:
                 conn.executescript(_SCHEMA)
                 conn.execute(
                     "INSERT INTO sessions (id, source, started_at, last_activity_at, last_activity_description)"
                     " VALUES ('s1', 'cli', 1, 2, 'stream retry 1/5 after ReadTimeout')"
                 )
+            cleared = Path(tmp) / "cleared"
+            pid_file = Path(tmp) / "child.pid"
             controls = sessions / f"{STEM}.controls.json"
-            command = f"printf %s {json.dumps(json.dumps({'hermes_home': str(home)}))} > {controls}; sleep 30"
+
+            def reap() -> None:
+                """Never leave the child's group running, whichever assertion fails."""
+                with contextlib.suppress(OSError, ValueError):
+                    os.killpg(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+
+            child = Path(tmp) / "child.py"
+            child.write_text(
+                "import json, os, signal, sqlite3, sys, time\n"
+                "def clear(*_):\n"
+                f"    with sqlite3.connect({str(database)!r}) as conn:\n"
+                "        conn.execute(\"UPDATE sessions SET last_activity_description = '',"
+                " last_activity_provenance = 'unknown'\")\n"
+                f"    open({str(cleared)!r}, 'w').close()\n"
+                "    sys.exit(143)\n"
+                "signal.signal(signal.SIGTERM, clear)\n"
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                f"open({str(controls)!r}, 'w').write(json.dumps({{'hermes_home': {str(home)!r}}}))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            real_killpg = os.killpg
+
+            def killpg_then_await_clear(pgid: int, signum: int) -> None:
+                real_killpg(pgid, signum)
+                deadline = time.monotonic() + 5
+                while signum == signal.SIGTERM and not cleared.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
             env = {"PATH": "/usr/bin:/bin", "REPO_AUTOMATION_HERMES_USAGE_DIR": str(sessions)}
-            returncode = adapter._subprocess_runner(command, Path(tmp), env, 1)
-            snapshot = json.loads((sessions / f"{STEM}.activity.json").read_text(encoding="utf-8"))
+            try:
+                with mock.patch.object(adapter.os, "killpg", killpg_then_await_clear):
+                    returncode = adapter._subprocess_runner(f"exec {sys.executable} {child}", Path(tmp), env, 2)
+                snapshot = json.loads((sessions / f"{STEM}.activity.json").read_text(encoding="utf-8"))
+                handler_ran = cleared.exists()
+                with contextlib.closing(sqlite3.connect(database)) as conn:
+                    (after_exit,) = conn.execute("SELECT last_activity_description FROM sessions").fetchone()
+            finally:
+                reap()
         self.assertEqual(124, returncode)
+        self.assertTrue(handler_ran, "the child's SIGTERM handler never ran")
+        self.assertEqual("", after_exit)
         self.assertEqual("stream retry 1/5 after ReadTimeout", snapshot["row"]["last_activity_description"])
 
 
