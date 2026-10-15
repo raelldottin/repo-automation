@@ -235,7 +235,7 @@ Codex runs with the existing no-approval, workspace-write invocation. Claude Cod
 
 Consumer repositories can override executable names with `REPO_AUTOMATION_CODEX_BIN` or `REPO_AUTOMATION_CLAUDE_BIN`. `OWLORY_CODEX_BIN` remains supported for existing Codex setups. Consumers that require a stricter Claude local policy can set `REPO_AUTOMATION_CLAUDE_PERMISSION_MODE` to another Claude Code permission mode.
 
-### Exit codes
+### Runner selection outcomes
 
 | Invocation | `REPO_AUTOMATION_AGENT_RUNNER` | Result |
 | --- | --- | --- |
@@ -246,13 +246,15 @@ Consumer repositories can override executable names with `REPO_AUTOMATION_CODEX_
 | Headless (CI, cron, a plain shell) | `codex`, `claude` or `hermes` | that runner runs the slice |
 | Anywhere | any other value | exit 64 |
 
+`--sandbox-probe` is the exception: it always uses Hermes and skips runner selection, because it makes one no-model terminal call and launches no agent. The wrapper has other exit codes too (missing files, an existing handoff, a missing CLI); this table covers runner selection only.
+
 ### Direction, not current behavior
 
 The points below describe where the harness is heading. None of them changes what `run_agent.sh` does today.
 
-- **Hermes as orchestration engine.** Hermes is the preferred orchestration engine for the proposed Kanban/Hindsight/Swarm Wiki control plane (open PRs #69 and #70). It is **not** the supervisor's default runner: the default stays `auto`, which follows the originating harness. Claude Code and Codex remain supported execution options.
-- **Roles are responsibilities.** Researcher, implementer, tester and reviewer are logical responsibilities within a run. They are not fixed assignments to a particular product; any supported runner may carry any of them.
-- **Delegation is proposed, not implemented.** A supervisor-controlled sub-agent system is proposed. Nothing in the supervisor or the wrapper implements it today, and the Hermes toolset pin still removes `delegate_task`. Implementing it requires its own design, authorization and testing.
+- **Hermes as orchestration engine.** Hermes is the preferred orchestration engine for the proposed Kanban/Hindsight/Swarm Wiki control plane (proposed in raelldottin/repo-automation#69 and raelldottin/repo-automation#70). It is **not** the supervisor's default runner: the default stays `auto`, which follows the originating harness. Claude Code and Codex remain supported execution options.
+- **Roles are responsibilities.** Researcher, implementer, tester and reviewer are intended as logical responsibilities. They are not fixed assignments to a particular product; any supported runner may carry any of them.
+- **Supervisor-controlled delegation is proposed, not implemented.** A sub-agent system in which the supervisor spawns, authorizes and collects sub-agents is proposed. Nothing in the supervisor or the wrapper implements it today. The `delegate_task` removal is a Hermes-only toolset pin; the Claude Code runner sets no tool restrictions, so a Claude Code session can still spawn its own sub-agents outside supervisor control. Implementing it requires its own design, authorization and testing.
 - **The benchmark is unchanged.** Every effectiveness-benchmark lane continues to run on an explicitly selected runner: `.github/workflows/effectiveness-benchmark.yml` sets `REPO_AUTOMATION_AGENT_RUNNER: hermes`, and each lane session (one per phase for the multi-phase lanes) runs as a separate, fresh Hermes process.
 
 ## Bootstrap Status
