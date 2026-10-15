@@ -254,7 +254,10 @@ The points below describe where the harness is heading. None of them changes wha
 
 - **Hermes as orchestration engine.** Hermes is the preferred orchestration engine for the proposed Kanban/Hindsight/Swarm Wiki control plane (proposed in raelldottin/repo-automation#69 and raelldottin/repo-automation#70). It is **not** the supervisor's default runner: the default stays `auto`, which follows the originating harness. Claude Code and Codex remain supported execution options.
 - **Roles are responsibilities.** Researcher, implementer, tester and reviewer are intended as logical responsibilities. They are not fixed assignments to a particular product; any supported runner may carry any of them.
-- **Supervisor-controlled delegation is proposed, not implemented.** A sub-agent system in which the supervisor spawns, authorizes and collects sub-agents is proposed. Nothing in the supervisor or the wrapper implements it today. The `delegate_task` removal is a Hermes-only toolset pin; the Claude Code runner sets no tool restrictions, so a Claude Code session can still spawn its own sub-agents outside supervisor control. Implementing it requires its own design, authorization and testing.
+- **Two kinds of delegation.**
+  - *Agent-native delegation* (available today): Claude Code may launch its own sub-agents with its existing capabilities, because the Claude Code runner sets no tool restrictions. The `delegate_task` removal is a Hermes-only toolset pin. Agent-native delegation is not supervisor-controlled delegation.
+  - *Supervisor-controlled delegation* (proposed, not implemented): the planned control plane would explicitly manage assignments, permissions, execution budgets, dependencies and verification. Nothing in the supervisor or the wrapper implements it today.
+  - *Future requirement, not current behavior:* native sub-agent activity must not bypass the supervisor's execution controls. Implementing it requires its own design, authorization and testing.
 - **The benchmark is unchanged.** Every effectiveness-benchmark lane continues to run on an explicitly selected runner: `.github/workflows/effectiveness-benchmark.yml` sets `REPO_AUTOMATION_AGENT_RUNNER: hermes`, and each lane session (one per phase for the multi-phase lanes) runs as a separate, fresh Hermes process.
 
 ## Bootstrap Status
