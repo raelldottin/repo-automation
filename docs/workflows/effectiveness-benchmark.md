@@ -925,6 +925,20 @@ budget, flag or transport. For each session it records the following:
   are `no_turn_start_recorded`, `no_completed_model_call`, `no_tool_call_recorded`,
   `tool_call_without_recorded_result`, `active_until_budget`, `exited_without_artifact`, `completed`, and
   `evidence_unavailable` when there is neither a ledger nor a stream.
+- **`last_persisted_activity`.** This is the session row's `last_activity_description`, its
+  provenance and its offset, plus a `state` read from the description:
+  - `receiving_chunks`: chunks were arriving;
+  - `awaiting_first_chunk`: the stream attempt had no chunk yet;
+  - `silent_after_chunks`: chunks had arrived, then stopped;
+  - `reconnecting`: a stale-stream kill or a stream retry;
+  - `other`: any other description;
+  - `unavailable`: no description was stored.
+
+  Hermes persists the description at most once every 60s and overwrites it, so the field is one
+  late sample, never a history. "waiting for stream response (Ns, no chunks yet)" counts as `other`.
+  Despite its wording, Hermes writes it whenever the last chunk is under 60s old, so it can't tell
+  you whether a chunk ever arrived. An older `state.db` without the column is named in
+  `missing_evidence`.
 
 The source that makes this work on `--oneshot` is Hermes' own `state.db` in the session's throwaway
 `HERMES_HOME`. It is read read-only, and message content is never copied. At the pinned revision

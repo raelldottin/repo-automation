@@ -30,7 +30,8 @@ RESEARCH_STEM = "20261012T122043Z-3852"
 _SCHEMA = """
 CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL,
     ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0, tool_call_count INTEGER DEFAULT 0,
-    api_call_count INTEGER DEFAULT 0, last_activity_at REAL);
+    api_call_count INTEGER DEFAULT 0, last_activity_at REAL, last_activity_description TEXT,
+    last_activity_provenance TEXT);
 CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
     content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL NOT NULL,
     finish_reason TEXT);
@@ -68,14 +69,24 @@ class Session:
     def file(self, suffix: str, text: str) -> None:
         (self.dir / f"{self.stem}{suffix}").write_text(text, encoding="utf-8")
 
-    def ledger(self, *, row: bool = True, calls: int = 0, messages: tuple[tuple[str, float, bool], ...] = ()) -> None:
-        """``messages`` are (role, seconds after launch, carries tool_calls)."""
+    def ledger(
+        self,
+        *,
+        row: bool = True,
+        calls: int = 0,
+        messages: tuple[tuple[str, float, bool], ...] = (),
+        activity: Optional[tuple[float, str]] = None,
+    ) -> None:
+        """``messages`` are (role, seconds after launch, carries tool_calls); ``activity`` is
+        (seconds after launch, the persisted activity description)."""
+        at, description = activity or (3, None)
         with sqlite3.connect(self.home / "state.db") as conn:
             conn.executescript(_SCHEMA)
             if row:
                 conn.execute(
-                    "INSERT INTO sessions (id, source, started_at, api_call_count, last_activity_at) VALUES (?,?,?,?,?)",
-                    ("s1", "cli", LAUNCH + 3, calls, LAUNCH + 3),
+                    "INSERT INTO sessions (id, source, started_at, api_call_count, last_activity_at,"
+                    " last_activity_description, last_activity_provenance) VALUES (?,?,?,?,?,?,?)",
+                    ("s1", "cli", LAUNCH + 3, calls, LAUNCH + at, description, "unknown" if description else None),
                 )
             if calls:
                 conn.execute(
@@ -253,6 +264,88 @@ class MissingEvidenceTests(unittest.TestCase):
             record = diagnose(session, None)
         self.assertIsNone(record["terminated"])
         self.assertEqual(diagnosis.FAILED, record["verdict"])
+
+
+class ActivityDescriptionTests(unittest.TestCase):
+    """The last persisted activity label, verbatim from pinned Hermes ``b6a87db``'s streaming path."""
+
+    def activity(self, description: str, at: float = 1025.0) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp), transport="stream-json")
+            session.ledger(row=True, calls=0, activity=(at, description))
+            return diagnose(session, phase(124, 1080.0, False))["last_persisted_activity"]
+
+    def test_a_stream_still_delivering_chunks_reads_as_receiving(self) -> None:
+        record = self.activity("receiving stream response")
+        self.assertEqual("receiving_chunks", record["state"])
+        self.assertEqual(1025.0, record["at_seconds"])
+        self.assertEqual("receiving stream response", record["description"])
+
+    def test_a_stream_that_never_sent_a_chunk_reads_as_awaiting_the_first(self) -> None:
+        for description in (
+            "waiting for provider response (streaming)",
+            "waiting for stream response (120s, first_chunk)",
+            "⏳ waiting on z-ai/glm-5.3 — 60s waiting for the first stream chunk (auto-reconnect: stream stale watchdog in 120s)",
+        ):
+            with self.subTest(description=description):
+                self.assertEqual("awaiting_first_chunk", self.activity(description)["state"])
+
+    def test_a_stream_that_went_quiet_after_chunks_is_told_apart(self) -> None:
+        for description in (
+            "waiting for stream response (90s, post_chunk)",
+            "⏳ waiting on z-ai/glm-5.3 — stream open; 60s without stream output",
+        ):
+            with self.subTest(description=description):
+                self.assertEqual("silent_after_chunks", self.activity(description)["state"])
+
+    def test_a_stale_stream_or_retry_reads_as_reconnecting(self) -> None:
+        for description in ("stale stream detected after 181s, reconnecting", "stream retry 2/5 after ReadTimeout"):
+            with self.subTest(description=description):
+                self.assertEqual("reconnecting", self.activity(description)["state"])
+
+    def test_no_chunks_yet_is_not_read_as_no_chunk_ever(self) -> None:
+        """Hermes writes it whenever the last chunk is under 60s old, so it settles nothing."""
+        self.assertEqual("other", self.activity("waiting for stream response (30s, no chunks yet)")["state"])
+        self.assertEqual("other", self.activity("starting API call #1")["state"])
+
+    def test_a_row_with_no_description_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            session.ledger(row=True)
+            record = diagnose(session, phase(124, 1080.0, False))
+        self.assertEqual(diagnosis.ACTIVITY_UNAVAILABLE, record["last_persisted_activity"]["state"])
+        self.assertFalse(any(item.startswith("activity description") for item in record["missing_evidence"]))
+
+    def test_a_store_without_the_column_is_named_missing_not_a_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            with sqlite3.connect(session.home / "state.db") as conn:
+                conn.execute(
+                    "CREATE TABLE sessions (id TEXT, started_at REAL, ended_at REAL, end_reason TEXT,"
+                    " api_call_count INTEGER, message_count INTEGER, tool_call_count INTEGER, last_activity_at REAL)"
+                )
+                conn.execute(
+                    "CREATE TABLE messages (id INTEGER, role TEXT, timestamp REAL, tool_name TEXT,"
+                    " finish_reason TEXT, tool_calls TEXT)"
+                )
+                conn.execute(
+                    "CREATE TABLE session_model_usage (model TEXT, billing_provider TEXT, api_call_count INTEGER,"
+                    " reasoning_tokens INTEGER, output_tokens INTEGER, first_seen REAL, last_seen REAL)"
+                )
+                conn.execute("INSERT INTO sessions VALUES ('s1', ?, NULL, NULL, 0, 1, 0, ?)", (LAUNCH + 3, LAUNCH + 3))
+            record = diagnose(session, phase(124, 1080.0, False))
+        self.assertEqual(diagnosis.NO_COMPLETED_MODEL_CALL, record["verdict"])
+        self.assertEqual(diagnosis.ACTIVITY_UNAVAILABLE, record["last_persisted_activity"]["state"])
+        self.assertIn(
+            "activity description: this state.db predates sessions.last_activity_description", record["missing_evidence"]
+        )
+
+    def test_the_summary_prints_the_label_beside_its_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp), transport="stream-json")
+            session.ledger(row=True, activity=(1025.0, "receiving stream response"))
+            lines = diagnosis.summarize(diagnose(session, phase(124, 1080.0, False)))
+        self.assertIn("last activity receiving_chunks at 1025.0s: receiving stream response", lines)
 
 
 class ContainerProvenanceTests(unittest.TestCase):
