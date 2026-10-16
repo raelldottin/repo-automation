@@ -4,6 +4,8 @@
 
 Reusable supervised automation for bounded agent work.
 
+**Architecture direction (proposed):** The project's top layer is a canonical **Hermes Kanban board**, **self-hosted Hindsight external project memory**, and a generated **Swarm Wiki** powered by [hermes-swarm-protocol](https://github.com/raelldottin/hermes-swarm-protocol). The existing supervisor stays beneath this layer and retains sole authority over slice execution and continuation. See [SPEC-001](docs/architecture/control-plane.md) and the [sequenced roadmap](docs/roadmap.md). These are target contracts, not yet implemented integrations. The existing Swarm Wiki requires an upstream source-adapter migration before it can read Hindsight data. The fully open-source, local-inference profile additionally requires owner-approved licenses for both project repositories and audited model/dependency licenses.
+
 `repo-automation` packages a slice-based supervisor harness: queue records, context building, prompt fragments, validation ownership, handoff schemas, and stop rules for keeping AI-assisted repository work scoped and reviewable.
 
 ## What It Provides
@@ -110,4 +112,4 @@ live end-to-end:
 
 ## Status
 
-This repository is the reusable automation distribution extracted from Owlory. The core harness is present; consumer-repository smoke proof is the next hardening step. Treat project-specific examples as templates, not as production configuration.
+This repository is the canonical reusable automation distribution extracted from Owlory. Its existing supervisor harness is present. The P0 Kanban / external-memory / wiki integration is specified but not yet implemented; consumer smoke proof and other roadmap work follow the P0 acceptance gate. Treat project-specific examples as templates, not production configuration.
