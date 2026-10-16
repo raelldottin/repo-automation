@@ -925,6 +925,32 @@ budget, flag or transport. For each session it records the following:
   are `no_turn_start_recorded`, `no_completed_model_call`, `no_tool_call_recorded`,
   `tool_call_without_recorded_result`, `active_until_budget`, `exited_without_artifact`, `completed`, and
   `evidence_unavailable` when there is neither a ledger nor a stream.
+- **`last_persisted_activity`.** This is the session row's `last_activity_description`, its
+  provenance and its offset, plus a `state` read from the description and the `source` it came from:
+  - `receiving_chunks`: chunks were arriving;
+  - `awaiting_first_chunk`: the stream attempt had no chunk yet;
+  - `silent_after_chunks`: chunks had arrived, then stopped;
+  - `reconnecting`: a stale-stream kill, a stream retry, or "no output from provider ... reconnecting";
+  - `retry_backoff`: waiting between attempts (retry, error, empty-response or auto-recovery
+    backoff, API error recovery, "retrying in Ns");
+  - `non_streaming`: waiting on, or killing, a non-streaming call;
+  - `other`: any other description;
+  - `cleared`: the description is `''`. Hermes clears it when the turn exits, including the exit a
+    SIGTERM causes, and a blank wait notice writes `''` too;
+  - `never_persisted`: the description is NULL, so none was ever saved;
+  - `unavailable`: there is no session row, or the store has no such column.
+
+  Hermes clears the label when it handles the budget kill's SIGTERM. So just before signalling, the
+  adapter takes a read-only snapshot of the session row, with a 0.5s timeout, into
+  `<stem>.activity.json`. The diagnosis prefers it (`source: pre_sigterm_snapshot`) over the row
+  left after exit (`state_db_after_exit`). A failed snapshot, or a budget kill without one, is named
+  in `missing_evidence`. The snapshot never raises into the kill.
+
+  Hermes persists the description at most once every 60s, overwrites it, and truncates it to 120
+  characters, so the field is one late sample, never a history. "waiting for stream response (Ns,
+  no chunks yet)" counts as `other`. Despite its wording, Hermes writes it whenever it has been under
+  60s since the last chunk or since the stream opened, so it can't tell you whether a chunk ever
+  arrived. An older `state.db` without the column is named in `missing_evidence`.
 
 The source that makes this work on `--oneshot` is Hermes' own `state.db` in the session's throwaway
 `HERMES_HOME`. It is read read-only, and message content is never copied. At the pinned revision

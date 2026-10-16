@@ -10,6 +10,7 @@ without the artifact, and succeeding.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import tempfile
@@ -30,7 +31,8 @@ RESEARCH_STEM = "20261012T122043Z-3852"
 _SCHEMA = """
 CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL,
     ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0, tool_call_count INTEGER DEFAULT 0,
-    api_call_count INTEGER DEFAULT 0, last_activity_at REAL);
+    api_call_count INTEGER DEFAULT 0, last_activity_at REAL, last_activity_description TEXT,
+    last_activity_provenance TEXT);
 CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL,
     content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL NOT NULL,
     finish_reason TEXT);
@@ -68,14 +70,24 @@ class Session:
     def file(self, suffix: str, text: str) -> None:
         (self.dir / f"{self.stem}{suffix}").write_text(text, encoding="utf-8")
 
-    def ledger(self, *, row: bool = True, calls: int = 0, messages: tuple[tuple[str, float, bool], ...] = ()) -> None:
-        """``messages`` are (role, seconds after launch, carries tool_calls)."""
+    def ledger(
+        self,
+        *,
+        row: bool = True,
+        calls: int = 0,
+        messages: tuple[tuple[str, float, bool], ...] = (),
+        activity: Optional[tuple[float, str]] = None,
+    ) -> None:
+        """``messages`` are (role, seconds after launch, carries tool_calls); ``activity`` is
+        (seconds after launch, the persisted activity description)."""
+        at, description = activity or (3, None)
         with sqlite3.connect(self.home / "state.db") as conn:
             conn.executescript(_SCHEMA)
             if row:
                 conn.execute(
-                    "INSERT INTO sessions (id, source, started_at, api_call_count, last_activity_at) VALUES (?,?,?,?,?)",
-                    ("s1", "cli", LAUNCH + 3, calls, LAUNCH + 3),
+                    "INSERT INTO sessions (id, source, started_at, api_call_count, last_activity_at,"
+                    " last_activity_description, last_activity_provenance) VALUES (?,?,?,?,?,?,?)",
+                    ("s1", "cli", LAUNCH + 3, calls, LAUNCH + at, description, "unknown" if description else None),
                 )
             if calls:
                 conn.execute(
@@ -253,6 +265,247 @@ class MissingEvidenceTests(unittest.TestCase):
             record = diagnose(session, None)
         self.assertIsNone(record["terminated"])
         self.assertEqual(diagnosis.FAILED, record["verdict"])
+
+
+class ActivityDescriptionTests(unittest.TestCase):
+    """The last persisted activity label, verbatim from pinned Hermes ``b6a87db``'s streaming path."""
+
+    def activity(self, description: str, at: float = 1025.0) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp), transport="stream-json")
+            session.ledger(row=True, calls=0, activity=(at, description))
+            return diagnose(session, phase(124, 1080.0, False))["last_persisted_activity"]
+
+    def test_a_stream_still_delivering_chunks_reads_as_receiving(self) -> None:
+        record = self.activity("receiving stream response")
+        self.assertEqual("receiving_chunks", record["state"])
+        self.assertEqual(1025.0, record["at_seconds"])
+        self.assertEqual("receiving stream response", record["description"])
+
+    def test_a_stream_that_never_sent_a_chunk_reads_as_awaiting_the_first(self) -> None:
+        for description in (
+            "waiting for provider response (streaming)",
+            "waiting for stream response (120s, first_chunk)",
+            "⏳ waiting on z-ai/glm-5.3 — 60s waiting for the first stream chunk (auto-reconnect: stream stale watchdog in 120s)",
+        ):
+            with self.subTest(description=description):
+                self.assertEqual("awaiting_first_chunk", self.activity(description)["state"])
+
+    def test_a_stream_that_went_quiet_after_chunks_is_told_apart(self) -> None:
+        for description in (
+            "waiting for stream response (90s, post_chunk)",
+            "⏳ waiting on z-ai/glm-5.3 — stream open; 60s without stream output",
+        ):
+            with self.subTest(description=description):
+                self.assertEqual("silent_after_chunks", self.activity(description)["state"])
+
+    def test_a_stale_stream_or_retry_reads_as_reconnecting(self) -> None:
+        for description in (
+            "stale stream detected after 181s, reconnecting",
+            "stream retry 2/5 after ReadTimeout",
+            "⚠ no output from provider for 181s — reconnecting...",
+        ):
+            with self.subTest(description=description):
+                self.assertEqual("reconnecting", self.activity(description)["state"])
+
+    def test_a_backoff_between_attempts_reads_as_retry_backoff(self) -> None:
+        for description in (
+            "retry backoff (2/3), 30s remaining",
+            "error retry backoff (1/3), 45s remaining",
+            "empty response retry backoff (1/2), 12s remaining",
+            "auto-recovery wait (1/4), 270s remaining",
+            "API error recovery (attempt 2/3)",
+            "⏳ waiting on provider — retrying in 60s (attempt 2/3)",
+        ):
+            with self.subTest(description=description):
+                self.assertEqual("retry_backoff", self.activity(description)["state"])
+
+    def test_a_non_streaming_call_is_told_apart(self) -> None:
+        for description in ("waiting for non-streaming API response", "stale non-streaming call killed after 300s"):
+            with self.subTest(description=description):
+                self.assertEqual("non_streaming", self.activity(description)["state"])
+
+    def test_no_chunks_yet_is_not_read_as_no_chunk_ever(self) -> None:
+        """Hermes writes it under 60s since the last chunk or the stream's opening, so it settles nothing."""
+        self.assertEqual("other", self.activity("waiting for stream response (30s, no chunks yet)")["state"])
+        self.assertEqual("other", self.activity("starting API call #1")["state"])
+
+    def test_a_description_never_persisted_is_not_one_that_was_cleared(self) -> None:
+        """NULL: nothing was ever written. '': the turn's finally - SIGTERM's too - wiped it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            session.ledger(row=True)
+            record = diagnose(session, phase(124, 1080.0, False))
+        self.assertEqual(diagnosis.ACTIVITY_NEVER_PERSISTED, record["last_persisted_activity"]["state"])
+        self.assertEqual("state_db_after_exit", record["last_persisted_activity"]["source"])
+        self.assertFalse(any(item.startswith("activity description") for item in record["missing_evidence"]))
+        self.assertEqual(diagnosis.ACTIVITY_CLEARED, self.activity("")["state"])
+
+    def test_the_pre_sigterm_snapshot_wins_over_the_cleared_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp), transport="stream-json")
+            session.ledger(row=True, activity=(1080.0, ""))
+            row = {
+                "last_activity_at": LAUNCH + 1025,
+                "last_activity_description": "receiving stream response",
+                "last_activity_provenance": "unknown",
+            }
+            session.file(".activity.json", json.dumps({"captured_at": LAUNCH + 1080, "row": row}))
+            record = diagnose(session, phase(124, 1080.0, False))
+        activity = record["last_persisted_activity"]
+        self.assertEqual(
+            ("pre_sigterm_snapshot", "receiving_chunks", 1025.0), (activity["source"], activity["state"], activity["at_seconds"])
+        )
+        self.assertFalse(any(item.startswith("activity snapshot") for item in record["missing_evidence"]))
+
+    def test_a_budget_kill_without_a_snapshot_says_the_label_may_be_gone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            session.ledger(row=True, activity=(1080.0, ""))
+            record = diagnose(session, phase(124, 1080.0, False))
+        self.assertEqual(diagnosis.ACTIVITY_CLEARED, record["last_persisted_activity"]["state"])
+        self.assertTrue(any("SIGTERM may have cleared" in item for item in record["missing_evidence"]))
+
+    def test_a_failed_snapshot_is_named_and_the_row_is_used(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            session.ledger(row=True, activity=(1080.0, ""))
+            session.file(".activity.json", json.dumps({"captured_at": LAUNCH + 1080, "error": "OperationalError: locked"}))
+            record = diagnose(session, phase(124, 1080.0, False))
+        self.assertEqual("state_db_after_exit", record["last_persisted_activity"]["source"])
+        self.assertIn("activity snapshot: OperationalError: locked", record["missing_evidence"])
+
+    def test_a_store_without_the_column_is_named_missing_not_a_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            with sqlite3.connect(session.home / "state.db") as conn:
+                conn.execute(
+                    "CREATE TABLE sessions (id TEXT, started_at REAL, ended_at REAL, end_reason TEXT,"
+                    " api_call_count INTEGER, message_count INTEGER, tool_call_count INTEGER, last_activity_at REAL)"
+                )
+                conn.execute(
+                    "CREATE TABLE messages (id INTEGER, role TEXT, timestamp REAL, tool_name TEXT,"
+                    " finish_reason TEXT, tool_calls TEXT)"
+                )
+                conn.execute(
+                    "CREATE TABLE session_model_usage (model TEXT, billing_provider TEXT, api_call_count INTEGER,"
+                    " reasoning_tokens INTEGER, output_tokens INTEGER, first_seen REAL, last_seen REAL)"
+                )
+                conn.execute("INSERT INTO sessions VALUES ('s1', ?, NULL, NULL, 0, 1, 0, ?)", (LAUNCH + 3, LAUNCH + 3))
+            record = diagnose(session, phase(124, 1080.0, False))
+        self.assertEqual(diagnosis.NO_COMPLETED_MODEL_CALL, record["verdict"])
+        self.assertEqual(diagnosis.ACTIVITY_UNAVAILABLE, record["last_persisted_activity"]["state"])
+        self.assertIn(
+            "activity description: this state.db predates sessions.last_activity_description", record["missing_evidence"]
+        )
+
+    def test_the_summary_prints_the_label_beside_its_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp), transport="stream-json")
+            session.ledger(row=True, activity=(1025.0, "receiving stream response"))
+            lines = diagnosis.summarize(diagnose(session, phase(124, 1080.0, False)))
+        self.assertIn("last activity receiving_chunks at 1025.0s (state_db_after_exit): 'receiving stream response'", lines)
+
+
+class ActivitySnapshotTests(unittest.TestCase):
+    """The read the adapter takes just before SIGTERM, which Hermes answers by clearing the label."""
+
+    def test_the_session_launched_since_is_snapshotted_beside_its_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            session.ledger(row=True, activity=(1025.0, "receiving stream response"))
+            diagnosis.snapshot_activity(session.dir, frozenset())
+            snapshot = json.loads((session.dir / f"{STEM}.activity.json").read_text(encoding="utf-8"))
+        self.assertEqual("receiving stream response", snapshot["row"]["last_activity_description"])
+        self.assertNotIn("error", snapshot)
+
+    def test_sessions_announced_before_launch_are_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            session.ledger(row=True)
+            diagnosis.snapshot_activity(session.dir, frozenset({STEM}))
+            self.assertFalse((session.dir / f"{STEM}.activity.json").exists())
+
+    def test_a_missing_store_is_written_down_not_raised(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            diagnosis.snapshot_activity(session.dir, frozenset())
+            snapshot = json.loads((session.dir / f"{STEM}.activity.json").read_text(encoding="utf-8"))
+        self.assertIn("does not exist", snapshot["error"])
+
+    def test_the_budget_kill_snapshots_before_it_signals(self) -> None:
+        """The real kill path, with a child that clears its label on SIGTERM the way Hermes does.
+
+        The child's handler blanks ``last_activity_description`` and then drops a marker, and the
+        test's ``killpg`` waits for that marker after delivering SIGTERM. So a snapshot taken after
+        the signal reliably reads ``''``, and only one taken before it keeps the label.
+        """
+        import os
+        import signal
+        import sys
+        import time
+        from unittest import mock
+
+        from automation.benchmark import adapter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = Path(tmp) / "sessions"
+            sessions.mkdir()
+            home = Path(tmp) / "home"
+            home.mkdir()
+            database = home / "state.db"
+            with sqlite3.connect(database) as conn:
+                conn.executescript(_SCHEMA)
+                conn.execute(
+                    "INSERT INTO sessions (id, source, started_at, last_activity_at, last_activity_description)"
+                    " VALUES ('s1', 'cli', 1, 2, 'stream retry 1/5 after ReadTimeout')"
+                )
+            cleared = Path(tmp) / "cleared"
+            pid_file = Path(tmp) / "child.pid"
+            controls = sessions / f"{STEM}.controls.json"
+
+            def reap() -> None:
+                """Never leave the child's group running, whichever assertion fails."""
+                with contextlib.suppress(OSError, ValueError):
+                    os.killpg(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+
+            child = Path(tmp) / "child.py"
+            child.write_text(
+                "import json, os, signal, sqlite3, sys, time\n"
+                "def clear(*_):\n"
+                f"    with sqlite3.connect({str(database)!r}) as conn:\n"
+                "        conn.execute(\"UPDATE sessions SET last_activity_description = '',"
+                " last_activity_provenance = 'unknown'\")\n"
+                f"    open({str(cleared)!r}, 'w').close()\n"
+                "    sys.exit(143)\n"
+                "signal.signal(signal.SIGTERM, clear)\n"
+                f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                f"open({str(controls)!r}, 'w').write(json.dumps({{'hermes_home': {str(home)!r}}}))\n"
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            real_killpg = os.killpg
+
+            def killpg_then_await_clear(pgid: int, signum: int) -> None:
+                real_killpg(pgid, signum)
+                deadline = time.monotonic() + 5
+                while signum == signal.SIGTERM and not cleared.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+            env = {"PATH": "/usr/bin:/bin", "REPO_AUTOMATION_HERMES_USAGE_DIR": str(sessions)}
+            try:
+                with mock.patch.object(adapter.os, "killpg", killpg_then_await_clear):
+                    returncode = adapter._subprocess_runner(f"exec {sys.executable} {child}", Path(tmp), env, 2)
+                snapshot = json.loads((sessions / f"{STEM}.activity.json").read_text(encoding="utf-8"))
+                handler_ran = cleared.exists()
+                with contextlib.closing(sqlite3.connect(database)) as conn:
+                    (after_exit,) = conn.execute("SELECT last_activity_description FROM sessions").fetchone()
+            finally:
+                reap()
+        self.assertEqual(124, returncode)
+        self.assertTrue(handler_ran, "the child's SIGTERM handler never ran")
+        self.assertEqual("", after_exit)
+        self.assertEqual("stream retry 1/5 after ReadTimeout", snapshot["row"]["last_activity_description"])
 
 
 class ContainerProvenanceTests(unittest.TestCase):
