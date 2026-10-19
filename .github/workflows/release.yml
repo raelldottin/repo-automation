@@ -1,0 +1,162 @@
+name: Release
+
+# A maintainer pushes a semver tag (vMAJOR.MINOR.PATCH) on a commit already on main.
+# This workflow refuses anything else, reruns the canonical gate, stages exactly the
+# manifest's distributed tree with the consumer sync tool itself, and publishes it.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: make reusable-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync dev dependencies
+        run: uv sync --frozen --python ${{ matrix.python-version }}
+
+      # The same single step lint.yml runs, so a release can never pass a weaker gate.
+      - name: Canonical quality gate
+        run: make reusable-check
+        env:
+          UV_PYTHON: ${{ matrix.python-version }}
+
+  build:
+    name: Stage manifest tree
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.tag.outputs.commit }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Refuse a malformed tag or one not on main
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag $TAG is not semver (vMAJOR.MINOR.PATCH[-prerelease])"
+            exit 1
+          fi
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          commit="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::tag $TAG points at $commit, which is not reachable from origin/main"
+            exit 1
+          fi
+          prerelease=false
+          [[ "$TAG" == *-* ]] && prerelease=true
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync dev dependencies
+        run: uv sync --frozen --python 3.12
+
+      # The consumer import path, with every protection on: pinned commit, origin
+      # identity, clean source, quality gate (run again here, in the checkout being
+      # packaged), runtime check. What lands in the staging directory is by construction
+      # what a consumer's --sync at this commit writes into an empty target.
+      - name: Stage the distributed tree
+        env:
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ steps.tag.outputs.commit }}
+          REMOTE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          origin="$(git remote get-url origin)"
+          if [[ "${origin%.git}" != "$REMOTE" ]]; then
+            echo "::error::checkout origin $origin is not $REMOTE"
+            exit 1
+          fi
+          stage="$RUNNER_TEMP/repo-automation-$TAG"
+          Tools/repo-automation-sync.sh --sync --target "$stage" \
+            --pin "$COMMIT" --expect-remote "$origin" --runtime-python .venv/bin/python
+
+      - name: Build archive and checksum
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          name="repo-automation-$TAG"
+          mtime="$(git log -1 --format=%ct HEAD)"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$mtime" \
+            -C "$RUNNER_TEMP" -cf - "$name" | gzip -n > "dist/$name.tar.gz"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          tar -tzf "dist/$name.tar.gz"
+          cat "dist/$name.tar.gz.sha256"
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          flags=()
+          [[ "$PRERELEASE" == "true" ]] && flags+=(--prerelease)
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$TAG" \
+            --notes "Manifest-owned tree of raelldottin/repo-automation at commit $COMMIT. Consumers sync from this tag; see docs/workflows/repo-automation.md#releases." \
+            "${flags[@]}"

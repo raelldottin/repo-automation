@@ -85,6 +85,36 @@ The sync tool rejects paths outside the repository root and outside the target r
 
 The manifest does not name a destination. It says what is reusable, never where it lands — that is the caller's to state with `--target`, and a manifest carrying `default_target` is rejected. The field used to hold the canonical repository's own path, which was right while Owlory was the source and became a `--sync` away from writing outward the moment the direction flipped.
 
+## Releases
+
+Consumers sync from a release tag, not from whatever `main` happens to be. A release is a semver tag `vMAJOR.MINOR.PATCH` (optionally `-prerelease`) on a commit that is already on `main`. `.github/workflows/release.yml` runs on the tag push and publishes `repo-automation-<tag>.tar.gz` with a `.sha256` beside it.
+
+A maintainer tags, on `main`, after the change has merged through the ruleset. Nothing else creates tags:
+
+```bash
+git fetch origin
+git tag -a v0.1.0 origin/main -m "v0.1.0"
+git push origin v0.1.0
+```
+
+The workflow refuses a tag that is not semver or whose commit is not reachable from `origin/main`. It reruns `make reusable-check` on Python 3.11 and 3.12 exactly as `lint.yml` does, and then stages the archive by running this sync tool's own `--sync` with every protection on (`--pin` set to the tagged commit, `--expect-remote`, a clean source, the quality gate and the runtime check) into an empty directory. The archive is therefore the manifest's distributed tree, byte for byte what a consumer's `--sync` at that commit writes into an empty target. Nothing is listed twice.
+
+What the version means to a consumer:
+
+- **MAJOR**: a consumer has to act. A manifest destination was removed or renamed, a runtime dependency range changed, a sync-tool flag or protection changed, or a schema change breaks existing queue or handoff documents.
+- **MINOR**: new reusable content or capability that an existing consumer can take with a plain `--sync`.
+- **PATCH**: fixes only, with no change to what a consumer must configure.
+
+To verify a release, check the archive against its checksum, then confirm that the tag's commit is the one you pin:
+
+```bash
+gh release download v0.1.0 -R raelldottin/repo-automation
+sha256sum -c repo-automation-v0.1.0.tar.gz.sha256
+git -C <canonical-checkout> rev-parse 'v0.1.0^{commit}'
+```
+
+A consumer still imports through `Tools/repo-automation-sync.sh` from a canonical checkout. It checks out the tag and passes that commit as `--pin`, which is what goes in `automation/repo-automation.lock`. The archive is for inspecting and diffing a release; the sync tool's protections still apply to the import.
+
 ## Sync Contract
 
 Use `Tools/repo-automation-sync.sh` for manifest-owned sync:
