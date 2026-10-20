@@ -88,3 +88,41 @@ An unexplained regression is not evidence of success, and a benchmark that was n
 A benchmark for a registered path belongs in `automation/tests/test_benchmarks.py`, carries `@pytest.mark.benchmark`, and exercises the bundled fixtures in `automation/examples/` rather than consumer repository state.
 
 Every benchmark MUST assert the result it measured. A benchmark that stops exercising its path should fail, not report a faster number.
+
+## GitOps: Changes, Deployment, and Releases
+
+`main` is the only source of deployed or released state. Git history on `main` is the record of what was shipped and why.
+
+### Hard Rule
+
+Every change MUST reach `main` through a pull request whose required checks have passed. Nothing deploys or releases except a workflow running from `main` or from a tag whose commit is on `main`.
+
+### Changes to `main`
+
+The `main` ruleset requires a pull request, the six required checks (`make reusable-check (3.11)`, `make reusable-check (3.12)`, `Tests + coverage comment`, `Run CodSpeed benchmarks`, `No agent attribution trailers`, `Review dependency graph diff`), and linear history, and it forbids force-pushes and deletion. Pull requests merge by squash or rebase. Approving reviews are not required yet.
+
+Agents MUST NOT:
+
+- push directly to `main`, force-push it, or delete it;
+- disable, bypass, or weaken the ruleset or a required check, including by editing a workflow so a check passes without doing its work;
+- merge a pull request whose required checks have not passed.
+
+### Documentation Deployment
+
+The documentation site deploys to GitHub Pages only from `.github/workflows/publish-docs.yml` running on a push to `main`. Agents MUST NOT publish the site any other way, including a manual dispatch from another branch.
+
+### Releases
+
+A release is a `vMAJOR.MINOR.PATCH` tag (optionally `-prerelease`) on a commit already on `main`, built and published by `.github/workflows/release.yml`, which reruns the required gate and publishes the archive and its `.sha256`. The maintainer creates the tag after the change merges.
+
+Agents MUST NOT hand-build, upload, or edit a release asset, and MUST NOT create or move a release tag, unless the maintainer has explicitly authorized that action for that specific tag. Until `release.yml` exists on `main`, no release may be published.
+
+### Consumer Repositories
+
+Consumers receive changes only through `Tools/repo-automation-sync.sh`, driven by `automation/reusable-manifest.json`, from a released tag or a pinned commit. The result lands through a pull request in the consumer repository.
+
+Agents MUST NOT commit or push to a consumer repository on this repository's behalf. Automatic consumer updates, including Owlory, are not implemented.
+
+### Out of Scope
+
+Runtime deployment, including the Hermes runtime and benchmark execution environments, is not covered by this policy.
