@@ -63,12 +63,17 @@ LANE_CEILING_SECONDS = 3300
 # a 300s ceiling with headroom; research and implement get ~43% more than the ceilings they
 # repeatedly hit. A phase kill stays a legitimate outcome - the point is that it should
 # report a treatment that ran out of road, not a budget that was never wide enough.
+#
+# Plan then moved 300 seconds over from implement. On GLM-5.3 the plan phase never finished
+# inside 300 (1080s at the 3.6x calibration scale): run 38877265488 completed its first plan
+# call at 775.8s and was killed mid-work, and three earlier plan sessions completed none.
+# The sum stays at LANE_CEILING_SECONDS so D and E still fit their instance budget.
 PHASE_CEILING_SECONDS: dict[str, int] = {
     "research": 600,
     "research_compact": 300,
-    "plan": 300,
+    "plan": 600,
     "plan_compact": 300,
-    "implement": 1800,
+    "implement": 1500,
 }
 
 RESEARCH_ARTIFACT = "research.json"
