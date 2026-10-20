@@ -1204,6 +1204,50 @@ class PlanProbeTests(unittest.TestCase):
         self.assertEqual(("plan", 7, "evidence_unavailable"), (diagnosis["phase"], diagnosis["pid"], diagnosis["verdict"]))
         self.assertIn("event stream: empty - not even system/init was flushed", diagnosis["missing_evidence"])
 
+    def test_research_keeps_its_observed_captures_and_plan_is_seeded_with_them(self) -> None:
+        """Run 38877265488's plan spent its last turns regenerating captures research had saved."""
+        from automation.benchmark.probe import run_probe
+
+        def research_runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+            observed = workspace / ".rpi" / "observed"
+            observed.mkdir(parents=True)
+            (workspace / ".rpi" / "research.json").write_text(json.dumps(self.RESEARCH), encoding="utf-8")
+            (observed / "usage_h.txt").write_text("Usage: cmatrix", encoding="utf-8")
+            (observed / "deeper").mkdir()
+            Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+            return 0
+
+        seen: dict[str, object] = {}
+
+        def plan_runner(_command: str, workspace: Path, env, _timeout: int) -> int:
+            seen["observed"] = sorted(p.name for p in (workspace / ".rpi" / "observed").iterdir())
+            Path(env["REPO_AUTOMATION_HERMES_USAGE_DIR"]).mkdir(parents=True, exist_ok=True)
+            return 0
+
+        with tempfile.TemporaryDirectory() as raw:
+            research_out = Path(raw) / "probe-research"
+            research = run_probe(
+                self.INSTANCE, research_out, repo_root=REPO_ROOT, budget_seconds=30, runner=research_runner, cleanroom=False
+            )
+            # One level only, under the same guards: a directory inside observed/ is skipped and named.
+            self.assertIn("observed/usage_h.txt", research["rpi"]["copied"])
+            self.assertEqual(["observed/deeper"], research["rpi"]["skipped_non_files"])
+            self.assertTrue((research_out / "rpi" / "observed" / "usage_h.txt").is_file())
+
+            plan = run_probe(
+                self.INSTANCE,
+                Path(raw) / "probe",
+                repo_root=REPO_ROOT,
+                budget_seconds=30,
+                runner=plan_runner,
+                cleanroom=False,
+                phase="plan",
+                research_artifact=research_out / "rpi" / "research.json",
+            )
+
+        self.assertEqual(["usage_h.txt"], seen["observed"])
+        self.assertEqual(["usage_h.txt"], plan["research_input"]["observed"])
+
     def test_an_exit_0_is_completed_only_when_the_owed_artifact_is_valid(self) -> None:
         """run_phase leaves artifact_valid unset; the probe must judge it before the diagnosis does."""
         from automation.benchmark.probe import run_probe
