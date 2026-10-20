@@ -29,6 +29,7 @@ from automation.tests.test_benchmark_effectiveness import StubWitness, _fake_pre
 from automation.benchmark.probe import STREAM_JSON_SUFFIX, artifact_mentions, summarize, timeline
 from automation.benchmark.strategies import (
     AGENT_TIMEOUT_RETURNCODE,
+    PHASE_CEILING_SECONDS,
     PHASE_CENSORED,
     ExecutionContext,
     research_prompt,
@@ -1198,7 +1199,7 @@ class PlanProbeTests(unittest.TestCase):
         self.assertEqual("plan.json", record["artifact"]["filename"])
         self.assertFalse(record["artifact"]["present"])
         self.assertEqual(64, len(record["research_input"]["sha256"]))
-        self.assertEqual(300, record["budget_seconds"])
+        self.assertEqual(PHASE_CEILING_SECONDS["plan"], record["budget_seconds"])
         [diagnosis] = record["diagnosis"]
         self.assertEqual(("plan", 7, "evidence_unavailable"), (diagnosis["phase"], diagnosis["pid"], diagnosis["verdict"]))
         self.assertIn("event stream: empty - not even system/init was flushed", diagnosis["missing_evidence"])

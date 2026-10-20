@@ -643,9 +643,9 @@ is part of the treatment:
 |---|---:|:-:|:-:|:-:|
 | `research` | 600 | ✓ | ✓ | ✓ |
 | `research_compact` | 300 | – | ✓ | ✓ |
-| `plan` | 300 | ✓ | ✓ | ✓ |
+| `plan` | 600 | ✓ | ✓ | ✓ |
 | `plan_compact` | 300 | – | ✓ | ✓ |
-| `implement` | 1800 | ✓ | ✓ | ✓ |
+| `implement` | 1500 | ✓ | ✓ | ✓ |
 
 The ceilings are written against a 3300-second lane; a different `--timeout` scales them
 proportionally. Lanes A and B are one session and get the whole instance budget. C spends
@@ -657,6 +657,12 @@ multi-phase lanes, `implement` hit its 1260-second ceiling in two of three, and 
 killed before it wrote `compile.sh` and scored `compile_failed`. The phases that finished
 peaked near 229 seconds (`plan`) and 202 seconds (compaction), so 300 leaves both room;
 `research` and `implement` get about 43% more than the ceilings they kept hitting.
+
+`plan` later took 300 seconds from `implement`, keeping the 3300 total. On GLM-5.3 no plan
+session finished inside 300 seconds, scaled to 1080 at the 3.6x calibration timeout: run
+38877265488 completed its first plan call at 775.8 seconds and was killed mid-work, and the
+three plan sessions before it completed none. At `--timeout 11880` plan now gets 2160
+seconds and implement 5400.
 
 Two things follow, and both were bought the hard way. Implement keeps its allowance no
 matter how greedy research is: run 35650966066 handed each phase the whole remainder, lane
