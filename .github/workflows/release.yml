@@ -17,8 +17,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Cheap and first, so a malformed tag is refused before the gate matrix spends a run on it.
+  semver:
+    name: Refuse a malformed tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require vMAJOR.MINOR.PATCH[-prerelease]
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag $TAG is not semver (vMAJOR.MINOR.PATCH[-prerelease])"
+            exit 1
+          fi
+
   gate:
     name: make reusable-check
+    needs: semver
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -61,15 +77,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Refuse a malformed tag or one not on main
+      - name: Refuse a tag not on main
         id: tag
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::tag $TAG is not semver (vMAJOR.MINOR.PATCH[-prerelease])"
-            exit 1
-          fi
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           commit="$(git rev-parse HEAD)"
           if ! git merge-base --is-ancestor "$commit" origin/main; then
@@ -103,13 +115,14 @@ jobs:
           REMOTE: ${{ github.server_url }}/${{ github.repository }}
         run: |
           origin="$(git remote get-url origin)"
-          if [[ "${origin%.git}" != "$REMOTE" ]]; then
+          # Exact, because the sync tool's own --expect-remote check below is exact too.
+          if [[ "$origin" != "$REMOTE" ]]; then
             echo "::error::checkout origin $origin is not $REMOTE"
             exit 1
           fi
           stage="$RUNNER_TEMP/repo-automation-$TAG"
           Tools/repo-automation-sync.sh --sync --target "$stage" \
-            --pin "$COMMIT" --expect-remote "$origin" --runtime-python .venv/bin/python
+            --pin "$COMMIT" --expect-remote "$REMOTE" --runtime-python .venv/bin/python
 
       - name: Build archive and checksum
         env:
