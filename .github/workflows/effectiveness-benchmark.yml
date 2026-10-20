@@ -517,5 +517,6 @@ jobs:
             out/probe/agent-sessions/*.stream.jsonl
             out/probe/agent-sessions/*.controls.json
             out/probe-research/probe.json
+            out/**/rpi/observed/*
             out/probe-research/agent-sessions/*.controls.json
           if-no-files-found: warn

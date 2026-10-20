@@ -97,6 +97,9 @@ LEDGER_TABLE = "session_model_usage"
 PROBE_FILENAME = "probe.json"
 # Where the workspace's .rpi artifacts are kept once they belong to the run directory.
 PROBE_RPI_DIRNAME = "rpi"
+# Command captures research saves beside research.json. A lane's plan session inherits them
+# in the shared workspace, so the plan probe seeds them too.
+OBSERVED_DIRNAME = "observed"
 # The phase the campaign is stuck on, at the ceiling the campaign gives it.
 PROBE_PHASE = "research"
 PROBE_BUDGET_SECONDS = PHASE_CEILING_SECONDS[PROBE_PHASE]
@@ -343,6 +346,7 @@ def run_probe(
         raise ValueError("the plan phase needs --research-artifact, and only the plan phase takes one")
     research_bytes = b""
     research_data: Any = None
+    observed_inputs: list[Path] = []
     if research_artifact is not None:
         research_bytes = Path(research_artifact).read_bytes()
         try:
@@ -352,6 +356,11 @@ def run_probe(
         errors = RESEARCH_SPEC.validate(research_data)
         if errors:
             raise ValueError(f"{research_artifact} would stop a lane before plan: {errors}")
+        observed_dir = Path(research_artifact).parent / OBSERVED_DIRNAME
+        if observed_dir.is_dir() and not observed_dir.is_symlink():
+            observed_inputs = [
+                capture for capture in sorted(observed_dir.iterdir()) if capture.is_file() and not capture.is_symlink()
+            ]
     if budget_seconds is None:
         budget_seconds = PHASE_CEILING_SECONDS[phase]
     artifact_filename, artifact_spec = PHASE_ARTIFACTS[phase]
@@ -417,6 +426,12 @@ def run_probe(
         seeded = workspace / RPI_DIR / RESEARCH_ARTIFACT
         seeded.parent.mkdir(parents=True, exist_ok=True)
         seeded.write_bytes(research_bytes)
+        # And the captures research saved with it, which a lane's plan finds in the same
+        # workspace. Without them plan spent its last turns of run 38877265488 re-running the
+        # reference binary to regenerate what research had already recorded.
+        for capture in observed_inputs:
+            (seeded.parent / OBSERVED_DIRNAME).mkdir(exist_ok=True)
+            (seeded.parent / OBSERVED_DIRNAME / capture.name).write_bytes(capture.read_bytes())
 
     ctx = ExecutionContext(
         repo_root=Path(repo_root),
@@ -467,26 +482,21 @@ def run_probe(
             raise FileExistsError(f"refusing to overwrite pre-existing probe output: {destination}") from None
         try:
             for artifact in sorted(rpi_source.iterdir()):
-                # Skipped rather than refused, both here and above: refusing would let a
-                # session halt its own diagnostic by leaving a link or a directory behind.
-                # One predicate, because the two cases differ only in which call reveals
-                # them: a hard link is not a symlink and is_file() is True for it, so it
-                # would be copied out and listed under `copied` as though the session had
-                # written it. That launders host bytes into the evidence - the record would
-                # assert a clean collection of something the session never produced.
-                # `is_file()` guards the link count because a directory's own entries give
-                # it st_nlink >= 2; only a regular file with more than one name is a hard link.
-                if artifact.is_symlink() or (artifact.is_file() and artifact.lstat().st_nlink > 1):
-                    skipped_links.append(artifact.name)
+                if artifact.name == OBSERVED_DIRNAME and artifact.is_dir() and not artifact.is_symlink():
+                    # One level of the captures research saves, so plan can be probed on the
+                    # workspace a lane hands it. Same guards, one directory down; nothing deeper.
+                    (destination / OBSERVED_DIRNAME).mkdir()
+                    for capture in sorted(artifact.iterdir()):
+                        _collect_entry(
+                            capture,
+                            destination / OBSERVED_DIRNAME,
+                            f"{OBSERVED_DIRNAME}/",
+                            copied,
+                            skipped_links,
+                            skipped_non_files,
+                        )
                     continue
-                if not artifact.is_file():
-                    # read_bytes() on a directory raised mid-loop, and the cleanup below then
-                    # removed everything already collected - a session could destroy its own
-                    # evidence with one `mkdir`.
-                    skipped_non_files.append(artifact.name)
-                    continue
-                destination.joinpath(artifact.name).write_bytes(artifact.read_bytes())
-                copied.append(artifact.name)
+                _collect_entry(artifact, destination, "", copied, skipped_links, skipped_non_files)
         except BaseException:
             shutil.rmtree(destination, ignore_errors=True)
             raise
@@ -522,6 +532,7 @@ def run_probe(
                 "path": str(research_artifact),
                 "sha256": hashlib.sha256(research_bytes).hexdigest(),
                 "chars": len(research_bytes.decode("utf-8", errors="replace")),
+                "observed": [capture.name for capture in observed_inputs],
             }
             if research_artifact is not None
             else None
@@ -598,6 +609,36 @@ def run_probe(
     except FileExistsError:
         raise FileExistsError(f"refusing to overwrite pre-existing probe output: {record_path}") from None
     return record
+
+
+def _collect_entry(
+    artifact: Path,
+    destination: Path,
+    prefix: str,
+    copied: list[str],
+    skipped_links: list[str],
+    skipped_non_files: list[str],
+) -> None:
+    """Copy one regular file the session wrote, or record why it was not copied."""
+    # Skipped rather than refused: refusing would let a session halt its own diagnostic by
+    # leaving a link or a directory behind. One predicate, because the two cases differ only
+    # in which call reveals them: a hard link is not a symlink and is_file() is True for it,
+    # so it would be copied out and listed under `copied` as though the session had written
+    # it. That launders host bytes into the evidence - the record would assert a clean
+    # collection of something the session never produced. `is_file()` guards the link count
+    # because a directory's own entries give it st_nlink >= 2; only a regular file with more
+    # than one name is a hard link.
+    if artifact.is_symlink() or (artifact.is_file() and artifact.lstat().st_nlink > 1):
+        skipped_links.append(prefix + artifact.name)
+        return
+    if not artifact.is_file():
+        # read_bytes() on a directory raised mid-loop, and the caller's cleanup then removed
+        # everything already collected - a session could destroy its own evidence with one
+        # `mkdir`.
+        skipped_non_files.append(prefix + artifact.name)
+        return
+    destination.joinpath(artifact.name).write_bytes(artifact.read_bytes())
+    copied.append(prefix + artifact.name)
 
 
 def _rendered(names: list[str]) -> str:
