@@ -8,7 +8,7 @@ way from Owlory into this repo via `Tools/repo-automation-sync.sh`.
 ## Architecture and roadmap
 
 - [SPEC-001: Kanban, self-hosted Hindsight and Swarm Wiki](architecture/control-plane.md) — proposed top-layer authority, integration boundaries and acceptance gates.
-- [Roadmap](roadmap.md) — P0 discovery and adapters before resuming the existing supervisor/effectiveness roadmap.
+- [Roadmap](roadmap.md) — P0 discovery and adapters before resuming the existing supervisor roadmap; benchmark/effectiveness work continues in parallel under explicit owner authorization.
 
 The current JSON queue and supervisor behavior remain operational until an explicitly reviewed Kanban cutover. The Swarm Wiki also needs an upstream Hindsight adapter; see the [open-source and compatibility gates](architecture/control-plane.md). The repo ships no live fleet board, Hindsight tree or wiki datastore.
 

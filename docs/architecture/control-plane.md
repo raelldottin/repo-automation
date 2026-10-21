@@ -1,14 +1,14 @@
 # SPEC-001: Kanban, external memory, and Swarm Wiki control plane
 
 Status: **proposed architecture; not a claim of runtime implementation**  
-Priority: **P0 prerequisite for subsequent repo-automation roadmap execution**  
+Priority: **P0 for the control-plane and supervisor roadmap.** Benchmark/effectiveness work is exempt from this ordering and continues in parallel under explicit owner authorization; see the [roadmap](../roadmap.md#ordering-decision).  
 Authority: This document defines the target deployment architecture. Existing supervisor queue behavior remains operative until a reviewed, tested cutover.
 
 ## Decision
 
 The top-level project interface MUST provide three cooperating surfaces:
 
-1. **Kanban board** — canonical human/agent-visible work state: tasks, assignment, priority, dependencies, progress, attempts, review and final disposition. Prefer the installed **Hermes Kanban** implementation; do not build a second scheduler or board database merely to satisfy the UI requirement.
+1. **Kanban board** — canonical human/agent-visible work state: tasks, assignment, priority, dependencies, progress, attempts, review and final disposition. The target implementation is **Hermes Kanban**; this distribution does not ship or require an installed board today. Do not build a second scheduler or board database merely to satisfy the UI requirement.
 2. **External memory** — self-hosted, durable and project-isolated agent knowledge beyond chat/process lifetimes. Use **[Hindsight](https://github.com/vectorize-io/hindsight)** (MIT) as the canonical target backend. Its retain, recall and reflect APIs operate on project-scoped memory banks. Memory is not the queue, an evidence registry or execution authority.
 3. **Swarm Wiki** — navigable, versioned, rebuildable synthesis of decisions, claims, evidence, open questions, changes and history. Prefer the existing [hermes-swarm-protocol](https://github.com/raelldottin/hermes-swarm-protocol) compiler and published records rather than another wiki database. Wiki pages are generated projections, not authoritative work state or independent proof.
 
@@ -16,29 +16,27 @@ These are three **logical responsibilities**, not necessarily three servers. The
 
 ```text
                     TOP LAYER: operator / agent navigation
-              +----------------+-----------------------+
-              | Kanban board   | Swarm Wiki (read-only)|
-              | work authority | derived audit / docs  |
-              +-------+--------+-----------+-----------+
-                      |                    ^
-              +-------v--------------------+-----------+
-              | External memory: Hindsight             |
-              | project-scoped bank; retain/recall/reflect       |
-              +------------------+---------------------+
-                                 |
-            explicit task/knowledge/evidence references
-                                 |
-              +------------------v---------------------+
-              | repo-automation deterministic supervisor|
-              | queue projection, policy, context, gates|
-              +------------------+---------------------+
-                                 |
-              fresh bounded runner (Hermes/Claude/Codex)
-                                 |
-              JSON handoff + immutable live evidence
+
+  +----------------------+  +----------------------+  +----------------------+
+  | Kanban board         |  | External memory:     |  | Swarm Wiki           |
+  | canonical work state |  | Hindsight bank       |  | generated, read-only |
+  +----------+-----------+  +----------+-----------+  +----------^-----------+
+             |                         |                         |
+     read-only slice         bounded, source-        board + memory snapshots,
+     projection              attributed recall       immutable evidence
+             |                         |                         |
+  +----------v-------------------------v----------+              |
+  | repo-automation deterministic supervisor      |              |
+  | sole authority: eligibility, policy,          |              |
+  | context, gates, continuation                  |              |
+  +-----------------------+-----------------------+              |
+                          |                                      |
+     fresh bounded runner (Hermes/Claude/Codex)                  |
+                          |                                      |
+       JSON handoff + immutable live evidence -------------------+
 ```
 
-The diagram depicts navigation and data flow, **not** permission for memory or the Wiki to schedule tasks. Canonical board records and immutable original evidence feed the wiki compiler. A reviewed Hindsight export/snapshot adapter supplies knowledge references; the compiler must not use unsourced model recollection as canonical proof. There is no required live LLM call to render the wiki.
+The diagram depicts navigation and data flow, **not** permission for memory or the Wiki to schedule tasks. Kanban feeds the supervisor directly through the deterministic read-only slice projection defined in contract A; memory supplies bounded context only, and nothing flows from the Wiki back into the supervisor or the board. Canonical board records and immutable original evidence feed the wiki compiler. A reviewed Hindsight export/snapshot adapter supplies knowledge references; the compiler must not use unsourced model recollection as canonical proof. There is no required live LLM call to render the wiki.
 
 ## Ownership and precedence
 
@@ -48,7 +46,7 @@ The diagram depicts navigation and data flow, **not** permission for memory or t
 | Curated requirements, design knowledge, prior solutions, uncertainties | Hindsight per-project memory bank | Treating recalled prose as a verified test or executable instruction |
 | Claim/evidence/decision publications and cross-agent request/verify/route | Swarm protocol records on canonical Kanban comments and immutable captures | Unverified conclusions or a parallel coordination database |
 | Human-readable synthesis and searchable wiki pages | One deterministic Swarm Wiki compiler | Workers directly editing generated output or compiler mutating upstream stores |
-| Slice eligibility, allowed paths, diff budgets, validation tiers, run/handoff verification, next-run decision | repo-automation supervisor | Recursive worker spawning, retrospective invented evidence, model-driven overriding of gates |
+| Slice eligibility, allowed paths, diff budgets, validation tiers, run/handoff verification, next-run decision | repo-automation supervisor | Workers self-chaining the next slice (supervisor-controlled sub-agents are proposed, not implemented), retrospective invented evidence, model-driven overriding of gates |
 | Source code, tests, commit provenance | Consumer repository at pinned Git identity | Storing credentials or live source-of-truth artifacts in the generated wiki |
 
 Precedence during an incident: **original live evidence and committed source + canonical Kanban records > reviewed Hindsight knowledge > generated wiki text**. A wiki discrepancy is a lint finding, never an automatic board mutation. A pass requires independent scope-matched non-memory live evidence. Keep `swarm_verify`'s inspect → evidence receipt → commit discipline and deterministic `swarm_route`; unresolved destinations fail closed.
@@ -85,8 +83,9 @@ Precedence during an incident: **original live evidence and committed source + c
 
 ### D. Supervisor and worker boundary
 
-- Preserve fresh-process workers and interchangeable `agent_command_template` runners. The originating-harness invariant from PR #68 remains binding; headless invocations must name a runner explicitly.
+- Preserve fresh-process workers and interchangeable `agent_command_template` runners. The originating-harness invariant from raelldottin/repo-automation#68 remains binding; headless invocations must name a runner explicitly.
 - Preserve independent validation replay, scope and diff gates, provenance, clean Git stops, and supervisor-only continuation. Kanban, Hindsight and wiki integrations are **adapters**, not a new agent framework.
+- Delegation has two kinds. *Agent-native delegation* is available today: a runner such as Claude Code may launch its own sub-agents inside one slice run, and the supervisor neither manages nor sees them. *Supervisor-controlled delegation* (the supervisor assigning sub-agents with explicit permissions, budgets, dependencies and verification) is proposed by this specification and not implemented. Neither kind may self-chain: no worker or sub-agent starts the next slice.
 - A worker may author code/evidence and recommend adjacent work; it cannot authorize its own next slice, mark itself independently verified, bypass a board lock, or route to a guessed identity.
 - Consumer repositories own their board mappings, bank isolation and snapshots, wiki output, domain policy and queue/handoff artifacts. `repo-automation` ships reusable contracts/adapters and acceptance fixtures, not private live fleet state.
 
@@ -95,9 +94,9 @@ Precedence during an incident: **original live evidence and committed source + c
 **Goal: all required production/runtime components must be auditable and redistributable under an OSI-approved open-source software license, with locally runnable model inference.** Free services, openly available weights and open-source client libraries alone do not establish this.
 
 - Hindsight core is MIT licensed; Hermes Agent is MIT licensed. Verify the licenses and bundled component obligations of **all** pinned distributions, images, model runtimes, embedding models, rerankers, database extensions, UI assets and transitive dependencies.
-- **As checked on 2026-10-11, `repo-automation` and `hermes-swarm-protocol` do not expose a root LICENSE file or GitHub-detected license.** Public source does not by itself grant open-source rights. Add an **owner-approved SPDX/OSI license** (MIT is compatible with the upstream Hindsight core, but choose deliberately) to each original project after attribution/contributor review, and document bundled third-party notices. Do not assert full-stack OSS completion until audited.
+- **As of 2026-10-11, `repo-automation` and `hermes-swarm-protocol` did not expose a root LICENSE file or GitHub-detected license.** Re-check before relying on this statement; it records a point-in-time observation, not a permanent property. Public source does not by itself grant open-source rights. Choosing a license is an **owner decision**; once the owner approves an SPDX/OSI license (MIT is compatible with the upstream Hindsight core) after attribution/contributor review, add it to each original project. `repo-automation` already records adapted third-party material in [`THIRD-PARTY-NOTICES.md`](https://github.com/raelldottin/repo-automation/blob/main/THIRD-PARTY-NOTICES.md); extend that file rather than starting a new one. Do not assert full-stack OSS completion until audited.
 - The production reference deployment uses self-hosted Hindsight, an open-source database/container/runtime, verified open-license model weights and local inference/embeddings/reranking. No mandatory Hindsight Cloud, proprietary IDE, commercial agent model, managed inference endpoint, gated registry, paid proprietary telemetry or Docker Desktop-only dependency. Hardware/energy/operations may still cost money.
-- Claude Code and proprietary hosted models are permitted as **optional external development tools**, never as mandatory components of the **fully open-source runtime profile**. The independently administered NVIDIA `z-ai/glm-5.3` effectiveness benchmark is outside that production profile and stays frozen unless separately authorized. A source release and a fully self-hosted runtime are two different claims; verify both separately.
+- Claude Code and proprietary hosted models are permitted as **optional external development tools**, never as mandatory components of the **fully open-source runtime profile**. The independently administered NVIDIA `z-ai/glm-5.3` effectiveness benchmark is outside that production profile; it is exempt from the P0 ordering and continues in parallel under explicit owner authorization, with any model, provider or budget change still needing its own approval. A source release and a fully self-hosted runtime are two different claims; verify both separately.
 - Model licensing, export/import rights, data provenance, source-code license files, SBOM, dependency policy and egress tests are release gates, not assumptions inferred from a vendor pricing page.
 
 ## Migration and compatibility
@@ -107,9 +106,9 @@ Precedence during an incident: **original live evidence and committed source + c
 3. **Shadow compare:** compare projected slices against the live JSON queue; additionally snapshot prior ByteRover records, migrate test knowledge through the reviewed Hindsight retain API, audit counts, lineage, loss, conflicting timestamps and independently recall sampled evidence. Preserve ByteRover originals as read-only history during transition; no implicit one-to-one equivalence between knowledge nodes and memory records.
 4. **Authorized cutover:** back up and pin state, approve upstream Swarm Wiki compatibility PR and source migration; verify idempotent one-writer status reconciliation before enabling board-driven intake and Hindsight as canonical memory per consumer. Roll back all three adapters independently and preserve historical data. The cutover is a separately reviewed PR/deployment.
 5. **Canary and scale:** run a bounded scoped canary per project/profile using public Kanban/Swarm/Hindsight interfaces; independently verify retain/recall/reflect behavior and wiki snapshot export, forbidden cross-bank access, lossless backup/recovery, network outages and zero external inference. Preserve old history.
-6. **Resume roadmap:** only after the top-layer acceptance gate passes, proceed to remaining supervisor hardening, consumer smoke proofs and effectiveness calibration as laid out in [the roadmap](../roadmap.md).
+6. **Resume roadmap:** only after the top-layer acceptance gate passes, proceed to remaining supervisor hardening and consumer smoke proofs as laid out in [the roadmap](../roadmap.md). Effectiveness calibration is not gated on this step; it continues in parallel under explicit owner authorization.
 
-Existing CI/cleanroom benchmark experiments remain isolated: do not connect them to live boards, memory stores or wiki infrastructure. The pinned NVIDIA/`z-ai/glm-5.3` effectiveness experiment and phase-budget decisions are not changed by this specification.
+Existing CI/cleanroom benchmark experiments remain isolated: do not connect them to live boards, memory stores or wiki infrastructure. The pinned NVIDIA/`z-ai/glm-5.3` effectiveness experiment and phase-budget decisions are not changed by this specification, and the experiment is not paused by it.
 
 ## Acceptance gate (all required)
 
@@ -123,10 +122,9 @@ Existing CI/cleanroom benchmark experiments remain isolated: do not connect them
 ## Source references
 
 - [hermes-swarm-protocol README](https://github.com/raelldottin/hermes-swarm-protocol/blob/main/README.md)
-- [Swarm Wiki design and ownership](https://github.com/raelldottin/hermes-swarm-protocol/blob/main/docs/swarm-wiki-design.md)
+- [Swarm Wiki design and ownership, including the current ByteRover coupling (migration source)](https://github.com/raelldottin/hermes-swarm-protocol/blob/main/docs/swarm-wiki-design.md)
 - [Swarm Wiki operations](https://github.com/raelldottin/hermes-swarm-protocol/blob/main/docs/swarm-wiki-usage.md)
 - [Fleet rollout and canary gates](https://github.com/raelldottin/hermes-swarm-protocol/blob/main/docs/swarm-wiki-fleet-rollout.md)
 - [Hindsight repository and MIT license](https://github.com/vectorize-io/hindsight)
 - [Hindsight API configuration (local Ollama, local embeddings and reranker)](https://github.com/vectorize-io/hindsight/blob/main/skills/hindsight-docs/references/developer/configuration.md)
 - [Hindsight local MCP and bank mapping](https://github.com/vectorize-io/hindsight/blob/main/hindsight-docs/docs-integrations/local-mcp.md)
-- [Existing Swarm Wiki ByteRover coupling (migration source)](https://github.com/raelldottin/hermes-swarm-protocol/blob/main/docs/swarm-wiki-design.md)
