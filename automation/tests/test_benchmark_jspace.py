@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Generator, Optional
 
 from automation.benchmark import jspace
 from automation.benchmark.jspace import JSpaceUnavailable
@@ -30,7 +30,7 @@ def _git(root: Path, *args: str) -> str:
 
 
 @contextmanager
-def checkout(text: str = SKILL_TEXT, artifact: str = ARTIFACT_PATH) -> Iterator[tuple[Path, Path]]:
+def checkout(text: str = SKILL_TEXT, artifact: str = ARTIFACT_PATH) -> Generator[tuple[Path, Path], None, None]:
     """A Git checkout holding ``text``, plus a lock file pinned to it. Yields (root, lock)."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "checkout"
@@ -171,7 +171,7 @@ class ShippedLockTests(unittest.TestCase):
 
 
 @contextmanager
-def unset_root(value: Optional[str] = None) -> Iterator[None]:
+def unset_root(value: Optional[str] = None) -> Generator[None, None, None]:
     previous = os.environ.get(jspace.ROOT_ENV_VAR)
     if value is None:
         os.environ.pop(jspace.ROOT_ENV_VAR, None)
