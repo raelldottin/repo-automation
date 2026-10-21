@@ -32,7 +32,7 @@ jobs:
         run: uv sync --frozen --python 3.12
 
       - name: Run CodSpeed benchmarks
-        uses: CodSpeedHQ/action@v4
+        uses: CodSpeedHQ/action@v5
         with:
           mode: simulation
           run: uv run --frozen pytest automation/tests/test_benchmarks.py --codspeed
