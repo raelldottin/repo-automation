@@ -38,8 +38,12 @@ from automation.benchmark.strategies import (
     RpiStrategy,
     agent_workspace_for,
     build_strategy,
+    _CHECKPOINT_TAIL,
+    _PLAN_CHECKPOINT,
+    _RESEARCH_CHECKPOINT,
     plan_prompt,
     read_artifact,
+    research_prompt,
     workspace_instruction,
 )
 from automation.supervisor.run_next import render_prompt
@@ -388,11 +392,100 @@ class RequiredArtifactTests(unittest.TestCase):
         self.assertIn("as your first tool action, before any investigative command", flat)
         self.assertIn("never make more than three investigative tool calls", flat)
         self.assertIn("Your chat response does not count as a checkpoint", flat)
-        # Scoped to research on purpose: the same bound in a later phase would interrupt
-        # every third edit to rewrite a summary.
-        for phase in ("plan", "implement"):
+        # Scoped away from implement on purpose: the same bound there would interrupt every
+        # third edit to rewrite a summary.
+        self.assertNotIn("## Checkpoint protocol", agent.prompt_for("implement"))
+        self.assertNotIn("three tool calls", " ".join(agent.prompt_for("implement").split()))
+
+    def test_the_research_protocol_is_byte_for_byte_what_it_was(self) -> None:
+        """Plan's protocol shares research's tail; sharing it must not have moved research.
+
+        The golden is origin/main's rendered section at 5abf2b4, so a research result before
+        the plan protocol landed stays comparable with one after it.
+        """
+        path = f"{RPI_DIR}/{RESEARCH_ARTIFACT}"
+        golden = (
+            "## Checkpoint protocol\n\n"
+            f"Create `{path}` as your first tool action, before any investigative command.\n"
+            "Treat the artifact as the durable research record, not a final report.\n\n"
+            "Whenever a tool result changes any finding, constraint, unknown, risk, or piece of evidence:\n\n"
+            f"1. update `{path}` before issuing another investigative tool call;\n"
+            "2. keep the file schema-valid at every update.\n\n"
+            "You may batch closely related observations, but never make more than three investigative tool\n"
+            "calls without writing an updated artifact.\n\n"
+            "Before starting a command that may block, wait, invoke an interactive program, or consume\n"
+            "substantial time, checkpoint everything you have learned so far. If a command fails or times out\n"
+            "in a way that changes what you know, checkpoint that failure or uncertainty before trying\n"
+            "something else.\n\n"
+            "Your chat response does not count as a checkpoint. Information that exists only in the\n"
+            "conversation is lost at the end of this phase.\n"
+        )
+        self.assertEqual(golden, _RESEARCH_CHECKPOINT.format(path=path))
+        self.assertTrue(research_prompt(TASK).endswith(golden))
+
+
+class PlanCheckpointProtocolTests(unittest.TestCase):
+    """Run 39556002331: plan worked for 1747s and banked only the empty initial checkpoint.
+
+    Eight tool calls, 29652 reasoning tokens, killed still streaming at 2160s, and plan.json
+    was `goal` "" with every list empty, so implement never ran. Research had the same failure
+    in run 37420620542 and the same remedy; these pin that plan now carries it.
+    """
+
+    def _protocol(self, prompt: str) -> str:
+        self.assertIn("## Checkpoint protocol", prompt)
+        return " ".join(prompt.split("## Checkpoint protocol", 1)[1].split())
+
+    def test_the_plan_prompt_demands_a_real_goal_right_after_reading_research(self) -> None:
+        plan = f"{RPI_DIR}/{PLAN_ARTIFACT}"
+        protocol = self._protocol(plan_prompt(TASK))
+        self.assertIn(f"Read `{RPI_DIR}/{RESEARCH_ARTIFACT}` first.", protocol)
+        self.assertIn(
+            f"before any further exploration or deliberation, write `{plan}` with a non-empty `goal` "
+            "and a first-cut `implementation_steps`, however rough",
+            protocol,
+        )
+        self.assertIn(f"rewrite `{plan}` in full before issuing another tool call", protocol)
+        self.assertIn("never make more than three tool calls without writing an updated artifact", protocol)
+        self.assertIn("Your chat response does not count as a checkpoint", protocol)
+
+    def test_a_sandboxed_plan_protocol_names_absolute_paths_only(self) -> None:
+        plan = f"{WORKSPACE_DIR}/{RPI_DIR}/{PLAN_ARTIFACT}"
+        protocol = self._protocol(plan_prompt(TASK, agent_workspace=WORKSPACE_DIR))
+        self.assertIn(f"Read `{WORKSPACE_DIR}/{RPI_DIR}/{RESEARCH_ARTIFACT}` first.", protocol)
+        self.assertIn(f"write `{plan}` with a non-empty `goal`", protocol)
+        self.assertIn(f"rewrite `{plan}` in full", protocol)
+        self.assertNotIn(f"`{RPI_DIR}/", protocol)
+
+    def test_plan_keeps_research_cadence_and_tail(self) -> None:
+        """One bound and one set of session rules, so the two phases cannot drift apart."""
+        research = _RESEARCH_CHECKPOINT.format(path="R")
+        plan = _PLAN_CHECKPOINT.format(path="P", research_path="R")
+        self.assertIn("never make more than three investigative tool\ncalls", research)
+        self.assertIn("never make more than three tool calls", plan)
+        self.assertTrue(research.endswith(_CHECKPOINT_TAIL))
+        self.assertTrue(plan.endswith(_CHECKPOINT_TAIL))
+
+    def test_every_lane_with_a_plan_phase_sends_the_protocol(self) -> None:
+        for lane in ("C", "D", "E"):
+            strategy = RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT) if lane == "E" else None
+            for name, (agent, _, _) in (
+                ("local", run_lane(lane, strategy=strategy)),
+                ("sandbox", run_in_sandbox(lane)),
+            ):
+                with self.subTest(lane=lane, workspace=name):
+                    self.assertIn("non-empty `goal`", self._protocol(agent.prompt_for("plan")))
+
+    def test_lane_c_sends_exactly_plan_prompt(self) -> None:
+        """The probe administers plan_prompt(); this pins that it is what the lane sends."""
+        agent, _, _ = run_lane("C")
+        self.assertEqual(plan_prompt(TASK), agent.prompt_for("plan"))
+
+    def test_compaction_and_implement_get_no_checkpoint_protocol(self) -> None:
+        agent, _, _ = run_lane("D")
+        for phase in ("research_compact", "plan_compact", "implement"):
             with self.subTest(phase=phase):
-                self.assertNotIn("three investigative tool calls", " ".join(agent.prompt_for(phase).split()))
+                self.assertNotIn("## Checkpoint protocol", agent.prompt_for(phase))
 
 
 class PlanResearchHandoffTests(unittest.TestCase):

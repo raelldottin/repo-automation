@@ -394,13 +394,26 @@ Inspect whatever material is present in the workspace. Record what you do not kn
 than guessing.
 """
 
+# Shared by every checkpoint protocol, so research and plan cannot drift apart on the two
+# rules that are about the session rather than the phase: bank before a command that may
+# block, and the transcript is not a checkpoint.
+_CHECKPOINT_TAIL = """Before starting a command that may block, wait, invoke an interactive program, or consume
+substantial time, checkpoint everything you have learned so far. If a command fails or times out
+in a way that changes what you know, checkpoint that failure or uncertainty before trying
+something else.
+
+Your chat response does not count as a checkpoint. Information that exists only in the
+conversation is lost at the end of this phase.
+"""
+
 # Run 37420620542 wrote research.json once, 116s in, then made 21 more tool calls without
 # writing again: the flag surface, exit codes and terminfo dependency it discovered died with
 # the transcript. "Update it as you work" was already in the artifact instruction, so what was
 # missing is not the intent but the cadence - a bound on how far exploration may run ahead of
-# the durable record. Scoped to research deliberately: the same three-call bound in implement
-# would interrupt every third edit to rewrite a summary.
-_RESEARCH_CHECKPOINT = """## Checkpoint protocol
+# the durable record. Scoped to research and plan deliberately: the same three-call bound in
+# implement would interrupt every third edit to rewrite a summary.
+_RESEARCH_CHECKPOINT = (
+    """## Checkpoint protocol
 
 Create `{path}` as your first tool action, before any investigative command.
 Treat the artifact as the durable research record, not a final report.
@@ -413,14 +426,37 @@ Whenever a tool result changes any finding, constraint, unknown, risk, or piece 
 You may batch closely related observations, but never make more than three investigative tool
 calls without writing an updated artifact.
 
-Before starting a command that may block, wait, invoke an interactive program, or consume
-substantial time, checkpoint everything you have learned so far. If a command fails or times out
-in a way that changes what you know, checkpoint that failure or uncertainty before trying
-something else.
-
-Your chat response does not count as a checkpoint. Information that exists only in the
-conversation is lost at the end of this phase.
 """
+    + _CHECKPOINT_TAIL
+)
+
+# Run 39556002331 is research's 37420620542 one phase later. Plan made 8 tool calls over
+# 1747s, spent 29652 reasoning tokens, was still streaming when its 2160s budget killed it,
+# and left plan.json as the empty initial checkpoint - `goal` "" and every list empty - so
+# the lane stopped on `missing or empty text field: goal` and implement never ran. The same
+# missing cadence, plus one thing research did not need: a plan can be reasoned about at
+# length before a single word of it is written, so the first real write is pinned to the
+# moment research has been read, and it must already carry a goal and rough steps.
+_PLAN_CHECKPOINT = (
+    """## Checkpoint protocol
+
+Read `{research_path}` first. Then, before any further exploration or deliberation, write
+`{path}` with a non-empty `goal` and a first-cut `implementation_steps`, however rough.
+Treat the artifact as the durable plan, not a final report: write the rough plan now and
+refine it in place, rather than reasoning it through before writing anything.
+
+Whenever a tool result or decision changes the goal, a step, an expected file, the validation
+plan, a risk, or a research reference:
+
+1. rewrite `{path}` in full before issuing another tool call;
+2. keep the file schema-valid at every update.
+
+You may batch closely related refinements, but never make more than three tool calls without
+writing an updated artifact.
+
+"""
+    + _CHECKPOINT_TAIL
+)
 
 _PLAN_BODY = """## Phase: Plan
 
@@ -549,13 +585,17 @@ def plan_prompt(
     """The plan phase's prompt, byte for byte, for the same reason ``research_prompt`` exists:
     the plan probe has to ask the question the lane asks, not a near-copy of it.
 
-    Research is named by path rather than inlined; see ``PLAN_RESEARCH_HANDOFF``.
+    Research is named by path rather than inlined; see ``PLAN_RESEARCH_HANDOFF``. The
+    checkpoint protocol names both the research it must read and the plan path the artifact
+    instruction resolved, so no two sections can disagree about either file.
     """
+    research_path = artifact_path(research_filename, agent_workspace)
     return compose_prompt(
         f"# Plan: {task.public_id}",
         envelope(task, agent_workspace),
-        _PLAN_BODY.format(research_path=artifact_path(research_filename, agent_workspace)),
+        _PLAN_BODY.format(research_path=research_path),
         artifact_instruction(PLAN_SPEC, agent_workspace=agent_workspace),
+        _PLAN_CHECKPOINT.format(path=artifact_path(PLAN_ARTIFACT, agent_workspace), research_path=research_path),
         jspace=jspace,
     )
 
