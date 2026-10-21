@@ -1195,6 +1195,8 @@ class PlanProbeTests(unittest.TestCase):
 
         self.assertEqual(self.RESEARCH, seen["seeded"])
         self.assertEqual(plan_prompt(task_spec(self.INSTANCE)), seen["prompt"])
+        self.assertIn("## Checkpoint protocol", str(seen["prompt"]))
+        self.assertIn("non-empty `goal`", str(seen["prompt"]))
         self.assertEqual("plan", record["phase"])
         self.assertEqual("plan.json", record["artifact"]["filename"])
         self.assertFalse(record["artifact"]["present"])

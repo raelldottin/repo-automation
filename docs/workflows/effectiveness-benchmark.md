@@ -1023,13 +1023,28 @@ carries a **checkpoint protocol**: write the artifact as the first tool action b
 investigative command, update it before issuing another investigative call whenever a result
 changes a finding, and never make more than three investigative tool calls without writing
 again - plus a checkpoint before any command that may block and after a failure that changes
-what is known. It is scoped to research: the same three-call bound in implement would
-interrupt every third edit to rewrite a summary.
+what is known. It is kept out of implement: the same three-call bound there would interrupt
+every third edit to rewrite a summary.
 
 `RESEARCH_SPEC` was deliberately left alone. Requiring non-empty `findings` or `evidence`
 would reject that stub but not the staleness behind it, since one superficial finding would
 pass while twenty minutes of discoveries stayed unbanked. Schema validity and checkpoint
 freshness are different contracts, and only the second one was broken.
+
+Plan later failed the same way, and now carries the same protocol. Run `39556002331` (main
+`5abf2b4`, after plan began reading `research.json` by path) completed its first model call at
+12.6 seconds and made 8 tool calls with 29652 reasoning tokens. Its last call came at 1747.6
+seconds, and it was still streaming when its 2160-second budget killed it. `plan.json` was still
+the empty initial checkpoint: `goal` empty and every list empty. It was rejected with `missing or
+empty text field: goal`, so implement never ran. The plan prompt now has a checkpoint protocol
+modelled on research's. Read the research, then write a non-empty `goal` and rough
+`implementation_steps` before any further exploration or deliberation. Rewrite the whole file
+whenever a step, file, validation, risk or reference changes, and never make more than three tool
+calls without writing again. It shares research's rules about blocking commands and chat output
+word for word, and research's rendered prompt is unchanged byte for byte. Plan results from before
+this change are not comparable with plan results after it. Whether the protocol holds under a real
+plan session is unproven until a run administers it. `PLAN_SPEC` is unchanged, for the
+same reason `RESEARCH_SPEC` is.
 
 The protocol held - and uncovered a path bug underneath it. Run `37440878348` administered
 it against the same instance, model, transport and 1800-second ceiling: the artifact was
