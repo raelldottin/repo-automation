@@ -670,6 +670,22 @@ D spent 1799 of 1800 seconds researching, and no multi-phase lane submitted anyt
 all. And C does not reclaim the 720 seconds D and E spend compacting — if it did, `D - C`
 would measure compaction plus whatever C did with the extra time.
 
+More time did not fix plan, so the plan prompt got smaller. Plan failed 5 of 5 GLM-5.3
+runs. Run 38877265488's one completed plan call took 775.8 seconds, and 6676 of its 7532
+output tokens were reasoning. Run 39452756957 completed no call in its 2160 seconds and was
+still "receiving stream response" at 2112. Research's first call comes back in 10 to 19
+seconds. The difference is that plan's prompt inlined research's whole artifact, about 6 to
+8k characters. The pinned Hermes has no per-session cap on output or reasoning that reaches
+the nvidia provider: `--oneshot` builds its agent without `max_tokens`, the nvidia profile
+always sends its own 16384, and that profile puts no reasoning field on the wire, so
+`--reasoning` changes nothing there. So plan now gets a path instead of the artifact:
+`.rpi/research.json`, or `.rpi/research.compact.json` in D and E when compaction landed.
+The artifact is already in the workspace and plan reads it with its file tool. `run.json`
+records this per RPI cell as `plan_research_handoff`. **Plan results from before this
+change are not comparable with results after it.** The earlier ones gave plan the research
+inline, the new ones make plan read it. No real run has yet shown that this lets plan
+finish.
+
 A session that runs the budget out is asked to stop (SIGTERM), given five seconds to flush
 and exit, and then killed with its tool subprocesses (SIGKILL). The phase is recorded with
 returncode 124 — the same code `timeout(1)` reports — and the grace is recorded separately

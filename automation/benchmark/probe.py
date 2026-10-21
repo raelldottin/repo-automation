@@ -445,7 +445,7 @@ def run_probe(
         agent_workspace=agent_workspace_for(cleanroom),
     )
     if phase == "plan":
-        prompt = plan_prompt(task, research_data, agent_workspace=ctx.agent_workspace)
+        prompt = plan_prompt(task, RESEARCH_ARTIFACT, agent_workspace=ctx.agent_workspace)
         context_data: dict[str, Any] = {"research": research_data}
     else:
         prompt = research_prompt(task, agent_workspace=ctx.agent_workspace)
