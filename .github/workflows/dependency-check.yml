@@ -21,13 +21,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
         with:
-          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync dev dependencies
+        run: uv sync --frozen --python 3.12
+
+      # uv.lock is the source of truth. Export every locked package (runtime plus
+      # the dev group) fully pinned, then audit exactly that set. --no-deps and
+      # --disable-pip are safe because the export already lists the transitives.
+      - name: Export locked requirements
+        run: uv export --frozen --format requirements-txt --no-hashes --output-file "$RUNNER_TEMP/requirements.txt"
 
       - name: Audit Python dependencies
-        uses: pypa/gh-action-pip-audit@v1.1.0
-        with:
-          inputs: requirements-dev.txt
-          vulnerability-service: osv
+        run: uv run --frozen pip-audit --requirement "$RUNNER_TEMP/requirements.txt" --no-deps --disable-pip --vulnerability-service osv --progress-spinner off
