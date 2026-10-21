@@ -81,6 +81,20 @@ PLAN_ARTIFACT = "plan.json"
 RESEARCH_COMPACT_ARTIFACT = "research.compact.json"
 PLAN_COMPACT_ARTIFACT = "plan.compact.json"
 
+# How plan is handed research: by path, not by value. Plan failed 5 of 5 runs on GLM-5.3
+# (z-ai/glm-5.3 on NVIDIA NIM, Hermes b6a87db). Run 38877265488 completed its first plan
+# call at 775.8s, 6676 of its 7532 output tokens reasoning; run 39452756957 completed no
+# call at all in its 2160s budget, still "receiving stream response" at 2112s. Research,
+# whose prompt carries no artifact, answers its first call in ~10-19s. The plan prompt
+# inlined research's whole artifact (~6-8k chars, ~8k chars of prompt in all), and the
+# pinned Hermes offers no per-session cap on output or reasoning for the nvidia provider
+# that could bound the generation instead, so the input is what gets bounded. The artifact
+# is already in the workspace, validated, where plan's file tool can read it.
+#
+# Recorded on every RPI result as ``plan_research_handoff``: plan results from before
+# this change inlined the research and are not comparable with results after it.
+PLAN_RESEARCH_HANDOFF = "path_reference"
+
 # How a phase ended, with administration held apart from validity. Being killed at a
 # ceiling is administrative: the treatment ran and ran out of road, which is a legitimate
 # outcome the benchmark has to be able to report. A required artifact that never arrived
@@ -159,6 +173,10 @@ class StrategyResult:
     # The ceilings this lane ran under. Part of the treatment, not an implementation
     # detail: change them and D - C stops meaning what it meant in the previous run.
     phase_budgets: dict[str, int] = field(default_factory=dict)
+    # How plan received research - ``{"mode": PLAN_RESEARCH_HANDOFF, "artifact": filename}``
+    # - so a plan result stays attributable to the prompt it was given. None for lanes
+    # without a plan phase, or where the lane stopped before plan ran.
+    plan_research_handoff: Optional[dict[str, str]] = None
     # Set where a lane stopped because a required handoff never arrived. Left unset, the
     # verdict is read off the phases themselves.
     treatment_invalid_reason: Optional[str] = None
@@ -197,6 +215,7 @@ class StrategyResult:
             "compaction": self.compaction,
             "jspace": self.jspace,
             "phase_budgets": self.phase_budgets,
+            "plan_research_handoff": self.plan_research_handoff,
             "treatment_validity": self.treatment_validity,
             "treatment_invalid_reason": self._invalid_reason(),
             "treatment_invalid_phase": self._invalid_phase(),
@@ -405,16 +424,15 @@ conversation is lost at the end of this phase.
 
 _PLAN_BODY = """## Phase: Plan
 
-Turn the research below into an implementation plan. Do **not** implement it.
+Turn the research into an implementation plan. Do **not** implement it.
 
 State the files you expect to create, the order of work, and how each step will be
 validated. If the research left an unknown that the plan must resolve, say how.
 
 ## Research
 
-```json
-{research}
-```
+The research phase's artifact is at `{research_path}`. Read it before you plan: it is
+the only research you are given.
 """
 
 _IMPLEMENT_BODY = """## Phase: Implement
@@ -522,13 +540,21 @@ def research_prompt(task: TaskSpec, jspace: Optional[JSpaceArtifact] = None, age
     )
 
 
-def plan_prompt(task: TaskSpec, research: Any, jspace: Optional[JSpaceArtifact] = None, agent_workspace: str = "") -> str:
+def plan_prompt(
+    task: TaskSpec,
+    research_filename: str = RESEARCH_ARTIFACT,
+    jspace: Optional[JSpaceArtifact] = None,
+    agent_workspace: str = "",
+) -> str:
     """The plan phase's prompt, byte for byte, for the same reason ``research_prompt`` exists:
-    the plan probe has to ask the question the lane asks, not a near-copy of it."""
+    the plan probe has to ask the question the lane asks, not a near-copy of it.
+
+    Research is named by path rather than inlined; see ``PLAN_RESEARCH_HANDOFF``.
+    """
     return compose_prompt(
         f"# Plan: {task.public_id}",
         envelope(task, agent_workspace),
-        _PLAN_BODY.format(research=json.dumps(research, indent=2, ensure_ascii=False)),
+        _PLAN_BODY.format(research_path=artifact_path(research_filename, agent_workspace)),
         artifact_instruction(PLAN_SPEC, agent_workspace=agent_workspace),
         jspace=jspace,
     )
@@ -738,8 +764,10 @@ class RpiStrategy:
         spec: ArtifactSpec,
         data: Any,
         out_filename: str,
-    ) -> tuple[Any, dict[str, Any]]:
+    ) -> tuple[Any, dict[str, Any], bool]:
         """Run a compaction session; fall back to the raw artifact if it fails.
+
+        The flag says whether the compacted artifact is what the next phase gets.
 
         The fallback keeps the lane running, but the failed phase still reports itself as
         treatment_invalid: a D cell whose compaction never landed is lane C under D's name.
@@ -765,7 +793,9 @@ class RpiStrategy:
             f"{label}_compacted_chars": compact_chars,
             f"{label}_compression_ratio": round(compact_chars / raw_chars, 4) if raw_chars else None,
         }
-        return (compacted if compacted is not None else data), stats
+        if compacted is None:
+            return data, stats, False
+        return compacted, stats, True
 
     def _result(self, run: _BudgetedRun, compaction_stats: dict[str, Any], **extra: Any) -> StrategyResult:
         return StrategyResult(
@@ -778,7 +808,11 @@ class RpiStrategy:
         )
 
     def _not_administered(
-        self, run: _BudgetedRun, compaction_stats: dict[str, Any], phase: Optional[str] = None
+        self,
+        run: _BudgetedRun,
+        compaction_stats: dict[str, Any],
+        phase: Optional[str] = None,
+        plan_research_handoff: Optional[dict[str, str]] = None,
     ) -> StrategyResult:
         """Stop the lane rather than invent the handoff the phase owed the next one.
 
@@ -794,11 +828,13 @@ class RpiStrategy:
             returncode=last.returncode if last is not None else AGENT_TIMEOUT_RETURNCODE,
             treatment_invalid_reason=REQUIRED_ARTIFACT_MISSING,
             treatment_invalid_phase=phase or (last.phase if last is not None else None),
+            plan_research_handoff=plan_research_handoff,
         )
 
     def execute(self, ctx: ExecutionContext) -> StrategyResult:
         run = _BudgetedRun(ctx, ceilings=PHASE_CEILING_SECONDS)
         compaction_stats: dict[str, Any] = {}
+        research_filename = RESEARCH_ARTIFACT
 
         prompt = research_prompt(ctx.task, self.jspace, ctx.agent_workspace)
         research_result = run.phase("research", prompt, {"objective": ctx.task.objective})
@@ -807,20 +843,23 @@ class RpiStrategy:
             return self._not_administered(run, compaction_stats)
 
         if self.compaction and not run.exhausted:
-            research, stats = self._compact(run, ctx, "research", RESEARCH_SPEC, research, RESEARCH_COMPACT_ARTIFACT)
+            research, stats, compacted = self._compact(run, ctx, "research", RESEARCH_SPEC, research, RESEARCH_COMPACT_ARTIFACT)
             compaction_stats.update(stats)
+            if compacted:
+                research_filename = RESEARCH_COMPACT_ARTIFACT
 
         if run.exhausted:
             return self._not_administered(run, compaction_stats, phase="plan")
 
-        prompt = plan_prompt(ctx.task, research, self.jspace, ctx.agent_workspace)
+        prompt = plan_prompt(ctx.task, research_filename, self.jspace, ctx.agent_workspace)
         plan_result = run.phase("plan", prompt, {"research": research})
+        handoff = {"mode": PLAN_RESEARCH_HANDOFF, "artifact": research_filename}
         plan = self._validate(plan_result, PLAN_SPEC, ctx.workspace, PLAN_ARTIFACT)
         if not plan_result.artifact_valid:
-            return self._not_administered(run, compaction_stats)
+            return self._not_administered(run, compaction_stats, plan_research_handoff=handoff)
 
         if self.compaction and not run.exhausted:
-            plan, stats = self._compact(run, ctx, "plan", PLAN_SPEC, plan, PLAN_COMPACT_ARTIFACT)
+            plan, stats, _ = self._compact(run, ctx, "plan", PLAN_SPEC, plan, PLAN_COMPACT_ARTIFACT)
             compaction_stats.update(stats)
 
         implement_prompt = compose_prompt(
@@ -830,7 +869,7 @@ class RpiStrategy:
             jspace=self.jspace,
         )
         implement_result = run.phase("implement", implement_prompt, {"plan": plan})
-        return self._result(run, compaction_stats, returncode=implement_result.returncode)
+        return self._result(run, compaction_stats, returncode=implement_result.returncode, plan_research_handoff=handoff)
 
 
 LANE_FACTORIES = {
@@ -868,6 +907,7 @@ __all__ = [
     "PHASE_COMPLETED",
     "PHASE_FAILED",
     "PHASE_TREATMENT_INVALID",
+    "PLAN_RESEARCH_HANDOFF",
     "PLAN_SPEC",
     "PhaseResult",
     "RESEARCH_SPEC",

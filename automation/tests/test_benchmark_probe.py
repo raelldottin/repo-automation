@@ -1194,7 +1194,7 @@ class PlanProbeTests(unittest.TestCase):
             self.assertEqual(before, research.read_bytes(), "the research input was modified")
 
         self.assertEqual(self.RESEARCH, seen["seeded"])
-        self.assertEqual(plan_prompt(task_spec(self.INSTANCE), self.RESEARCH), seen["prompt"])
+        self.assertEqual(plan_prompt(task_spec(self.INSTANCE)), seen["prompt"])
         self.assertEqual("plan", record["phase"])
         self.assertEqual("plan.json", record["artifact"]["filename"])
         self.assertFalse(record["artifact"]["present"])

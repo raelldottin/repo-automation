@@ -29,6 +29,7 @@ from automation.benchmark.strategies import (
     LANE_CEILING_SECONDS,
     PHASE_CEILING_SECONDS,
     PLAN_ARTIFACT,
+    PLAN_RESEARCH_HANDOFF,
     PLAN_COMPACT_ARTIFACT,
     RESEARCH_ARTIFACT,
     RESEARCH_COMPACT_ARTIFACT,
@@ -37,6 +38,7 @@ from automation.benchmark.strategies import (
     RpiStrategy,
     agent_workspace_for,
     build_strategy,
+    plan_prompt,
     read_artifact,
     workspace_instruction,
 )
@@ -230,8 +232,9 @@ class LaneTreatmentTests(unittest.TestCase):
     def test_lane_c_runs_three_phases_and_passes_artifacts_forward(self) -> None:
         agent, result, _ = run_lane("C")
         self.assertEqual(["research", "plan", "implement"], agent.phases())
-        # The plan session sees the research artifact, not the research conversation.
-        self.assertIn("FINDING-MARKER", agent.prompt_for("plan"))
+        # The plan session is pointed at the research artifact, not the research
+        # conversation - by path, so it reads the artifact rather than a copy inlined.
+        self.assertIn(f"`{RPI_DIR}/{RESEARCH_ARTIFACT}`", agent.prompt_for("plan"))
         # The implement session sees the plan, and never the research.
         self.assertIn("PLAN-MARKER", agent.prompt_for("implement"))
         self.assertNotIn("FINDING-MARKER", agent.prompt_for("implement"))
@@ -390,6 +393,73 @@ class RequiredArtifactTests(unittest.TestCase):
         for phase in ("plan", "implement"):
             with self.subTest(phase=phase):
                 self.assertNotIn("three investigative tool calls", " ".join(agent.prompt_for(phase).split()))
+
+
+class PlanResearchHandoffTests(unittest.TestCase):
+    """Plan failed 5 of 5 GLM-5.3 runs with research's whole artifact inlined in its prompt.
+
+    Run 38877265488 completed one plan call at 775.8s; run 39452756957 completed none in
+    2160s. Plan now names research's artifact by path. These pin that the prompt shrank,
+    that it still names the artifact plan must read, and that the result says which.
+    """
+
+    LARGE_RESEARCH = {"findings": ["FINDING-MARKER " + "x" * 200] * 40}
+
+    def test_the_plan_prompt_names_the_research_artifact_instead_of_inlining_it(self) -> None:
+        prompt = plan_prompt(TASK)
+        self.assertIn(f"`{RPI_DIR}/{RESEARCH_ARTIFACT}`", prompt)
+        self.assertNotIn("FINDING-MARKER", prompt)
+        self.assertNotIn("```json\n{", prompt.split("## Required output artifact")[0])
+
+    def test_the_plan_prompt_is_smaller_than_the_artifact_it_used_to_carry(self) -> None:
+        inlined = len(json.dumps(self.LARGE_RESEARCH, indent=2, ensure_ascii=False))
+        self.assertGreater(inlined, 8000)
+        self.assertLess(len(plan_prompt(TASK)), inlined)
+
+    def test_the_plan_prompt_does_not_grow_with_the_research(self) -> None:
+        agent, _, _ = run_lane("C")
+        self.assertNotIn("FINDING-MARKER", agent.prompt_for("plan"))
+        self.assertEqual(len(plan_prompt(TASK)), len(agent.prompt_for("plan")))
+
+    def test_a_sandboxed_plan_is_told_the_absolute_research_path(self) -> None:
+        agent, _, _ = run_in_sandbox("C")
+        self.assertIn(f"`{WORKSPACE_DIR}/{RPI_DIR}/{RESEARCH_ARTIFACT}`", agent.prompt_for("plan"))
+
+    def test_lane_d_plan_reads_the_compacted_research_it_would_have_been_handed(self) -> None:
+        agent, result, _ = run_lane("D")
+        self.assertIn(f"`{RPI_DIR}/{RESEARCH_COMPACT_ARTIFACT}`", agent.prompt_for("plan"))
+        assert result.strategy is not None
+        self.assertEqual(
+            {"mode": PLAN_RESEARCH_HANDOFF, "artifact": RESEARCH_COMPACT_ARTIFACT},
+            result.strategy.to_dict()["plan_research_handoff"],
+        )
+
+    def test_a_failed_compaction_points_plan_back_at_the_raw_research(self) -> None:
+        agent, _, _ = run_lane("D", agent=FakeAgent(withhold=("research_compact",)))
+        self.assertIn("plan", agent.phases())
+        self.assertIn(f"`{RPI_DIR}/{RESEARCH_ARTIFACT}`", agent.prompt_for("plan"))
+
+    def test_every_rpi_result_records_how_plan_received_research(self) -> None:
+        _, result, _ = run_lane("C")
+        assert result.strategy is not None
+        self.assertEqual(
+            {"mode": PLAN_RESEARCH_HANDOFF, "artifact": RESEARCH_ARTIFACT},
+            result.strategy.to_dict()["plan_research_handoff"],
+        )
+
+    def test_the_handoff_is_recorded_even_when_plan_fails(self) -> None:
+        _, result, _ = run_lane("C", agent=FakeAgent(withhold=("plan",)))
+        assert result.strategy is not None
+        recorded = result.strategy.to_dict()
+        self.assertEqual("plan", recorded["treatment_invalid_phase"])
+        self.assertEqual(RESEARCH_ARTIFACT, recorded["plan_research_handoff"]["artifact"])
+
+    def test_lanes_without_a_plan_phase_record_no_handoff(self) -> None:
+        for lane in ("A", "B"):
+            with self.subTest(lane=lane):
+                _, result, _ = run_lane(lane)
+                assert result.strategy is not None
+                self.assertIsNone(result.strategy.to_dict()["plan_research_handoff"])
 
 
 class ModelVisibleArtifactPathTests(unittest.TestCase):
