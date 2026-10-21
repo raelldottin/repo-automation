@@ -83,7 +83,21 @@ Evidence is sufficient when the affected registered paths were measured and the 
 
 An unexplained regression is not evidence of success, and a benchmark that was never run is not evidence at all.
 
-### Adding a Benchmark
+## Control-Plane Architecture and Roadmap Priority
+
+Before architecture or new feature work, read [SPEC-001](docs/architecture/control-plane.md) and [the roadmap](docs/roadmap.md). The proposed top layer is **Hermes Kanban**, **self-hosted Hindsight memory** and a **generated Swarm Wiki**, with distinct canonical owners and the deterministic repo-automation supervisor beneath it. **This is a proposed target, not an installed integration.**
+
+- Prioritize the P0 adapter/inventory/canary acceptance gate before expanding the supervisor roadmap.
+- **Benchmark exemption.** Benchmark and effectiveness work is exempt from the P0 ordering by owner decision. Do not defer, pause or refuse authorized benchmark work because P0 is incomplete. Each run, model, provider or budget change still needs its own authorization.
+- Do not add a parallel queue, task store, memory database, coordination daemon or wiki write authority without a separate explicit design decision.
+- Today the file-based slice queue remains operational authority; do not silently migrate or dual-write it and Kanban. A future cutover requires explicit approval, independent verification, provenance and rollback.
+- Never treat wiki/memory summaries as independent live verification; do not allow workers to self-chain or bypass supervisor gates.
+- **Delegation.** Agent-native delegation (a runner such as Claude Code launching its own sub-agents within one slice run) is available today. Supervisor-controlled delegation is proposed in SPEC-001 and not implemented; do not describe or rely on it as current behavior. No worker or sub-agent may start the next slice.
+- The deployed Swarm Wiki currently reads ByteRover-specific `.brv/context-tree` files. Do not claim the wiki is Hindsight-compatible until a separately reviewed upstream migration adapter preserves source hashes and evidence.
+- **Open-source production profile (owner gate).** A fully open-source production profile is a target the owner decides, not an instruction for agents to act on. Agents MUST NOT choose, add or change a license. Record license gaps and dependency or model license risks for the owner instead. Proprietary development assistants and the existing hosted benchmark sit outside that production profile.
+- Keep benchmarks and pinned experiment settings isolated from live control-plane integrations.
+
+## Adding a CodSpeed Benchmark
 
 A benchmark for a registered path belongs in `automation/tests/test_benchmarks.py`, carries `@pytest.mark.benchmark`, and exercises the bundled fixtures in `automation/examples/` rather than consumer repository state.
 
