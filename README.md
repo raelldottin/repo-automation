@@ -88,8 +88,9 @@ The repository ships with seven GitHub Actions workflows in `.github/`:
   live queue state, and comments the report on pull requests via
   `MishaKav/pytest-coverage-comment`.
 - **Dependency Check** (`.github/workflows/dependency-check.yml`) —
-  `pypa/gh-action-pip-audit` against `requirements-dev.txt` on push, PR, and
-  a weekly schedule. Fails when a known CVE matches a pinned dev dependency.
+  `pip-audit` against the full package set exported from `uv.lock` on push,
+  PR, and a weekly schedule. Fails when a known CVE matches a locked runtime or
+  dev dependency.
 - **Dependency Graph Review** (`.github/workflows/dependency-review.yml`) —
   `actions/dependency-review-action` runs on pull requests and fails the PR
   if it introduces a high-severity vulnerability.
