@@ -334,6 +334,20 @@ def artifact_path(filename: str, agent_workspace: str = "") -> str:
     return f"{directory}/{filename}"
 
 
+def workspace_file(filename: str, agent_workspace: str = "") -> str:
+    """Where a graded workspace-root file is, in the agent's own terms.
+
+    ``artifact_path`` for the files that are not phase artifacts: absolute under a sandbox
+    for the same reason, relative to the workspace root locally.
+    """
+    return f"{agent_workspace.rstrip('/')}/{filename}" if agent_workspace else f"./{filename}"
+
+
+def build_command(agent_workspace: str = "") -> str:
+    """How to run ``compile.sh`` the way the grader does: from the workspace root."""
+    return f"cd {agent_workspace.rstrip('/')} && ./compile.sh" if agent_workspace else "./compile.sh"
+
+
 def read_artifact(workspace: Path, filename: str) -> tuple[Optional[Any], str]:
     """Return ``(parsed_or_None, raw_text)`` for a phase artifact the agent should have written.
 
@@ -411,7 +425,8 @@ conversation is lost at the end of this phase.
 # the transcript. "Update it as you work" was already in the artifact instruction, so what was
 # missing is not the intent but the cadence - a bound on how far exploration may run ahead of
 # the durable record. Scoped to research and plan deliberately: the same three-call bound in
-# implement would interrupt every third edit to rewrite a summary.
+# implement would interrupt every third edit to rewrite a summary. Implement has its own
+# build-first protocol instead; see ``_IMPLEMENT_BUILD_FIRST``.
 _RESEARCH_CHECKPOINT = (
     """## Checkpoint protocol
 
@@ -484,6 +499,41 @@ touches the immutable objective, follow the objective.
 ```json
 {plan}
 ```
+"""
+
+# Run 39638802502 is plan's 39556002331 one phase later again. With research and plan banked,
+# implement ran for the first time: 26 completed model calls, the last at 2699.7s, then ~45
+# minutes streaming without completing until its 5400s budget killed it. It left four probe
+# scripts under tests/ and no source and no compile.sh, so all 769 tests were not_run on
+# `compile_failed`. Implement owes no typed artifact - its durable state is the build itself - so
+# the cadence bounds how far exploration may run ahead of a working `compile.sh` rather than of
+# a JSON file. This is why research's three-call bound did not fit here as written: the remedy
+# is not to rewrite a summary every third edit but to rebuild. `_CHECKPOINT_TAIL` is not reused
+# because both of its rules are phrased in terms of checkpointing what was learned; the
+# blocking-command and chat-output rules are restated here for a build.
+_IMPLEMENT_BUILD_FIRST = """## Build-first protocol
+
+Before writing any probe or analysis script, and before any deeper exploration, create
+`{compile_sh}` and make it executable. It must build `{executable}`: at first a stub that
+runs and exits, however little it does. Then run `{build}` and see it succeed.
+Treat that build as the deliverable from the start, not a final step: get a trivial program
+building now and grow it into the real one, rather than studying the program before anything
+builds.
+
+Grow the program in small steps. After each meaningful change to the source or to `{compile_sh}`:
+
+1. run `{build}` before issuing another tool call that is not part of the same change;
+2. if it fails, fix the build or revert the change before going further.
+
+You may batch closely related edits, but never make more than three tool calls without
+re-running `{build}` and seeing it succeed.
+
+Before starting a command that may block, wait, invoke an interactive program, or consume
+substantial time, make sure `{build}` succeeds on what you have now.
+
+This session can be stopped at any moment without warning. Whatever `{compile_sh}` builds at
+that moment is what gets graded. Your chat response does not count, and probe or analysis
+scripts are not the deliverable: only the source that `{compile_sh}` builds into `{executable}` is.
 """
 
 _COMPACT_BODY = """## Phase: Compact ({label})
@@ -596,6 +646,35 @@ def plan_prompt(
         _PLAN_BODY.format(research_path=research_path),
         artifact_instruction(PLAN_SPEC, agent_workspace=agent_workspace),
         _PLAN_CHECKPOINT.format(path=artifact_path(PLAN_ARTIFACT, agent_workspace), research_path=research_path),
+        jspace=jspace,
+    )
+
+
+def implement_build_first(agent_workspace: str = "") -> str:
+    """The implement phase's build-first protocol, with every path in the agent's own terms."""
+    return _IMPLEMENT_BUILD_FIRST.format(
+        compile_sh=workspace_file("compile.sh", agent_workspace),
+        executable=workspace_file("executable", agent_workspace),
+        build=build_command(agent_workspace),
+    )
+
+
+def implement_prompt(
+    task: TaskSpec,
+    plan: Any,
+    jspace: Optional[JSpaceArtifact] = None,
+    agent_workspace: str = "",
+) -> str:
+    """The RPI implement phase's prompt, byte for byte, so a test or probe asks what the lane asks.
+
+    Lanes C/D/E only. Lanes A and B are single-session controls whose prompts define their
+    treatment, so they do not get the build-first protocol.
+    """
+    return compose_prompt(
+        f"# Implement: {task.public_id}",
+        envelope(task, agent_workspace),
+        _IMPLEMENT_BODY.format(plan=json.dumps(plan, indent=2, ensure_ascii=False)),
+        implement_build_first(agent_workspace),
         jspace=jspace,
     )
 
@@ -902,13 +981,8 @@ class RpiStrategy:
             plan, stats, _ = self._compact(run, ctx, "plan", PLAN_SPEC, plan, PLAN_COMPACT_ARTIFACT)
             compaction_stats.update(stats)
 
-        implement_prompt = compose_prompt(
-            f"# Implement: {ctx.task.public_id}",
-            envelope(ctx.task, ctx.agent_workspace),
-            _IMPLEMENT_BODY.format(plan=json.dumps(plan, indent=2, ensure_ascii=False)),
-            jspace=self.jspace,
-        )
-        implement_result = run.phase("implement", implement_prompt, {"plan": plan})
+        prompt = implement_prompt(ctx.task, plan, self.jspace, ctx.agent_workspace)
+        implement_result = run.phase("implement", prompt, {"plan": plan})
         return self._result(run, compaction_stats, returncode=implement_result.returncode, plan_research_handoff=handoff)
 
 
