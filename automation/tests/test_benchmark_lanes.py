@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -38,7 +39,12 @@ from automation.benchmark.strategies import (
     RpiStrategy,
     agent_workspace_for,
     build_strategy,
+    compose_prompt,
+    envelope,
+    implement_build_first,
+    implement_prompt,
     _CHECKPOINT_TAIL,
+    _IMPLEMENT_BODY,
     _PLAN_CHECKPOINT,
     _RESEARCH_CHECKPOINT,
     plan_prompt,
@@ -392,10 +398,11 @@ class RequiredArtifactTests(unittest.TestCase):
         self.assertIn("as your first tool action, before any investigative command", flat)
         self.assertIn("never make more than three investigative tool calls", flat)
         self.assertIn("Your chat response does not count as a checkpoint", flat)
-        # Scoped away from implement on purpose: the same bound there would interrupt every
-        # third edit to rewrite a summary.
+        # The artifact protocol is scoped away from implement on purpose: the same bound there
+        # would interrupt every third edit to rewrite a summary. Implement's bound is on the
+        # build instead; see ImplementBuildFirstProtocolTests.
         self.assertNotIn("## Checkpoint protocol", agent.prompt_for("implement"))
-        self.assertNotIn("three tool calls", " ".join(agent.prompt_for("implement").split()))
+        self.assertNotIn("writing an updated artifact", agent.prompt_for("implement"))
 
     def test_the_research_protocol_is_byte_for_byte_what_it_was(self) -> None:
         """Plan's protocol shares research's tail; sharing it must not have moved research.
@@ -482,10 +489,137 @@ class PlanCheckpointProtocolTests(unittest.TestCase):
         self.assertEqual(plan_prompt(TASK), agent.prompt_for("plan"))
 
     def test_compaction_and_implement_get_no_checkpoint_protocol(self) -> None:
+        """Implement gets the build-first protocol instead, never the artifact one."""
         agent, _, _ = run_lane("D")
         for phase in ("research_compact", "plan_compact", "implement"):
             with self.subTest(phase=phase):
                 self.assertNotIn("## Checkpoint protocol", agent.prompt_for(phase))
+        for phase in ("research_compact", "plan_compact"):
+            with self.subTest(phase=phase):
+                self.assertNotIn(BUILD_FIRST_HEADING, agent.prompt_for(phase))
+
+
+BUILD_FIRST_HEADING = "## Build-first protocol"
+
+
+class ImplementBuildFirstProtocolTests(unittest.TestCase):
+    """Run 39638802502: implement explored for 5400s and left nothing that builds.
+
+    The first valid lane C treatment: research and plan banked, so implement ran - 26
+    completed model calls, the last at 2699.7s, then ~45 minutes streaming until its budget
+    killed it. It left four probe scripts under tests/, no source and no compile.sh, so all
+    769 tests were not_run on `compile_failed`. These pin the build-first protocol that
+    lanes C/D/E now send, and that it is the only prompt the change moved.
+    """
+
+    def _protocol(self, prompt: str) -> str:
+        self.assertIn(BUILD_FIRST_HEADING, prompt)
+        return " ".join(prompt.split(BUILD_FIRST_HEADING, 1)[1].split())
+
+    def test_a_local_implement_builds_first_at_the_workspace_root(self) -> None:
+        protocol = self._protocol(implement_prompt(TASK, {"goal": "g"}))
+        self.assertIn(
+            "Before writing any probe or analysis script, and before any deeper exploration, create "
+            "`./compile.sh` and make it executable. It must build `./executable`: at first a stub",
+            protocol,
+        )
+        self.assertIn("Then run `./compile.sh` and see it succeed.", protocol)
+        self.assertIn("never make more than three tool calls without re-running `./compile.sh`", protocol)
+        self.assertIn("make sure `./compile.sh` succeeds on what you have now", protocol)
+        self.assertIn("Whatever `./compile.sh` builds at that moment is what gets graded", protocol)
+        self.assertIn("Your chat response does not count", protocol)
+        self.assertIn("probe or analysis scripts are not the deliverable", protocol)
+
+    def test_a_sandboxed_implement_names_absolute_paths_only(self) -> None:
+        """A relative `compile.sh` lands in the container layer, as `.rpi/research.json` did."""
+        protocol = self._protocol(implement_prompt(TASK, {"goal": "g"}, agent_workspace=WORKSPACE_DIR))
+        self.assertIn(f"create `{WORKSPACE_DIR}/compile.sh` and make it executable", protocol)
+        self.assertIn(f"It must build `{WORKSPACE_DIR}/executable`", protocol)
+        self.assertIn(f"Then run `cd {WORKSPACE_DIR} && ./compile.sh` and see it succeed.", protocol)
+        self.assertIn(f"re-running `cd {WORKSPACE_DIR} && ./compile.sh`", protocol)
+        self.assertNotIn("`./compile.sh`", protocol)
+        self.assertNotIn("`./executable`", protocol)
+
+    def test_the_protocol_is_appended_and_nothing_else_moved(self) -> None:
+        """The implement prompt is origin/main's, byte for byte, plus one trailing section."""
+        plan = {"goal": "PLAN-MARKER"}
+        for workspace in ("", WORKSPACE_DIR):
+            for jspace in (None, FIXTURE_ARTIFACT):
+                with self.subTest(workspace=workspace, jspace=jspace is not None):
+                    before = compose_prompt(
+                        f"# Implement: {TASK.public_id}",
+                        envelope(TASK, workspace),
+                        _IMPLEMENT_BODY.format(plan=json.dumps(plan, indent=2, ensure_ascii=False)),
+                        jspace=jspace,
+                    )
+                    after = implement_prompt(TASK, plan, jspace, workspace)
+                    self.assertEqual(before.rstrip("\n") + "\n\n" + implement_build_first(workspace), after)
+
+    def test_every_rpi_lane_sends_exactly_implement_prompt(self) -> None:
+        for lane in ("C", "D", "E"):
+            strategy = RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT) if lane == "E" else None
+            for name, (agent, _, _), workspace in (
+                ("local", run_lane(lane, strategy=strategy), ""),
+                ("sandbox", run_in_sandbox(lane), WORKSPACE_DIR),
+            ):
+                with self.subTest(lane=lane, workspace=name):
+                    sent = agent.prompt_for("implement")
+                    self.assertTrue(sent.endswith(implement_build_first(workspace)))
+                    plan = json.loads(sent.split("```json\n", 1)[1].split("\n```", 1)[0])
+                    jspace = FIXTURE_ARTIFACT if lane == "E" else None
+                    self.assertEqual(implement_prompt(TASK, plan, jspace, workspace), sent)
+
+    def test_single_session_controls_do_not_get_the_protocol(self) -> None:
+        """A and B define their own treatment; giving it to them would change the controls."""
+        for lane in ("A", "B"):
+            for name, (agent, _, _) in (("local", run_lane(lane)), ("sandbox", run_in_sandbox(lane))):
+                with self.subTest(lane=lane, workspace=name):
+                    self.assertNotIn(BUILD_FIRST_HEADING, agent.prompt_for("implement"))
+
+
+class UnchangedPromptBytesTests(unittest.TestCase):
+    """The build-first protocol moved only the RPI implement prompt.
+
+    Goldens are the SHA-256 of each prompt rendered at origin/main 443f207, before the
+    protocol landed, so research, plan, compaction and lane A results stay comparable across
+    it. Lane B's rendering carries per-run temp paths and is pinned by
+    LaneBIsTheUnchangedHarnessTests instead.
+    """
+
+    GOLDEN = {
+        "research/local": "d452eda1f16dfb7b2984f5d1a3e712c82dc4fd70ad7d6d1746a8ef5d6a416435",
+        "research/sandbox": "09b5d19b6876dfc27712d70898980de017f210b05cf1871ca4dbd3ad7f9d875e",
+        "plan/local": "0db3d76abd18796a6424d7838af80e5b339827a6855251fcd0c9bfcdf7bf4e15",
+        "plan/sandbox": "46a5416f9b94452aeaf7d6bbfc1a23f96b54a47a79f7ec88fdc190411091f61a",
+        "A/local/implement": "fd8931851caf5abc227e77f6f9ae74ded1c5d3941a0d15ef5570448ea90d8e25",
+        "A/sandbox/implement": "a1deface27ecbae24df4ffc007fc890b1d79e7ec916abff810acc96407cee62c",
+        "D/local/research_compact": "d06f18533669f0f634323050c81ce573883605a97ce11e82437be7d2c39d8abe",
+        "D/local/plan_compact": "6eff29a35f5f129fc6c4f242be17a1888b03459a58fcb6bd406e94dbb7385ade",
+        "D/sandbox/research_compact": "b8800f7bc3c690ae757100a1d3318f401184d79884a7217040d47d3e0f053631",
+        "D/sandbox/plan_compact": "8354213465c13a0108c75534031f704bc44accb7fafef6fd187551ce7fce6961",
+    }
+
+    @staticmethod
+    def _sha(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def test_research_and_plan_prompts_are_byte_for_byte_what_they_were(self) -> None:
+        for name, workspace in (("local", ""), ("sandbox", WORKSPACE_DIR)):
+            with self.subTest(workspace=name):
+                self.assertEqual(self.GOLDEN[f"research/{name}"], self._sha(research_prompt(TASK, agent_workspace=workspace)))
+                self.assertEqual(self.GOLDEN[f"plan/{name}"], self._sha(plan_prompt(TASK, agent_workspace=workspace)))
+
+    def test_lane_a_and_compaction_prompts_are_byte_for_byte_what_they_were(self) -> None:
+        for name, runner in (("local", run_lane), ("sandbox", run_in_sandbox)):
+            sessions = {
+                "A": runner("A")[0],
+                "D": runner("D")[0],
+            }
+            for key in ("A/implement", "D/research_compact", "D/plan_compact"):
+                lane, phase = key.split("/")
+                with self.subTest(workspace=name, prompt=key):
+                    golden = self.GOLDEN[f"{lane}/{name}/{phase}"]
+                    self.assertEqual(golden, self._sha(sessions[lane].prompt_for(phase)))
 
 
 class PlanResearchHandoffTests(unittest.TestCase):

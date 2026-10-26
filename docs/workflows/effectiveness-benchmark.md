@@ -1046,6 +1046,23 @@ this change are not comparable with plan results after it. Whether the protocol 
 plan session is unproven until a run administers it. `PLAN_SPEC` is unchanged, for the
 same reason `RESEARCH_SPEC` is.
 
+Implement then failed the same way, one phase later. Run `39638802502` (main `443f207`) was the
+first valid lane C treatment: research and plan both banked schema-valid artifacts, so implement
+ran for the first time. It completed 26 model calls, the first at 68 seconds and the last at
+2699.7, then streamed for about 45 minutes without completing until its 5400-second budget killed
+it. It left four probe scripts under `tests/` and no source and no `compile.sh`, so all 769 tests
+were `not_run` on `compile_failed`. Implement owes no typed artifact; its durable state is the
+build. The RPI implement prompt (lanes C/D/E) now ends with a **build-first protocol**: before any
+probe script or deeper exploration, create a workspace-root `compile.sh` that builds a stub
+`./executable` and see it succeed, then grow the program in small steps, rebuild after each
+meaningful change, never make more than three tool calls without a successful rebuild, and make
+sure the build works before anything slow or blocking. Whatever `compile.sh` builds when the
+session stops is what is graded. Paths are absolute under the sandbox, as artifact paths are. Lanes
+A and B are single-session controls whose prompts define their treatment, so they do not get the
+protocol, which means A/B and C/D/E now differ in this instruction as well as in their phases.
+Research, plan, compaction and lane A prompts are unchanged byte for byte. Implement results from
+before this change are not comparable with implement results after it.
+
 The protocol held - and uncovered a path bug underneath it. Run `37440878348` administered
 it against the same instance, model, transport and 1800-second ceiling: the artifact was
 written as the **first** tool action at 4.8 seconds and updated **eight** times, with at most
