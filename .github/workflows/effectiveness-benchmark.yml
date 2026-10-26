@@ -5,7 +5,10 @@ name: Effectiveness Benchmark
 #
 # This is heavyweight (Docker cleanroom images + LLM calls + long runtime), so it never
 # runs on push/PR. Requires the repository secret NVIDIA_API_KEY (an OpenAI-compatible key
-# for the agent).
+# for the agent). An optional second secret, NVIDIA_API_KEY_2, joins Hermes' credential pool:
+# the pinned Hermes seeds numbered siblings of NVIDIA_API_KEY on its own, uses the first key
+# until it is rate-limited twice in a row, then rotates to the next and benches the throttled
+# one for an hour. It only helps if the second key carries its own quota.
 #
 # Nightly execution is intentionally disabled while model availability and viable phase
 # budgets are being established. Run manually so every campaign has an explicit model,
@@ -99,6 +102,8 @@ jobs:
             || 'z-ai/glm-5.3' }}
       NVIDIA_BASE_URL: https://integrate.api.nvidia.com/v1
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      # Empty when the secret is unset; Hermes skips an empty key, so the pool is then one key.
+      NVIDIA_API_KEY_2: ${{ secrets.NVIDIA_API_KEY_2 }}
       # Job-level so every run.json records which Hermes produced the result.
       HERMES_REVISION: b6a87db515e493faba25e4a09d9e15dac6ddab37
     steps:
@@ -305,6 +310,55 @@ jobs:
               sys.exit(1)
           PY
 
+      # The session above proves the pool as a whole, and a pool answers from its first key
+      # until that key is throttled. A dead second key would surface only then - mid-cell,
+      # after budget was spent - so each key is asked once, directly, for the pinned model.
+      # A 429 here is a warning, not a refusal: that key is throttled now, which is the
+      # condition the pool exists for. Anything else that is not the pinned model answering
+      # means a key the pool would rotate to and fail on.
+      - name: Verify each NVIDIA key is served the model
+        if: inputs.preflight_only != true
+        run: |
+          python - <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+
+          model = os.environ["HERMES_INFERENCE_MODEL"]
+          url = os.environ["NVIDIA_BASE_URL"].rstrip("/") + "/chat/completions"
+          body = json.dumps(
+              {"model": model, "messages": [{"role": "user", "content": "Reply with: ok"}], "max_tokens": 16}
+          ).encode()
+          failed = False
+          for name in ("NVIDIA_API_KEY", "NVIDIA_API_KEY_2"):
+              key = os.environ.get(name, "")
+              if not key:
+                  print(f"{name}: not set, so not in the pool")
+                  continue
+              request = urllib.request.Request(
+                  url, data=body, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=180) as response:
+                      served = json.load(response).get("model")
+              except urllib.error.HTTPError as error:
+                  # Status only: an error body is the provider's text, not ours to echo.
+                  if error.code == 429:
+                      print(f"::warning::{name}: HTTP 429 - throttled now; Hermes benches it and rotates.")
+                  else:
+                      print(f"::error::{name}: HTTP {error.code} - the pool would rotate to a key that fails.")
+                      failed = True
+                  continue
+              except (urllib.error.URLError, TimeoutError) as error:
+                  print(f"::error::{name}: no answer ({type(error).__name__}).")
+                  failed = True
+                  continue
+              if served != model:
+                  print(f"::error::{name}: asked for {model}, served {served}.")
+                  failed = True
+              else:
+                  print(f"{name}: served {served}")
+          sys.exit(1 if failed else 0)
+          PY
+
       # The inference environment itself, proved before any agent budget is spent: the
       # official cleanroom image materializes, it ships a reference ./executable and the
       # bundled documentation, the workspace is writable, and four different ways out of
@@ -338,10 +392,10 @@ jobs:
         run: |
           if [ "${{ inputs.run_all }}" = "false" ] && [ -n "${{ inputs.instances }}" ]; then
             uv run python -m automation.benchmark all --run-dir out --instances ${{ inputs.instances }} \
-              --cleanroom --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
+              --cleanroom --agent-env NVIDIA_API_KEY --agent-env NVIDIA_API_KEY_2 --agent-env NVIDIA_BASE_URL
           else
             uv run python -m automation.benchmark all --run-dir out --all \
-              --cleanroom --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
+              --cleanroom --agent-env NVIDIA_API_KEY --agent-env NVIDIA_API_KEY_2 --agent-env NVIDIA_BASE_URL
           fi
 
       # Lane E administers the canonical J-Space skill from a pinned external checkout.
@@ -451,7 +505,7 @@ jobs:
             research_budget=$(uv run python -c "import sys; from automation.benchmark.strategies import PHASE_CEILING_SECONDS, _scaled_ceilings; print(_scaled_ceilings(PHASE_CEILING_SECONDS, int(sys.argv[1]))['research'])" "${{ inputs.timeout }}")
             uv run python -m automation.benchmark.probe --instance "$instance" --out-dir out/probe-research \
               --phase research --transport oneshot --budget "$research_budget" \
-              --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL | tee /tmp/probe-research.txt
+              --agent-env NVIDIA_API_KEY --agent-env NVIDIA_API_KEY_2 --agent-env NVIDIA_BASE_URL | tee /tmp/probe-research.txt
             if [ ! -f out/probe-research/rpi/research.json ]; then
               echo "::error::Research left no research.json, so a lane would never have reached plan." >&2
               exit 1
@@ -461,7 +515,7 @@ jobs:
           # shellcheck disable=SC2086
           uv run python -m automation.benchmark.probe --instance "$instance" --out-dir out/probe \
             $phase --budget "${{ inputs.probe_budget || 600 }}" $cap \
-            --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL | tee /tmp/probe.txt
+            --agent-env NVIDIA_API_KEY --agent-env NVIDIA_API_KEY_2 --agent-env NVIDIA_BASE_URL | tee /tmp/probe.txt
           printf '```\n%s\n```\n' "$(cat /tmp/probe.txt)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Provision the pinned J-Space checkout
@@ -494,7 +548,7 @@ jobs:
           uv run python -m automation.benchmark lanes --run-dir out --eval \
             --lanes ${{ inputs.lanes }} --repeats ${{ inputs.repeats }} \
             --timeout ${{ inputs.timeout }} $SELECTION --cleanroom \
-            --agent-env NVIDIA_API_KEY --agent-env NVIDIA_BASE_URL
+            --agent-env NVIDIA_API_KEY --agent-env NVIDIA_API_KEY_2 --agent-env NVIDIA_BASE_URL
 
       - name: Upload effectiveness report
         if: always()
