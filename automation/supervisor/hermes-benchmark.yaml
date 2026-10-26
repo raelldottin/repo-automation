@@ -61,3 +61,15 @@ compression:
 # second model and make E - D mean something else.
 moa:
   active_preset: ""
+
+# The operator's deployment answers glm-5.3 through a LiteLLM gateway on 127.0.0.1, which
+# Hermes treats as a local endpoint: both stale detectors are off and a response may take
+# up to the 5-hour cap set there. CI calls NVIDIA directly, so left at Hermes' defaults a
+# response would be cut at 90s non-streaming (240s on large contexts) or 180s on a silent
+# stream and retried - a ceiling the deployment never imposes. Setting both keys to the
+# same 5 hours restores that posture; the phase budget is what bounds a lane. Once set,
+# request_timeout_seconds is also the stream read timeout.
+providers:
+  nvidia:
+    request_timeout_seconds: 18000
+    stale_timeout_seconds: 18000
