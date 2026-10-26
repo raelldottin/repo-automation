@@ -463,6 +463,17 @@ calls without writing an updated artifact.
 # missing cadence, plus one thing research did not need: a plan can be reasoned about at
 # length before a single word of it is written, so the first real write is pinned to the
 # moment research has been read, and it must already carry a goal and rough steps.
+# Research never ended on its own: in run 40298563694 it made 42 calls and was still streaming
+# when its 2160s budget killed it, with a valid 9397-char artifact already banked, while plan
+# finished unprompted in 269s. Its prompt said what to gather and how to bank it, never when to
+# stop. Ceilings are fixed, so an early finish saves wall clock and provider calls; it does not
+# hand implement more time.
+_RESEARCH_DONE = """## When research is done
+
+Research is done when `{path}` records the program's observable contract and each remaining
+unknown is recorded as one. Stop once further commands would only confirm or polish what the
+artifact already says: write it one last time, then end the session with a one-line reply.
+"""
 _PLAN_CHECKPOINT = (
     """## Checkpoint protocol
 
@@ -632,6 +643,7 @@ def research_prompt(task: TaskSpec, jspace: Optional[JSpaceArtifact] = None, age
         _RESEARCH_BODY,
         artifact_instruction(RESEARCH_SPEC, agent_workspace=agent_workspace),
         _RESEARCH_CHECKPOINT.format(path=path),
+        _RESEARCH_DONE.format(path=path),
         jspace=jspace,
     )
 

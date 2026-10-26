@@ -1082,6 +1082,17 @@ protocol, which means A/B and C/D/E now differ in this instruction as well as in
 Research, plan, compaction and lane A prompts are unchanged byte for byte. Implement results from
 before this change are not comparable with implement results after it.
 
+Research, meanwhile, never ended on its own. In run `40298563694` it made 42 calls and was still
+streaming when its 2160-second budget killed it, with a valid 9397-character artifact already
+banked. Plan, in the same run, finished unprompted in 269 seconds. Research's prompt said what to
+gather and how to bank it but never when to stop, so it now ends with a **stop rule**: research is
+done when the artifact records the observable contract and each remaining unknown is recorded as
+one, and once further commands would only confirm or polish what it already says, research writes
+it one last time and ends. Ceilings stay fixed, so an early finish saves wall clock and provider
+calls; it does not give implement more time. Only research prompts carry the rule (lanes C/D/E and
+the research probe), and the rest of research's prompt is unchanged byte for byte. Research results
+from before this change are not comparable with research results after it.
+
 The protocol held - and uncovered a path bug underneath it. Run `37440878348` administered
 it against the same instance, model, transport and 1800-second ceiling: the artifact was
 written as the **first** tool action at 4.8 seconds and updated **eight** times, with at most

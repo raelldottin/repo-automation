@@ -49,6 +49,7 @@ from automation.benchmark.strategies import (
     _IMPLEMENT_BODY,
     _PLAN_CHECKPOINT,
     _RESEARCH_CHECKPOINT,
+    _RESEARCH_DONE,
     plan_prompt,
     read_artifact,
     research_prompt,
@@ -432,7 +433,7 @@ class RequiredArtifactTests(unittest.TestCase):
             "conversation is lost at the end of this phase.\n"
         )
         self.assertEqual(golden, _RESEARCH_CHECKPOINT.format(path=path))
-        self.assertTrue(research_prompt(TASK).endswith(golden))
+        self.assertTrue(research_prompt(TASK).endswith(golden + "\n" + _RESEARCH_DONE.format(path=path)))
 
 
 class PlanCheckpointProtocolTests(unittest.TestCase):
@@ -579,12 +580,39 @@ class ImplementBuildFirstProtocolTests(unittest.TestCase):
                     self.assertNotIn(BUILD_FIRST_HEADING, agent.prompt_for("implement"))
 
 
+class ResearchStopRuleTests(unittest.TestCase):
+    """Run 40298563694: research ran 42 calls into its 2160s ceiling with a valid artifact banked.
+
+    Plan, in the same run, finished unprompted in 269s. Research's prompt never said when to
+    stop, so it now ends with a stop rule. These pin that rule and that only research got it.
+    """
+
+    def test_research_ends_with_the_stop_rule_naming_its_own_artifact(self) -> None:
+        for workspace in ("", WORKSPACE_DIR):
+            with self.subTest(workspace=workspace or "local"):
+                path = artifact_path(RESEARCH_ARTIFACT, workspace)
+                prompt = research_prompt(TASK, agent_workspace=workspace)
+                self.assertTrue(prompt.endswith(_RESEARCH_DONE.format(path=path)))
+                rule = " ".join(prompt.split("## When research is done", 1)[1].split())
+                self.assertIn(f"Research is done when `{path}` records the program's observable contract", rule)
+                self.assertIn("end the session with a one-line reply", rule)
+
+    def test_only_research_sessions_get_the_stop_rule(self) -> None:
+        for lane in ALL_LANES:
+            strategy = RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT) if lane == "E" else None
+            agent, _, _ = run_lane(lane, strategy=strategy)
+            for session in agent.sessions:
+                with self.subTest(lane=lane, phase=session["phase"]):
+                    self.assertEqual(session["phase"] == "research", "## When research is done" in session["prompt"])
+
+
 class UnchangedPromptBytesTests(unittest.TestCase):
     """The build-first protocol moved only the RPI implement prompt.
 
     Goldens are the SHA-256 of each prompt rendered at origin/main 443f207, before the
     protocol landed, so research, plan, compaction and lane A results stay comparable across
-    it. Lane B's rendering carries per-run temp paths and is pinned by
+    it. Research is compared without the stop rule ResearchStopRuleTests pins, so the rule is
+    shown to be the only thing it added. Lane B's rendering carries per-run temp paths and is pinned by
     LaneBIsTheUnchangedHarnessTests instead.
     """
 
@@ -605,10 +633,18 @@ class UnchangedPromptBytesTests(unittest.TestCase):
     def _sha(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _without_research_done(prompt: str, workspace: str) -> str:
+        """Research's prompt minus the one section ResearchStopRuleTests pins."""
+        tail = "\n\n" + _RESEARCH_DONE.format(path=artifact_path(RESEARCH_ARTIFACT, workspace))
+        assert prompt.endswith(tail), "the stop rule is no longer research's trailing section"
+        return prompt[: -len(tail)] + "\n"
+
     def test_research_and_plan_prompts_are_byte_for_byte_what_they_were(self) -> None:
         for name, workspace in (("local", ""), ("sandbox", WORKSPACE_DIR)):
             with self.subTest(workspace=name):
-                self.assertEqual(self.GOLDEN[f"research/{name}"], self._sha(research_prompt(TASK, agent_workspace=workspace)))
+                research = self._without_research_done(research_prompt(TASK, agent_workspace=workspace), workspace)
+                self.assertEqual(self.GOLDEN[f"research/{name}"], self._sha(research))
                 self.assertEqual(self.GOLDEN[f"plan/{name}"], self._sha(plan_prompt(TASK, agent_workspace=workspace)))
 
     def test_lane_a_and_compaction_prompts_are_byte_for_byte_what_they_were(self) -> None:
