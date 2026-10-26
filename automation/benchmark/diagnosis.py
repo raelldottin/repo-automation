@@ -40,6 +40,7 @@ LOG_SUFFIX = ".log"
 STREAM_SUFFIX = ".stream.jsonl"
 SANDBOX_SUFFIX = ".sandbox.json"
 SESSION_DB_FILENAME = "state.db"
+AUTH_STORE_FILENAME = "auth.json"
 TIMEOUT_RETURNCODE = 124
 
 # run_agent.sh names every session `<UTC launch second>-<its own pid>`, before it execs Hermes.
@@ -234,6 +235,37 @@ def read_ledger(hermes_home: Optional[str]) -> dict[str, Any]:
     }
 
 
+def read_credential_pool(hermes_home: Optional[str]) -> Optional[list[dict[str, Any]]]:
+    """Which keys the session's credential pool held and what each went through.
+
+    Hermes seeds ``NVIDIA_API_KEY_2`` alongside ``NVIDIA_API_KEY`` and rotates to it when the
+    first key is rate-limited twice in a row, so without this a session one key served and a
+    session two keys served look the same. A key that was throttled reads ``exhausted`` with
+    its status code. ``source`` is the variable's name (``env:NAME``); nothing else is copied -
+    not the label, which Hermes can fill from a token's claims, never a token field, and not
+    ``request_count``, which counts selections rather than calls and reaches disk only on the
+    next rotation. None where the store or its pool is absent.
+    """
+    if not hermes_home:
+        return None
+    store = _load_json(Path(hermes_home) / AUTH_STORE_FILENAME)
+    pool = store.get("credential_pool") if isinstance(store, dict) else None
+    if not isinstance(pool, dict):
+        return None
+    return [
+        {
+            "provider": provider,
+            "source": entry.get("source"),
+            "last_status": entry.get("last_status"),
+            "last_error_code": entry.get("last_error_code"),
+        }
+        for provider, entries in sorted(pool.items())
+        if isinstance(entries, list)
+        for entry in entries
+        if isinstance(entry, dict)
+    ]
+
+
 def _first(values: list[Optional[float]]) -> Optional[float]:
     present = [value for value in values if value is not None]
     return min(present) if present else None
@@ -410,6 +442,7 @@ def diagnose_session(
         ),
         "timeline_seconds": timeline,
         "observed": observed,
+        "credential_pool": read_credential_pool((controls or {}).get("hermes_home")),
         "last_persisted_activity": _last_persisted_activity(rows, launched, snapshot),
         "containers": containers,
         "containers_from_other_sessions": foreign,

@@ -543,6 +543,74 @@ class ContainerProvenanceTests(unittest.TestCase):
         self.assertEqual(0, len(records[1]["containers"]))
 
 
+def pool_entry(source: str, requests: int, status: Optional[str] = None, code: Optional[int] = None, **extra: Any) -> dict:
+    """One ``credential_pool`` row in the shape pinned Hermes (b6a87db) writes to auth.json."""
+    return {
+        "id": source[-6:],
+        "label": source.split(":", 1)[-1],
+        "auth_type": "api_key",
+        "priority": 0,
+        "source": source,
+        "access_token": None,
+        "request_count": requests,
+        "last_status": status,
+        "last_error_code": code,
+        **extra,
+    }
+
+
+class CredentialPoolTests(unittest.TestCase):
+    """A session the second key served must not look like one the first key served."""
+
+    def _record(self, store: Optional[dict]) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Session(Path(tmp))
+            session.ledger(calls=2)
+            if store is not None:
+                (session.home / diagnosis.AUTH_STORE_FILENAME).write_text(json.dumps(store), encoding="utf-8")
+            return diagnose(session, phase(0, 130.0, True))
+
+    def test_a_rotation_shows_the_throttled_key_and_the_one_that_took_over(self) -> None:
+        store = {
+            "credential_pool": {
+                "nvidia": [
+                    pool_entry("env:NVIDIA_API_KEY", 3, "exhausted", 429),
+                    pool_entry("env:NVIDIA_API_KEY_2", 5),
+                ]
+            }
+        }
+        self.assertEqual(
+            [
+                {
+                    "provider": "nvidia",
+                    "source": "env:NVIDIA_API_KEY",
+                    "last_status": "exhausted",
+                    "last_error_code": 429,
+                },
+                {
+                    "provider": "nvidia",
+                    "source": "env:NVIDIA_API_KEY_2",
+                    "last_status": None,
+                    "last_error_code": None,
+                },
+            ],
+            self._record(store)["credential_pool"],
+        )
+
+    def test_nothing_but_names_and_counters_is_copied(self) -> None:
+        """Hermes can label a row from a token's claims; neither the label nor a token leaves."""
+        entry = pool_entry(
+            "env:NVIDIA_API_KEY", 1, label="someone@example.com", access_token="nvapi-SECRET", refresh_token="r-SECRET"
+        )
+        recorded = json.dumps(self._record({"credential_pool": {"nvidia": [entry]}})["credential_pool"])
+        for value in ("SECRET", "someone@example.com"):
+            self.assertNotIn(value, recorded)
+
+    def test_no_store_or_no_pool_is_none_not_an_empty_pool(self) -> None:
+        self.assertIsNone(self._record(None)["credential_pool"])
+        self.assertIsNone(self._record({"providers": {}})["credential_pool"])
+
+
 class ReadOnlyTests(unittest.TestCase):
     def test_the_diagnosis_changes_nothing_it_reads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

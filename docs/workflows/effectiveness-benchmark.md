@@ -495,6 +495,18 @@ writes where it was told to, and one instance's cleanroom materializes and fails
 egress probes. That last check writes its receipt to `out/preflight/cleanroom.json`, so the
 artifact carries it even when no cell ran.
 
+An optional second secret, **`NVIDIA_API_KEY_2`**, is a rate-limit fallback. The pinned Hermes
+seeds numbered siblings of `NVIDIA_API_KEY` into its credential pool by itself, so passing the
+name with `--agent-env` is the whole opt-in. It answers from the first key, retries a 429 once on
+the same key, and on the second consecutive 429 rotates to the next key and benches the
+throttled one for an hour. It only helps if the second key carries its own quota. Before any
+cell, each set key is asked once, directly, for the pinned model: a 429 there is a warning (that
+key is throttled now, which the pool exists for), and anything else that is not the pinned model
+answering refuses the run, because the pool would rotate to that key mid-cell. Every session
+diagnosis records `credential_pool`: each key by variable name with its `last_status` and
+`last_error_code`, so a key that was throttled reads `exhausted` / `429`. No key value or label is
+copied.
+
 The model id is pinned in the job environment, not read straight off `inputs.model`: the
 `inputs` context is populated for `workflow_dispatch` only and an empty `model` input is
 falsy, so the guard supplies the baseline id for both — and for any trigger added later. It
