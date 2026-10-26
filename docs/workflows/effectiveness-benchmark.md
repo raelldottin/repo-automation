@@ -686,6 +686,13 @@ change are not comparable with results after it.** The earlier ones gave plan th
 inline, the new ones make plan read it. No real run has yet shown that this lets plan
 finish.
 
+Implement then showed the same stall. In run 40298563694 its first call completed at
+1000.5 seconds, with the plan's 4885 characters inlined in a 7379-character prompt. In that
+same run plan, which reads research by path, answered its first call at 8.2 seconds. So
+implement now gets a path too: `.rpi/plan.json`, or `.rpi/plan.compact.json` in D and E
+when compaction landed. `run.json` records this per RPI cell as `implement_plan_handoff`.
+**Implement results from before this change are not comparable with results after it.**
+
 A session that runs the budget out is asked to stop (SIGTERM), given five seconds to flush
 and exit, and then killed with its tool subprocesses (SIGKILL). The phase is recorded with
 returncode 124 — the same code `timeout(1)` reports — and the grace is recorded separately

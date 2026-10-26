@@ -27,6 +27,7 @@ from automation.benchmark.jspace import JSpaceArtifact, JSpaceUnavailable
 from automation.benchmark.cleanroom import WORKSPACE_DIR
 from automation.benchmark.strategies import (
     ALL_LANES,
+    IMPLEMENT_PLAN_HANDOFF,
     LANE_CEILING_SECONDS,
     PHASE_CEILING_SECONDS,
     PLAN_ARTIFACT,
@@ -38,6 +39,7 @@ from automation.benchmark.strategies import (
     ExecutionContext,
     RpiStrategy,
     agent_workspace_for,
+    artifact_path,
     build_strategy,
     compose_prompt,
     envelope,
@@ -245,8 +247,10 @@ class LaneTreatmentTests(unittest.TestCase):
         # The plan session is pointed at the research artifact, not the research
         # conversation - by path, so it reads the artifact rather than a copy inlined.
         self.assertIn(f"`{RPI_DIR}/{RESEARCH_ARTIFACT}`", agent.prompt_for("plan"))
-        # The implement session sees the plan, and never the research.
-        self.assertIn("PLAN-MARKER", agent.prompt_for("implement"))
+        # The implement session is pointed at the plan artifact, also by path, and never
+        # at the research.
+        self.assertIn(f"`{RPI_DIR}/{PLAN_ARTIFACT}`", agent.prompt_for("implement"))
+        self.assertNotIn(RESEARCH_ARTIFACT, agent.prompt_for("implement"))
         self.assertNotIn("FINDING-MARKER", agent.prompt_for("implement"))
         assert result.strategy is not None
         self.assertEqual({}, result.strategy.compaction)
@@ -290,8 +294,8 @@ class LaneTreatmentTests(unittest.TestCase):
         self.assertLess(compaction["research_compacted_chars"], compaction["research_raw_chars"])
         self.assertLess(compaction["research_compression_ratio"], 1.0)
         self.assertLess(compaction["plan_compression_ratio"], 1.0)
-        # The implement phase receives the compacted plan, so it is smaller than lane C's.
-        self.assertLess(len(agent.prompt_for("implement")), len(run_lane("C")[0].prompt_for("implement")))
+        # The implement phase is pointed at the compacted plan, not lane C's raw one.
+        self.assertIn(f"`{RPI_DIR}/{PLAN_COMPACT_ARTIFACT}`", agent.prompt_for("implement"))
 
     def test_lane_e_is_lane_d_plus_jspace_only(self) -> None:
         agent_d, _, _ = run_lane("D")
@@ -517,7 +521,7 @@ class ImplementBuildFirstProtocolTests(unittest.TestCase):
         return " ".join(prompt.split(BUILD_FIRST_HEADING, 1)[1].split())
 
     def test_a_local_implement_builds_first_at_the_workspace_root(self) -> None:
-        protocol = self._protocol(implement_prompt(TASK, {"goal": "g"}))
+        protocol = self._protocol(implement_prompt(TASK))
         self.assertIn(
             "Before writing any probe or analysis script, and before any deeper exploration, create "
             "`./compile.sh` and make it executable. It must build `./executable`: at first a stub",
@@ -532,7 +536,7 @@ class ImplementBuildFirstProtocolTests(unittest.TestCase):
 
     def test_a_sandboxed_implement_names_absolute_paths_only(self) -> None:
         """A relative `compile.sh` lands in the container layer, as `.rpi/research.json` did."""
-        protocol = self._protocol(implement_prompt(TASK, {"goal": "g"}, agent_workspace=WORKSPACE_DIR))
+        protocol = self._protocol(implement_prompt(TASK, agent_workspace=WORKSPACE_DIR))
         self.assertIn(f"create `{WORKSPACE_DIR}/compile.sh` and make it executable", protocol)
         self.assertIn(f"It must build `{WORKSPACE_DIR}/executable`", protocol)
         self.assertIn(f"Then run `cd {WORKSPACE_DIR} && ./compile.sh` and see it succeed.", protocol)
@@ -540,19 +544,17 @@ class ImplementBuildFirstProtocolTests(unittest.TestCase):
         self.assertNotIn("`./compile.sh`", protocol)
         self.assertNotIn("`./executable`", protocol)
 
-    def test_the_protocol_is_appended_and_nothing_else_moved(self) -> None:
-        """The implement prompt is origin/main's, byte for byte, plus one trailing section."""
-        plan = {"goal": "PLAN-MARKER"}
+    def test_the_protocol_is_the_trailing_section(self) -> None:
         for workspace in ("", WORKSPACE_DIR):
             for jspace in (None, FIXTURE_ARTIFACT):
                 with self.subTest(workspace=workspace, jspace=jspace is not None):
                     before = compose_prompt(
                         f"# Implement: {TASK.public_id}",
                         envelope(TASK, workspace),
-                        _IMPLEMENT_BODY.format(plan=json.dumps(plan, indent=2, ensure_ascii=False)),
+                        _IMPLEMENT_BODY.format(plan_path=artifact_path(PLAN_ARTIFACT, workspace)),
                         jspace=jspace,
                     )
-                    after = implement_prompt(TASK, plan, jspace, workspace)
+                    after = implement_prompt(TASK, PLAN_ARTIFACT, jspace, workspace)
                     self.assertEqual(before.rstrip("\n") + "\n\n" + implement_build_first(workspace), after)
 
     def test_every_rpi_lane_sends_exactly_implement_prompt(self) -> None:
@@ -565,9 +567,9 @@ class ImplementBuildFirstProtocolTests(unittest.TestCase):
                 with self.subTest(lane=lane, workspace=name):
                     sent = agent.prompt_for("implement")
                     self.assertTrue(sent.endswith(implement_build_first(workspace)))
-                    plan = json.loads(sent.split("```json\n", 1)[1].split("\n```", 1)[0])
+                    plan_filename = PLAN_ARTIFACT if lane == "C" else PLAN_COMPACT_ARTIFACT
                     jspace = FIXTURE_ARTIFACT if lane == "E" else None
-                    self.assertEqual(implement_prompt(TASK, plan, jspace, workspace), sent)
+                    self.assertEqual(implement_prompt(TASK, plan_filename, jspace, workspace), sent)
 
     def test_single_session_controls_do_not_get_the_protocol(self) -> None:
         """A and B define their own treatment; giving it to them would change the controls."""
@@ -687,6 +689,57 @@ class PlanResearchHandoffTests(unittest.TestCase):
                 _, result, _ = run_lane(lane)
                 assert result.strategy is not None
                 self.assertIsNone(result.strategy.to_dict()["plan_research_handoff"])
+
+
+class ImplementPlanHandoffTests(unittest.TestCase):
+    """Run 40298563694: implement's first call completed at 1000.5s with the plan inlined.
+
+    Plan, handed research by path since #80, answered its first call at 8.2s in the same run.
+    Implement now names the plan's artifact by path. These pin that the prompt no longer
+    carries the plan, that it names the artifact implement must read, and that the result
+    says which.
+    """
+
+    def test_the_implement_prompt_names_the_plan_instead_of_inlining_it(self) -> None:
+        agent, _, _ = run_lane("C")
+        sent = agent.prompt_for("implement")
+        self.assertIn(f"`{RPI_DIR}/{PLAN_ARTIFACT}`", sent)
+        self.assertNotIn("PLAN-MARKER", sent)
+        self.assertNotIn("```json", sent)
+
+    def test_a_sandboxed_implement_is_told_the_absolute_plan_path(self) -> None:
+        agent, _, _ = run_in_sandbox("C")
+        self.assertIn(f"`{WORKSPACE_DIR}/{RPI_DIR}/{PLAN_ARTIFACT}`", agent.prompt_for("implement"))
+
+    def test_lane_d_implement_reads_the_compacted_plan(self) -> None:
+        agent, result, _ = run_lane("D")
+        self.assertIn(f"`{RPI_DIR}/{PLAN_COMPACT_ARTIFACT}`", agent.prompt_for("implement"))
+        assert result.strategy is not None
+        self.assertEqual(
+            {"mode": IMPLEMENT_PLAN_HANDOFF, "artifact": PLAN_COMPACT_ARTIFACT},
+            result.strategy.to_dict()["implement_plan_handoff"],
+        )
+
+    def test_a_failed_plan_compaction_points_implement_back_at_the_raw_plan(self) -> None:
+        agent, result, _ = run_lane("D", agent=FakeAgent(withhold=("plan_compact",)))
+        self.assertIn(f"`{RPI_DIR}/{PLAN_ARTIFACT}`", agent.prompt_for("implement"))
+        assert result.strategy is not None
+        self.assertEqual(PLAN_ARTIFACT, result.strategy.to_dict()["implement_plan_handoff"]["artifact"])
+
+    def test_every_rpi_result_records_how_implement_received_the_plan(self) -> None:
+        _, result, _ = run_lane("C")
+        assert result.strategy is not None
+        self.assertEqual(
+            {"mode": IMPLEMENT_PLAN_HANDOFF, "artifact": PLAN_ARTIFACT},
+            result.strategy.to_dict()["implement_plan_handoff"],
+        )
+
+    def test_no_handoff_is_recorded_where_implement_never_ran(self) -> None:
+        cases = {"A": run_lane("A"), "B": run_lane("B"), "C without a plan": run_lane("C", agent=FakeAgent(withhold=("plan",)))}
+        for name, (_, result, _) in cases.items():
+            with self.subTest(case=name):
+                assert result.strategy is not None
+                self.assertIsNone(result.strategy.to_dict()["implement_plan_handoff"])
 
 
 class ModelVisibleArtifactPathTests(unittest.TestCase):

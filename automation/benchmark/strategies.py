@@ -95,6 +95,13 @@ PLAN_COMPACT_ARTIFACT = "plan.compact.json"
 # this change inlined the research and are not comparable with results after it.
 PLAN_RESEARCH_HANDOFF = "path_reference"
 
+# How implement is handed the plan, for the same reason and in the same way. Run 40298563694
+# completed implement's first call at 1000.5s with the plan's 4885 chars inlined (7379 chars
+# of prompt), while plan, handed research by path, answered its first call at 8.2s in the
+# same run. Recorded on every RPI result that reached implement as ``implement_plan_handoff``:
+# implement results from before this change inlined the plan and are not comparable.
+IMPLEMENT_PLAN_HANDOFF = "path_reference"
+
 # How a phase ended, with administration held apart from validity. Being killed at a
 # ceiling is administrative: the treatment ran and ran out of road, which is a legitimate
 # outcome the benchmark has to be able to report. A required artifact that never arrived
@@ -177,6 +184,9 @@ class StrategyResult:
     # - so a plan result stays attributable to the prompt it was given. None for lanes
     # without a plan phase, or where the lane stopped before plan ran.
     plan_research_handoff: Optional[dict[str, str]] = None
+    # How implement received the plan - ``{"mode": IMPLEMENT_PLAN_HANDOFF, "artifact": filename}``.
+    # None where the lane has no implement phase of its own or stopped before it.
+    implement_plan_handoff: Optional[dict[str, str]] = None
     # Set where a lane stopped because a required handoff never arrived. Left unset, the
     # verdict is read off the phases themselves.
     treatment_invalid_reason: Optional[str] = None
@@ -216,6 +226,7 @@ class StrategyResult:
             "jspace": self.jspace,
             "phase_budgets": self.phase_budgets,
             "plan_research_handoff": self.plan_research_handoff,
+            "implement_plan_handoff": self.implement_plan_handoff,
             "treatment_validity": self.treatment_validity,
             "treatment_invalid_reason": self._invalid_reason(),
             "treatment_invalid_phase": self._invalid_phase(),
@@ -488,7 +499,7 @@ the only research you are given.
 
 _IMPLEMENT_BODY = """## Phase: Implement
 
-Execute the plan below. Build the program in the workspace, write `compile.sh`, and make
+Execute the plan. Build the program in the workspace, write `compile.sh`, and make
 sure it produces `./executable`.
 
 You are given the plan, not the research conversation. If the plan is wrong where it
@@ -496,9 +507,8 @@ touches the immutable objective, follow the objective.
 
 ## Plan
 
-```json
-{plan}
-```
+The plan phase's artifact is at `{plan_path}`. Read it before you start: it is the only
+plan you are given.
 """
 
 # Run 39638802502 is plan's 39556002331 one phase later again. With research and plan banked,
@@ -661,19 +671,20 @@ def implement_build_first(agent_workspace: str = "") -> str:
 
 def implement_prompt(
     task: TaskSpec,
-    plan: Any,
+    plan_filename: str = PLAN_ARTIFACT,
     jspace: Optional[JSpaceArtifact] = None,
     agent_workspace: str = "",
 ) -> str:
     """The RPI implement phase's prompt, byte for byte, so a test or probe asks what the lane asks.
 
     Lanes C/D/E only. Lanes A and B are single-session controls whose prompts define their
-    treatment, so they do not get the build-first protocol.
+    treatment, so they do not get the build-first protocol. The plan is named by path rather
+    than inlined; see ``IMPLEMENT_PLAN_HANDOFF``.
     """
     return compose_prompt(
         f"# Implement: {task.public_id}",
         envelope(task, agent_workspace),
-        _IMPLEMENT_BODY.format(plan=json.dumps(plan, indent=2, ensure_ascii=False)),
+        _IMPLEMENT_BODY.format(plan_path=artifact_path(plan_filename, agent_workspace)),
         implement_build_first(agent_workspace),
         jspace=jspace,
     )
@@ -977,13 +988,22 @@ class RpiStrategy:
         if not plan_result.artifact_valid:
             return self._not_administered(run, compaction_stats, plan_research_handoff=handoff)
 
+        plan_filename = PLAN_ARTIFACT
         if self.compaction and not run.exhausted:
-            plan, stats, _ = self._compact(run, ctx, "plan", PLAN_SPEC, plan, PLAN_COMPACT_ARTIFACT)
+            plan, stats, compacted = self._compact(run, ctx, "plan", PLAN_SPEC, plan, PLAN_COMPACT_ARTIFACT)
             compaction_stats.update(stats)
+            if compacted:
+                plan_filename = PLAN_COMPACT_ARTIFACT
 
-        prompt = implement_prompt(ctx.task, plan, self.jspace, ctx.agent_workspace)
+        prompt = implement_prompt(ctx.task, plan_filename, self.jspace, ctx.agent_workspace)
         implement_result = run.phase("implement", prompt, {"plan": plan})
-        return self._result(run, compaction_stats, returncode=implement_result.returncode, plan_research_handoff=handoff)
+        return self._result(
+            run,
+            compaction_stats,
+            returncode=implement_result.returncode,
+            plan_research_handoff=handoff,
+            implement_plan_handoff={"mode": IMPLEMENT_PLAN_HANDOFF, "artifact": plan_filename},
+        )
 
 
 LANE_FACTORIES = {
@@ -1021,6 +1041,7 @@ __all__ = [
     "PHASE_COMPLETED",
     "PHASE_FAILED",
     "PHASE_TREATMENT_INVALID",
+    "IMPLEMENT_PLAN_HANDOFF",
     "PLAN_RESEARCH_HANDOFF",
     "PLAN_SPEC",
     "PhaseResult",
