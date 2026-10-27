@@ -33,12 +33,19 @@ from automation.supervisor import run_next
 from . import jspace as jspace_module
 from .cleanroom import WORKSPACE_DIR
 from .instances import TaskSpec
+from . import last_build
 from .jspace import JSpaceArtifact, JSpaceUnavailable
 
 # Phase artifacts live here, inside the workspace so the agent sandbox can write them,
 # and are stripped from the graded submission. Host-side; what the *agent* is told to write
 # is ``artifact_path`` below, which is not always the same string.
 RPI_DIR = ".rpi"
+# Never graded: VCS metadata, the lane's own phase artifacts, and whatever binary sits at
+# the graded path. The evaluator deletes ``./executable`` before running compile.sh either
+# way, but under a cleanroom workspace that file is ProgramBench's *reference* binary, and a
+# submission shipping it reads to the disqualification judge as wrapping the reference.
+EXCLUDED_FROM_SUBMISSION = frozenset({".git", RPI_DIR, "executable"})
+# A restored build (``last_build``) swaps out exactly the rest, so it never touches these either.
 
 # What timeout(1) reports, so the code means the same thing here as it does in a shell.
 AGENT_TIMEOUT_RETURNCODE = 124
@@ -187,6 +194,10 @@ class StrategyResult:
     # How implement received the plan - ``{"mode": IMPLEMENT_PLAN_HANDOFF, "artifact": filename}``.
     # None where the lane has no implement phase of its own or stopped before it.
     implement_plan_handoff: Optional[dict[str, str]] = None
+    # What a budget kill of implement did to the workspace: ``last_build.restore``'s record, or
+    # None where implement was not killed (or the lane never reached it). A restored cell is
+    # graded on the last tree its own build accepted, not on the tree the kill interrupted.
+    implement_restore: Optional[dict[str, Any]] = None
     # Set where a lane stopped because a required handoff never arrived. Left unset, the
     # verdict is read off the phases themselves.
     treatment_invalid_reason: Optional[str] = None
@@ -227,6 +238,7 @@ class StrategyResult:
             "phase_budgets": self.phase_budgets,
             "plan_research_handoff": self.plan_research_handoff,
             "implement_plan_handoff": self.implement_plan_handoff,
+            "implement_restore": self.implement_restore,
             "treatment_validity": self.treatment_validity,
             "treatment_invalid_reason": self._invalid_reason(),
             "treatment_invalid_phase": self._invalid_phase(),
@@ -352,11 +364,6 @@ def workspace_file(filename: str, agent_workspace: str = "") -> str:
     for the same reason, relative to the workspace root locally.
     """
     return f"{agent_workspace.rstrip('/')}/{filename}" if agent_workspace else f"./{filename}"
-
-
-def build_command(agent_workspace: str = "") -> str:
-    """How to run ``compile.sh`` the way the grader does: from the workspace root."""
-    return f"cd {agent_workspace.rstrip('/')} && ./compile.sh" if agent_workspace else "./compile.sh"
 
 
 def read_artifact(workspace: Path, filename: str) -> tuple[Optional[Any], str]:
@@ -552,9 +559,13 @@ re-running `{build}` and seeing it succeed.
 Before starting a command that may block, wait, invoke an interactive program, or consume
 substantial time, make sure `{build}` succeeds on what you have now.
 
-This session can be stopped at any moment without warning. Whatever `{compile_sh}` builds at
-that moment is what gets graded. Your chat response does not count, and probe or analysis
-scripts are not the deliverable: only the source that `{compile_sh}` builds into `{executable}` is.
+`{build}` runs `{compile_sh}` and, each time it succeeds, records the workspace it just built.
+Always build with `{build}`: running `{compile_sh}` directly records nothing.
+
+This session can be stopped at any moment without warning. If it is, the last recorded build is
+what gets graded, and every change made since it is discarded. Your chat response does not count,
+and probe or analysis scripts are not the deliverable: only the source that `{compile_sh}` builds
+into `{executable}` is.
 """
 
 _COMPACT_BODY = """## Phase: Compact ({label})
@@ -677,7 +688,7 @@ def implement_build_first(agent_workspace: str = "") -> str:
     return _IMPLEMENT_BUILD_FIRST.format(
         compile_sh=workspace_file("compile.sh", agent_workspace),
         executable=workspace_file("executable", agent_workspace),
-        build=build_command(agent_workspace),
+        build=last_build.checkpointed_build_command(agent_workspace, RPI_DIR),
     )
 
 
@@ -1007,14 +1018,17 @@ class RpiStrategy:
             if compacted:
                 plan_filename = PLAN_COMPACT_ARTIFACT
 
+        last_build.install(ctx.workspace, RPI_DIR, EXCLUDED_FROM_SUBMISSION)
         prompt = implement_prompt(ctx.task, plan_filename, self.jspace, ctx.agent_workspace)
         implement_result = run.phase("implement", prompt, {"plan": plan})
+        killed = implement_result.returncode == AGENT_TIMEOUT_RETURNCODE
         return self._result(
             run,
             compaction_stats,
             returncode=implement_result.returncode,
             plan_research_handoff=handoff,
             implement_plan_handoff={"mode": IMPLEMENT_PLAN_HANDOFF, "artifact": plan_filename},
+            implement_restore=last_build.restore(ctx.workspace, RPI_DIR, EXCLUDED_FROM_SUBMISSION) if killed else None,
         )
 
 
@@ -1041,6 +1055,7 @@ def build_strategy(lane: str) -> ExecutionStrategy:
 __all__ = [
     "AGENT_TIMEOUT_RETURNCODE",
     "ALL_LANES",
+    "EXCLUDED_FROM_SUBMISSION",
     "LANE_CEILING_SECONDS",
     "PHASE_CEILING_SECONDS",
     "ArtifactSpec",

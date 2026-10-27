@@ -38,6 +38,7 @@ from .witness import SandboxWitness
 from .instances import TaskSpec
 from .strategies import (
     AGENT_TIMEOUT_RETURNCODE,
+    EXCLUDED_FROM_SUBMISSION,
     RPI_DIR,
     ExecutionContext,
     ExecutionStrategy,
@@ -221,11 +222,6 @@ def _subprocess_runner(command: str, workspace: Path, env: Mapping[str, str], ti
             return AGENT_TIMEOUT_RETURNCODE
 
 
-# Never graded: VCS metadata, the lane's own phase artifacts, and whatever binary sits at
-# the graded path. The evaluator deletes ``./executable`` before running compile.sh either
-# way, but under a cleanroom workspace that file is ProgramBench's *reference* binary, and a
-# submission shipping it reads to the disqualification judge as wrapping the reference.
-EXCLUDED_FROM_SUBMISSION = frozenset({".git", RPI_DIR, "executable"})
 # Per-session agent reports, written next to the submission rather than into it.
 AGENT_SESSIONS_DIR = "agent-sessions"
 # What the sandbox was proved to be, written next to the submission it produced.
