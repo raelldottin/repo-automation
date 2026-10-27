@@ -1,9 +1,10 @@
 """Keep the last tree the agent saw build, and grade that one when implement is killed.
 
 Run 40399303297's implement phase was killed at its 5400s budget mid-edit: ``cmatrix.c``
-referenced an identifier it had not declared yet, so a program that had built many times that
-session was scored ``compile_failed``. The build-first protocol asks the agent to keep the
-build green, but a kill lands between an edit and the rebuild that would have checked it.
+referenced an identifier it had not declared yet, and the cell was scored ``compile_failed``.
+Whether that session ever had a building tree is unknown - ``--oneshot`` archived no tool
+transcript - but the build-first protocol asks for one, and a kill lands between an edit and
+the rebuild that would have checked it, discarding whatever built before.
 
 The harness cannot see the agent's builds from the host - ``--oneshot`` leaves no tool
 transcript, and compiling host-side would test a toolchain the grader does not use. So the

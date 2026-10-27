@@ -1094,7 +1094,8 @@ before this change are not comparable with implement results after it.
 The protocol did not survive a kill. Run `40399303297`'s implement phase completed its last
 model call at 3287 seconds, streamed for about 35 minutes, and was killed at its 5400-second
 budget with `cmatrix.c` half-edited: an identifier used before it was declared and a syntax error
-at line 397. A program that had built many times that session was scored `compile_failed`. The
+at line 397, and the cell was scored `compile_failed`. Whether that session ever had a building
+tree is unknown, because no tool transcript survived, but a kill mid-edit discards one if it did. The
 harness cannot see the agent's builds, because `--oneshot` leaves no tool transcript, and
 compiling host-side would test a toolchain the grader does not use. So the record is taken
 inside the build. Before implement, the harness writes `.rpi/build.sh`. It runs `compile.sh` in
