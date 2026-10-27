@@ -138,6 +138,16 @@ next cell opens on top of the previous one's files. That is a silent result, not
 error, which is why the preflight now makes the agent write a file and checks where it
 landed before any budget is spent.
 
+The profile also sets `providers.nvidia.request_timeout_seconds` and
+`stale_timeout_seconds` to 18000 (5 hours). The deployment reaches glm-5.3 through a
+LiteLLM gateway on `127.0.0.1`, which Hermes treats as a local endpoint: both stale
+detectors are off and only the gateway's 5-hour cap applies. The benchmark calls NVIDIA
+directly, where Hermes' defaults would cut a silent response at 90s non-streaming (up to
+240s on large contexts) or 180s on a stream, then retry it. glm-5.3 is not on the pinned
+revision's reasoning-model list, so no floor raises those numbers. With both keys set, a
+response is bounded by its phase budget alone. Runs before this change measured lanes
+under the shorter cutoffs, so their call latencies and retry counts are not comparable.
+
 When that preflight fails, it reads the authenticated `/v1/models` catalog and reports
 **exact membership** of the requested id, not a sample of the catalogue:
 

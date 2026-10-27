@@ -936,6 +936,22 @@ exit 7
             shared = (self.repo_root / "automation/supervisor/hermes-benchmark.yaml").read_text(encoding="utf-8")
             self.assertNotIn("max_turns", shared)
 
+    def test_benchmark_profile_lifts_the_response_cap_for_the_provider_the_workflow_calls(self) -> None:
+        """Hermes keys its timeouts by provider id, so a cap on any other id is silently
+        unused: the session would fall back to the 90s/180s stale detectors the operator's
+        LiteLLM deployment never applies. The id has to be the workflow's own."""
+        workflow = (self.repo_root / ".github/workflows/effectiveness-benchmark.yml").read_text(encoding="utf-8")
+        provider = next(
+            line.split(":", 1)[1].strip()
+            for line in workflow.splitlines()
+            if line.strip().startswith("HERMES_INFERENCE_PROVIDER:")
+        )
+        profile = (self.repo_root / "automation/supervisor/hermes-benchmark.yaml").read_text(encoding="utf-8")
+        self.assertIn(
+            f"providers:\n  {provider}:\n    request_timeout_seconds: 18000\n    stale_timeout_seconds: 18000\n",
+            profile,
+        )
+
     def test_agent_wrapper_pins_the_model_on_the_transport_that_ignores_the_env_var(self) -> None:
         """HERMES_INFERENCE_MODEL reaches --oneshot and the TUI and nothing else. On the chat
         path cli_init_mixin resolves `model or config.model.default or ""` and says the
