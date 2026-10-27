@@ -528,10 +528,12 @@ class ImplementBuildFirstProtocolTests(unittest.TestCase):
             "`./compile.sh` and make it executable. It must build `./executable`: at first a stub",
             protocol,
         )
-        self.assertIn("Then run `./compile.sh` and see it succeed.", protocol)
-        self.assertIn("never make more than three tool calls without re-running `./compile.sh`", protocol)
-        self.assertIn("make sure `./compile.sh` succeeds on what you have now", protocol)
-        self.assertIn("Whatever `./compile.sh` builds at that moment is what gets graded", protocol)
+        self.assertIn("Then run `./.rpi/build.sh` and see it succeed.", protocol)
+        self.assertIn("never make more than three tool calls without re-running `./.rpi/build.sh`", protocol)
+        self.assertIn("make sure `./.rpi/build.sh` succeeds on what you have now", protocol)
+        self.assertIn("`./.rpi/build.sh` runs `./compile.sh` and, each time it succeeds, records the workspace", protocol)
+        self.assertIn("running `./compile.sh` directly records nothing", protocol)
+        self.assertIn("the last recorded build is what gets graded", protocol)
         self.assertIn("Your chat response does not count", protocol)
         self.assertIn("probe or analysis scripts are not the deliverable", protocol)
 
@@ -540,8 +542,8 @@ class ImplementBuildFirstProtocolTests(unittest.TestCase):
         protocol = self._protocol(implement_prompt(TASK, agent_workspace=WORKSPACE_DIR))
         self.assertIn(f"create `{WORKSPACE_DIR}/compile.sh` and make it executable", protocol)
         self.assertIn(f"It must build `{WORKSPACE_DIR}/executable`", protocol)
-        self.assertIn(f"Then run `cd {WORKSPACE_DIR} && ./compile.sh` and see it succeed.", protocol)
-        self.assertIn(f"re-running `cd {WORKSPACE_DIR} && ./compile.sh`", protocol)
+        self.assertIn(f"Then run `cd {WORKSPACE_DIR} && ./.rpi/build.sh` and see it succeed.", protocol)
+        self.assertIn(f"re-running `cd {WORKSPACE_DIR} && ./.rpi/build.sh`", protocol)
         self.assertNotIn("`./compile.sh`", protocol)
         self.assertNotIn("`./executable`", protocol)
 

@@ -1085,12 +1085,33 @@ build. The RPI implement prompt (lanes C/D/E) now ends with a **build-first prot
 probe script or deeper exploration, create a workspace-root `compile.sh` that builds a stub
 `./executable` and see it succeed, then grow the program in small steps, rebuild after each
 meaningful change, never make more than three tool calls without a successful rebuild, and make
-sure the build works before anything slow or blocking. Whatever `compile.sh` builds when the
-session stops is what is graded. Paths are absolute under the sandbox, as artifact paths are. Lanes
+sure the build works before anything slow or blocking. Paths are absolute under the sandbox, as artifact paths are. Lanes
 A and B are single-session controls whose prompts define their treatment, so they do not get the
 protocol, which means A/B and C/D/E now differ in this instruction as well as in their phases.
 Research, plan, compaction and lane A prompts are unchanged byte for byte. Implement results from
 before this change are not comparable with implement results after it.
+
+The protocol did not survive a kill. Run `40399303297`'s implement phase completed its last
+model call at 3287 seconds, streamed for about 35 minutes, and was killed at its 5400-second
+budget with `cmatrix.c` half-edited: an identifier used before it was declared and a syntax error
+at line 397, and the cell was scored `compile_failed`. Whether that session ever had a building
+tree is unknown, because no tool transcript survived, but a kill mid-edit discards one if it did. The
+harness cannot see the agent's builds, because `--oneshot` leaves no tool transcript, and
+compiling host-side would test a toolchain the grader does not use. So the record is taken
+inside the build. Before implement, the harness writes `.rpi/build.sh`. It runs `compile.sh` in
+the agent's own environment and, only when that exits 0, writes a tarball of exactly what the
+submission would contain to `.rpi/last-build.tar`, via a temp file and `mv` so a kill
+mid-write keeps the previous record. The build-first protocol names that script as the build
+command and says a stopped session is graded on the last recorded build. When implement is
+killed at its budget, the harness swaps the workspace's submittable contents for that record
+before the submission is archived. `.git`, `.rpi` and the reference `executable` are never
+swapped, because they are never submitted. The record is checked before anything is removed:
+it is written from inside the sandbox, so it is extracted with tarfile's `data` filter into a
+staging directory first. An implement that ends on its own is graded as it left the
+workspace. Each RPI result records what happened as `implement_restore`:
+`{"restored": true, "entries": [...]}`, a reason when nothing could be restored, or null
+when implement was not killed. Lanes A and B have no build-first protocol and are never
+restored. Implement results from before this change are not comparable with those after it.
 
 Research, meanwhile, never ended on its own. In run `40298563694` it made 42 calls and was still
 streaming when its 2160-second budget killed it, with a valid 9397-character artifact already
