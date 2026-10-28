@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from automation.context import memory
 from automation.supervisor import policy
 
 
@@ -46,11 +47,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-doc-chars", type=int, default=2500, help="Maximum characters to keep from each selected document excerpt."
     )
+    parser.add_argument("--memory-config", help="Optional operator-reviewed Hindsight project-to-bank map (JSON).")
+    parser.add_argument("--memory-project", help="Project whose granted bank to recall from; required with --memory-config.")
     return parser.parse_args()
 
 
 def build_context_bundle(
-    repo_root: Path, queue_path: Path, handoff_dir: Path, slice_id: str, max_doc_chars: int = 2500
+    repo_root: Path,
+    queue_path: Path,
+    handoff_dir: Path,
+    slice_id: str,
+    max_doc_chars: int = 2500,
+    memory_config: Optional[memory.MemoryConfig] = None,
+    memory_project: Optional[str] = None,
 ) -> dict[str, Any]:
     queue_data = policy.load_queue(queue_path)
     slice_record = policy.find_slice(queue_data, slice_id)
@@ -63,7 +72,7 @@ def build_context_bundle(
     document_specs = resolve_document_specs(slice_record=slice_record, repo_root=repo_root)
     documents = load_documents(repo_root, document_specs, max_doc_chars=max_doc_chars)
 
-    return {
+    bundle: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "policy_sentence": POLICY_SENTENCE,
         "repo": {
@@ -80,6 +89,12 @@ def build_context_bundle(
         "handoff_template": build_handoff_template(slice_record),
         "documents": documents,
     }
+    # Without a memory map the bundle is exactly what it was before RA-CP-003: no key at all.
+    if memory_config is not None:
+        if not memory_project:
+            raise policy.ConfigError("a memory config needs the project whose bank to recall from")
+        bundle["memory"] = memory.recall_section(memory_config, memory_project, slice_record["title"], repo_root)
+    return bundle
 
 
 def summarize_slice(slice_record: dict[str, Any]) -> dict[str, Any]:
@@ -344,6 +359,8 @@ def main() -> int:
         handoff_dir=handoff_dir,
         slice_id=args.slice_id,
         max_doc_chars=args.max_doc_chars,
+        memory_config=memory.load_config(repo_root / args.memory_config) if args.memory_config else None,
+        memory_project=args.memory_project,
     )
 
     payload = json.dumps(bundle, indent=2, ensure_ascii=False)
