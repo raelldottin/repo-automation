@@ -209,19 +209,31 @@ jobs:
       # same usage and controls reports a real cell produces.
       - name: Verify the agent can complete one session
         if: inputs.preflight_only != true
+        # The session inherits the profile's 18000s provider timeouts, which are sized for a
+        # lane's longest response, not for a one-file task. Unbounded, run 40665254421 waited
+        # 1h40m on a provider that never answered. The slowest preflight that passed took
+        # 4m55s (run 36578712988), so 600s is twice that and a silent provider fails here.
+        env:
+          PREFLIGHT_SESSION_SECONDS: "600"
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/agent-preflight"
           git -C "$RUNNER_TEMP/agent-preflight" init --quiet
           printf 'Create a file named agent-was-here.txt containing the single word ok in your current working directory, then reply with the single word: ok\n' > "$RUNNER_TEMP/preflight-prompt.md"
           echo '{}' > "$RUNNER_TEMP/preflight-context.json"
-          if ! REPO_AUTOMATION_HERMES_USAGE_DIR="$RUNNER_TEMP/preflight-session" \
+          status=0
+          REPO_AUTOMATION_HERMES_USAGE_DIR="$RUNNER_TEMP/preflight-session" \
+            timeout --kill-after=30 "$PREFLIGHT_SESSION_SECONDS" \
             automation/supervisor/run_agent.sh \
               --repo-root "$RUNNER_TEMP/agent-preflight" \
               --prompt-file "$RUNNER_TEMP/preflight-prompt.md" \
               --context-file "$RUNNER_TEMP/preflight-context.json" \
               --handoff-file "$RUNNER_TEMP/preflight-handoff.json" \
-              --slice-id preflight 2>&1 | tee /tmp/preflight.log; then
+              --slice-id preflight 2>&1 | tee /tmp/preflight.log || status=$?
+          if [ "$status" -ne 0 ]; then
+            if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+              echo "::error::The trivial session did not finish within ${PREFLIGHT_SESSION_SECONDS}s and was stopped." >&2
+            fi
             echo "::error::The agent could not complete a trivial session with ${HERMES_INFERENCE_MODEL}." >&2
             # Exact membership, not a sample. This printed the first 40 ids alphabetically,
             # which stopped at nvidia/* - so for a z-ai model it could never show the one id
