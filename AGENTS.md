@@ -40,6 +40,7 @@ Current registered paths:
 | Handoff schema validation through `policy.validate_document` | `test_validate_handoff_benchmark` |
 | Context-bundle construction through `build_context_bundle` | `test_build_context_bundle_benchmark` |
 | Kanban board projection through `kanban_projection.read_board` and `kanban_projection.project` | `test_project_kanban_board_benchmark` |
+| Memory recall shaping and provenance verification through `memory.shape_recall` | `test_shape_memory_recall_benchmark` |
 
 The registry MUST remain at **100% benchmark coverage**.
 
