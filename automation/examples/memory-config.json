@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "endpoint": "http://127.0.0.1:8888",
+  "api_key_env": "HINDSIGHT_API_KEY",
+  "timeout_seconds": 5,
+  "budgets": {
+    "max_request_bytes": 65536,
+    "max_response_bytes": 262144,
+    "recall_max_tokens": 1024,
+    "reflect_max_tokens": 512,
+    "max_results": 5,
+    "max_result_chars": 600,
+    "max_total_chars": 2000
+  },
+  "projects": {
+    "example-project": {"bank_id": "example-bank", "board": "example-board", "operations": ["recall"]},
+    "other-project": {"bank_id": "other-bank", "board": "other-board", "operations": ["recall", "retain", "reflect"]}
+  }
+}

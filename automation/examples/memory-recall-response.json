@@ -1,0 +1,63 @@
+{
+  "results": [
+    {
+      "id": "fact-001",
+      "text": "The example handoff for today-nonfocus-add-to-focus ended done with domain-tested proof.",
+      "type": "world",
+      "document_id": "automation/examples/example-handoff.json",
+      "metadata": {
+        "source_path": "automation/examples/example-handoff.json",
+        "source_sha256": "1cfb6b9be922e3665271b2e48860b45977abef0ad5e77a8721bba3a8375a76ca",
+        "evidence_ref": "handoff:automation/examples/example-handoff.json"
+      },
+      "scores": {"combined": 0.91}
+    },
+    {
+      "id": "fact-002",
+      "text": "The example queue lists three slices and allows two consecutive autonomous runs.",
+      "type": "world",
+      "document_id": "automation/examples/example-slices.json",
+      "metadata": {
+        "source_path": "automation/examples/example-slices.json",
+        "source_sha256": "41e2e2c17913ce591ac027f84efa56117298adfb6e445a1b55f8e83206c8e30a",
+        "evidence_ref": "queue:automation/examples/example-slices.json"
+      }
+    },
+    {
+      "id": "fact-003",
+      "text": "A fact retained without any provenance metadata.",
+      "type": "experience"
+    },
+    {
+      "id": "fact-004",
+      "text": "A fact whose source changed after it was retained.",
+      "type": "world",
+      "metadata": {
+        "source_path": "automation/examples/example-slices.json",
+        "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "evidence_ref": "queue:automation/examples/example-slices.json"
+      }
+    },
+    {
+      "id": "fact-005",
+      "text": "A fact whose source file no longer exists.",
+      "type": "world",
+      "metadata": {
+        "source_path": "automation/examples/deleted-source.md",
+        "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "evidence_ref": "commit:0000000"
+      }
+    },
+    {
+      "id": "fact-006",
+      "text": "A fact that claims a source outside the repository.",
+      "type": "world",
+      "metadata": {
+        "source_path": "../outside.md",
+        "source_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "evidence_ref": "commit:0000000"
+      }
+    }
+  ],
+  "source_facts": null
+}

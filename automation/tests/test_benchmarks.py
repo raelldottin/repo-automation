@@ -8,12 +8,14 @@ asserts the measured result without touching consumer repository state.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+from automation.context import memory
 from automation.context.build_context import build_context_bundle
 from automation.schemas import models
 from automation.supervisor import kanban_projection, policy
@@ -24,6 +26,8 @@ EXAMPLE_QUEUE = REPO_ROOT / "automation/examples/example-slices.json"
 EXAMPLE_HANDOFF = REPO_ROOT / "automation/examples/example-handoff.json"
 EXAMPLE_KANBAN_BOARD = REPO_ROOT / "automation/examples/kanban-board.sql"
 EXAMPLE_KANBAN_OVERLAY = REPO_ROOT / "automation/examples/kanban-overlay.json"
+EXAMPLE_MEMORY_CONFIG = REPO_ROOT / "automation/examples/memory-config.json"
+EXAMPLE_MEMORY_RECALL = REPO_ROOT / "automation/examples/memory-recall-response.json"
 
 
 @pytest.mark.benchmark
@@ -99,3 +103,14 @@ def test_project_kanban_board_benchmark(benchmark, tmp_path):
     selected_slice = policy.select_next_slice(projection.queue)
     assert selected_slice is not None
     assert selected_slice["slice_id"] == "kanban.example-board.t_000000a3"
+
+
+@pytest.mark.benchmark
+def test_shape_memory_recall_benchmark(benchmark):
+    budgets = memory.load_config(EXAMPLE_MEMORY_CONFIG).budgets
+    response = json.loads(EXAMPLE_MEMORY_RECALL.read_text(encoding="utf-8"))
+
+    shaped = benchmark(memory.shape_recall, response, REPO_ROOT, budgets)
+
+    assert [item["id"] for item in shaped["results"]] == ["fact-001", "fact-002"]
+    assert [item["id"] for item in shaped["rejected"]] == ["fact-003", "fact-004", "fact-005", "fact-006"]

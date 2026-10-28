@@ -36,6 +36,7 @@ nav:
   - Control Plane Specification: architecture/control-plane.md
   - Control Plane Inventory: architecture/control-plane-inventory.md
   - Kanban Projection Contract: architecture/kanban-projection.md
+  - Memory Interface Contract: architecture/memory-interface.md
   - Roadmap: roadmap.md
   - Workflow: workflows/repo-automation.md
   - Effectiveness Benchmark: workflows/effectiveness-benchmark.md
