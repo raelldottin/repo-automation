@@ -12,7 +12,7 @@ dev = [
     "ruff==0.17.2",
     "ty==0.0.89",
     "pytest==9.1.1",
-    "pytest-cov==6.0.0",
+    "pytest-cov==7.1.0",
     "pytest-codspeed==5.0.3",
     "coverage==7.16.2",
     "mkdocs-material==9.7.7",
