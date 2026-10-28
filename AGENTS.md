@@ -39,6 +39,7 @@ Current registered paths:
 | Next-slice selection through `policy.select_next_slice` | `test_select_next_slice_benchmark` |
 | Handoff schema validation through `policy.validate_document` | `test_validate_handoff_benchmark` |
 | Context-bundle construction through `build_context_bundle` | `test_build_context_bundle_benchmark` |
+| Kanban board projection through `kanban_projection.read_board` and `kanban_projection.project` | `test_project_kanban_board_benchmark` |
 
 The registry MUST remain at **100% benchmark coverage**.
 

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "board": "example-board",
+  "policy": {
+    "consecutive_autonomous_limit": 2,
+    "handoff_timeout_seconds": 1800,
+    "agent_command_template": "",
+    "supervisor_owned_paths": ["automation/queue/slices.json"]
+  },
+  "approved": {
+    "t_000000a1": {
+      "domain": "cli",
+      "allowed_paths": ["src/parser.py", "tests/test_parser.py"],
+      "required_validations": ["python -m pytest tests/test_parser.py"],
+      "max_files_changed": 2
+    },
+    "t_000000a2": {
+      "domain": "cli",
+      "allowed_paths": ["src/cli.py"],
+      "required_validations": ["python -m pytest tests"],
+      "max_files_changed": 3,
+      "required_proof_level": "domain-tested"
+    },
+    "t_000000a3": {
+      "domain": "performance",
+      "allowed_paths": ["src/loop.py"],
+      "required_validations": [],
+      "max_files_changed": 1
+    },
+    "t_000000a4": {
+      "domain": "docs",
+      "allowed_paths": ["docs/cli.md"],
+      "required_validations": [],
+      "max_files_changed": 1
+    },
+    "t_000000a5": {
+      "domain": "cli",
+      "allowed_paths": ["src/flags.py"],
+      "required_validations": [],
+      "max_files_changed": 1
+    },
+    "t_000000a7": {
+      "domain": "docs",
+      "allowed_paths": ["CHANGELOG.md"],
+      "required_validations": [],
+      "max_files_changed": 1
+    },
+    "t_000000a8": {
+      "domain": "cli",
+      "allowed_paths": ["src/vendor.py"],
+      "required_validations": [],
+      "max_files_changed": 1,
+      "entry_condition": "Vendor ships the upstream fix."
+    }
+  }
+}
