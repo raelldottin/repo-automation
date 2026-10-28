@@ -1,8 +1,8 @@
-# Memory interface contract (RA-CP-003)
+# Memory interface contract (RA-CP-003, RA-CP-004)
 
 Status: **client adapter only. No Hindsight is installed, configured or started by this change.** No `bank_id` exists yet ([inventory](control-plane-inventory.md)). Memory is optional: without a memory map, `build_context_bundle` returns exactly the bundle it returned before this change.
 
-Code: `automation/context/memory.py`. Tests: `automation/tests/test_memory.py`. Fixtures: `automation/examples/memory-config.json` and `automation/examples/memory-recall-response.json` (synthetic). Specification: [SPEC-001, section B](control-plane.md).
+Code: `automation/context/memory.py`. Tests: `automation/tests/test_memory.py` and `automation/tests/test_memory_snapshot.py`. Fixtures: `automation/examples/memory-config.json` and `automation/examples/memory-recall-response.json` (synthetic). Specification: [SPEC-001, section B](control-plane.md).
 
 ## Upstream API
 
@@ -13,10 +13,11 @@ The request and response shapes come from `vectorize-io/hindsight` pinned at `d9
 | retain | `POST /v1/default/banks/{bank_id}/memories` | `RetainRequest` / `RetainResponse` |
 | recall | `POST /v1/default/banks/{bank_id}/memories/recall` | `RecallRequest` / `RecallResponse` |
 | reflect | `POST /v1/default/banks/{bank_id}/reflect` | `ReflectRequest` / `ReflectResponse` |
+| snapshot | `GET /v1/default/banks/{bank_id}/memories/list?limit=&offset=` | `ListMemoryUnitsResponse` of `MemoryUnitListItem` |
 
 Sources at that revision:
 
-- `hindsight-docs/static/openapi.json`: the routes and the schemas above, including `RecallResult.metadata` (`dict[str, str]`) and `MemoryItem.metadata` / `document_id`.
+- `hindsight-docs/static/openapi.json`: the routes and the schemas above, including `RecallResult.metadata` (`dict[str, str]`), `MemoryItem.metadata` / `document_id`, and the list route's `limit` / `offset` paging.
 - `hindsight-api-slim/hindsight_api/api/http.py`: the route handlers, and `get_request_context`, which reads `Authorization: Bearer <api_key>` (or a bare key).
 
 The adapter talks REST with the standard library. It doesn't use the generated Python client, so it adds no dependency. Nothing here has been run against a live server. Whether recall returns the `metadata` a retain stored is taken from the schema. A live canary has to confirm it before anything relies on memory (RA-CP-005).
@@ -32,7 +33,8 @@ The adapter talks REST with the standard library. It doesn't use the generated P
   "api_key_env": "HINDSIGHT_API_KEY",
   "timeout_seconds": 5,
   "budgets": {"max_request_bytes": 65536, "max_response_bytes": 262144, "recall_max_tokens": 1024,
-              "reflect_max_tokens": 512, "max_results": 5, "max_result_chars": 600, "max_total_chars": 2000},
+              "reflect_max_tokens": 512, "max_results": 5, "max_result_chars": 600, "max_total_chars": 2000,
+              "max_snapshot_memories": 10000},
   "projects": {"<project>": {"bank_id": "<bank>", "board": "<kanban slug>", "operations": ["recall"]}}
 }
 ```
@@ -40,7 +42,7 @@ The adapter talks REST with the standard library. It doesn't use the generated P
 - **Endpoint.** Either `https`, or plain `http` to a loopback host (`127.0.0.1`, `::1`, `localhost`). The URL may not carry userinfo, a query or a fragment. The adapter ignores proxy environment variables and never follows a redirect, because a redirect would replay the `Authorization` header to the host it names.
 - **Credentials.** `api_key_env` names an environment variable, and the key is read from it at call time. The map never holds the key. If the variable is named but unset, the call is refused and the error names the variable, never a value. If `api_key_env` is omitted, no `Authorization` header is sent.
 - **Banks.** Each project maps to exactly one `bank_id`, and no two projects may share one. `board` records the canonical Kanban board slug, which uses the same pattern as RA-CP-002.
-- **Operations.** `recall`, `retain` and `reflect` are granted per project. Retain and reflect are separate, explicit grants, and the context workflow never calls them.
+- **Operations.** `recall`, `retain`, `reflect` and `snapshot` are granted per project. Retain, reflect and snapshot are separate, explicit grants, and the context workflow never calls them. A `recall` grant does not allow a snapshot: a snapshot exports the whole bank.
 
 ## A bank ID is not authorization
 
@@ -72,9 +74,10 @@ A retain receipt (`server_success`, `server_items_count`) only repeats what the 
 | --- | --- |
 | `timeout_seconds` | each socket operation of one call (connect, send, each read) |
 | `max_request_bytes` | the encoded request body; an oversized retain is refused, never truncated, because the digest covers the whole file |
-| `max_response_bytes` | the response body; anything larger is treated as unavailable |
+| `max_response_bytes` | the response body, and each snapshot page of up to 100 rows; anything larger is treated as unavailable |
 | `recall_max_tokens`, `reflect_max_tokens` | sent to Hindsight as `max_tokens` |
 | `max_results`, `max_result_chars`, `max_total_chars` | the verified results kept, in server order; `dropped` counts verified results that did not fit, and `truncated` says whether anything was cut |
+| `max_snapshot_memories` | optional, default 10000; a bank holding more is refused, never exported partially |
 
 | Failure | Result |
 | --- | --- |
@@ -84,6 +87,7 @@ A retain receipt (`server_success`, `server_items_count`) only repeats what the 
 | other HTTP status, non-JSON body, or a body that doesn't match the pinned schema | `MemoryUnavailable` |
 | ungranted project, bank or operation; missing credential; `401`/`403` | `MemoryAccessError`; for an authorization failure, no request is sent |
 | empty recall | `status: "empty"` |
+| bank changed between snapshot pages | `MemoryUnavailable`; capture again |
 
 The timeout applies to each socket operation, not the whole call. A server that trickles bytes could keep one call open longer than `timeout_seconds`.
 
@@ -104,11 +108,31 @@ The timeout applies to each socket operation, not the whole call. A server that 
 
 An unavailable server doesn't stop the bundle. The section records `status: "unavailable"` and the `error`, with no results. A map error does stop it. The section contains no timestamps, and `rejected` is sorted, so the same server response always produces the same section. `run_next` doesn't pass a memory map yet, so no supervised run gets this section today. `run_next.render_prompt` builds the agent prompt from named bundle fields, and memory is not one of them.
 
+## Snapshot export for the Swarm Wiki (RA-CP-004)
+
+The Swarm Wiki compiler (`raelldottin/hermes-swarm-protocol`, `ops/build_wiki.py --memory <dir> --memory-bank <bank>`) never calls Hindsight. It reads snapshot files, and an operator captures them with this adapter:
+
+```bash
+python -m automation.context.memory snapshot --config <memory map> --project <project> \
+  --captured-by <operator> --out <existing snapshot directory>
+```
+
+- **Authorization.** The bank is the one the map grants the project, and the grant must include `snapshot`.
+- **Complete or nothing.** The list route is paged 100 rows at a time. If `total` changes, a row repeats or a page comes back short, the capture stops with `MemoryUnavailable`, because a partial snapshot would look complete. A bank over `max_snapshot_memories` is refused before more pages are read.
+- **Faithful.** Rows are kept as the server returned them, sorted by `id`. The export does not judge provenance. The compiler labels every memory `UNVERIFIED` and reports missing provenance, changed sources and generated consolidations.
+- **Format.** `{"format": "hindsight-snapshot/v1", "project", "bank_id", "captured_at", "captured_by", "hindsight_revision", "memories"}` as canonical JSON (sorted keys, no whitespace, ASCII).
+- **Content-addressed.** The file is named `<sha256 of its bytes>.json` and written atomically into an existing, non-symlink directory. Capturing an unchanged bank again at the same instant reuses the file. A file of that name with other bytes was edited after capture, so it is never overwritten. The compiler shows such a file as `CHANGED SNAPSHOT`.
+- **Where.** Snapshots hold project memory, so the directory belongs outside any repository. This repository holds none.
+
+Exit codes: `0` written (the path, bank and memory count print as JSON), `1` Hindsight unavailable, `2` refused (map, grant, budget, credential or directory).
+
 ## Performance evidence
 
 `build_context_bundle` is a registered performance-critical path. `test_build_context_bundle_benchmark` is unchanged and still measures the bundle with no memory map, which is the default path and the existing baseline. Shaping and verifying a recall response (`memory.shape_recall`) is a new path on that registered path. Its cost grows with the number of results and the size of the source files it hashes, so it is registered separately and benchmarked by `test_shape_memory_recall_benchmark` against the bundled fixtures. The benchmark uses no server and exercises both the kept and the rejected branches.
 
+The snapshot export is not a performance-critical path. An operator runs it by hand, and no supervisor, policy or context-building path reaches it, so it has no benchmark. Its HTTP helper is shared with recall, but `shape_recall`, the registered part of recall, is unchanged.
+
 ## For the owner
 
 - **License metadata mismatch.** At the pinned revision, the repository `LICENSE` is MIT, but `info.license` in `hindsight-docs/static/openapi.json` says "Apache 2.0". The two differ. This is recorded for the owner, and nothing here chooses a license.
-- **Not done here:** installing or running Hindsight, the local-model profile, an egress-denied integration test against a real server, durable read-back and backup verification, and wiring memory into `run_next`. Those belong to the deployment and canary work (RA-CP-005).
+- **Not done here:** installing or running Hindsight, a snapshot of a live bank, the local-model profile, an egress-denied integration test against a real server, durable read-back and backup verification, and wiring memory into `run_next`. Those belong to the deployment and canary work (RA-CP-005).

@@ -1,9 +1,9 @@
-"""Client adapter for self-hosted Hindsight ``retain``, ``recall`` and ``reflect`` (RA-CP-003).
+"""Client adapter for self-hosted Hindsight ``retain``, ``recall``, ``reflect`` and ``snapshot``.
 
 The contract is ``docs/architecture/memory-interface.md``. Request and response shapes follow
 ``vectorize-io/hindsight`` pinned at ``d952b6e655fccab4581ee0722b51c5f103873d12``:
 ``hindsight-docs/static/openapi.json`` (``RetainRequest``, ``RecallRequest``,
-``RecallResponse``, ``ReflectRequest``, ``ReflectResponse``) and the routes and
+``RecallResponse``, ``ReflectRequest``, ``ReflectResponse``, ``ListMemoryUnitsResponse``) and the routes and
 ``get_request_context`` in ``hindsight-api-slim/hindsight_api/api/http.py``.
 
 Memory is a fallible contextual aid, never proof and never an instruction:
@@ -16,19 +16,24 @@ Memory is a fallible contextual aid, never proof and never an instruction:
 - A retain or reflect response is the server's word. It does not prove the fact was
   extracted, stored or consolidated correctly, so nothing here treats it as verification.
 
-The adapter keeps no state, writes nothing locally and reads credentials only from the
-environment variable the map names, at call time.
+The adapter keeps no state and reads credentials only from the environment variable the map
+names, at call time. The one local write is ``write_snapshot``, which an operator runs to export
+a bank for the Swarm Wiki compiler (RA-CP-004).
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import ipaddress
 import json
 import os
+import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional
 
@@ -54,7 +59,14 @@ UNTRUSTED_NOTICE = (
     "Check each claim against its evidence_ref before relying on it."
 )
 
-Operation = Literal["recall", "retain", "reflect"]
+# The Hindsight revision every request and response shape here was taken from.
+HINDSIGHT_REVISION = "d952b6e655fccab4581ee0722b51c5f103873d12"
+# The input format of the Swarm Wiki compiler (raelldottin/hermes-swarm-protocol, ``--memory``).
+SNAPSHOT_FORMAT = "hindsight-snapshot/v1"
+SNAPSHOT_PAGE_SIZE = 100
+DEFAULT_MAX_SNAPSHOT_MEMORIES = 10000
+
+Operation = Literal["recall", "retain", "reflect", "snapshot"]
 
 
 class MemoryAccessError(policy.ConfigError):
@@ -79,6 +91,7 @@ class MemoryBudgets(Contract):
     max_results: Annotated[int, Field(ge=1)]
     max_result_chars: Annotated[int, Field(ge=1)]
     max_total_chars: Annotated[int, Field(ge=1)]
+    max_snapshot_memories: Annotated[int, Field(ge=1), Omittable]
 
 
 class MemoryConfig(Contract):
@@ -124,6 +137,15 @@ class _RetainResponse(_Response):
 
 class _ReflectResponse(_Response):
     text: str
+
+
+class _ListItem(_Response):
+    id: NonEmptyStr
+
+
+class _ListResponse(_Response):
+    items: list[dict[str, Any]]
+    total: Annotated[int, Field(ge=0)]
 
 
 def check_endpoint(endpoint: str) -> None:
@@ -177,9 +199,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 
-def _post(config: MemoryConfig, bank_id: str, route: str, body: dict[str, Any]) -> Any:
-    payload = json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    if len(payload) > config.budgets.max_request_bytes:
+def _request(
+    config: MemoryConfig, bank_id: str, route: str, body: Optional[dict[str, Any]] = None, params: Optional[dict[str, Any]] = None
+) -> Any:
+    """POST ``body`` as JSON, or GET with ``params`` when there is no body."""
+    payload = None if body is None else json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    if payload is not None and len(payload) > config.budgets.max_request_bytes:
         raise MemoryAccessError(f"request of {len(payload)} bytes exceeds max_request_bytes={config.budgets.max_request_bytes}")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if config.api_key_env:
@@ -188,7 +213,9 @@ def _post(config: MemoryConfig, bank_id: str, route: str, body: dict[str, Any]) 
             raise MemoryAccessError(f"credential variable {config.api_key_env} is not set")
         headers["Authorization"] = f"Bearer {api_key}"
     url = f"{config.endpoint.rstrip('/')}/v1/default/banks/{urllib.parse.quote(bank_id, safe='')}{route}"
-    request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, data=payload, headers=headers, method="GET" if payload is None else "POST")
     limit = config.budgets.max_response_bytes
     # ponytail: timeout bounds each socket operation, not the whole call; a server that
     # trickles bytes can run past it. Add a wall-clock deadline if that is ever observed.
@@ -253,7 +280,7 @@ def recall(config: MemoryConfig, project: str, bank_id: str, query: str, repo_ro
         "budget": "low",
         "max_tokens": config.budgets.recall_max_tokens,
     }
-    response = _parse(_RecallResponse, _post(config, bank_id, "/memories/recall", body))
+    response = _parse(_RecallResponse, _request(config, bank_id, "/memories/recall", body))
     return {"bank_id": bank_id, **shape_recall(response.model_dump(), repo_root, config.budgets)}
 
 
@@ -343,7 +370,7 @@ def retain(
             "evidence_ref": evidence_ref,
         },
     }
-    response = _parse(_RetainResponse, _post(config, bank_id, "/memories", {"items": [item], "async": False}))
+    response = _parse(_RetainResponse, _request(config, bank_id, "/memories", {"items": [item], "async": False}))
     return {
         "bank_id": bank_id,
         "document_id": source_path,
@@ -357,7 +384,7 @@ def reflect(config: MemoryConfig, project: str, bank_id: str, query: str) -> dic
     """Ask Hindsight to reason over the bank. The answer is generated text, never source proof."""
     authorize(config, project, bank_id, "reflect")
     body = {"query": query, "budget": "low", "max_tokens": config.budgets.reflect_max_tokens}
-    response = _parse(_ReflectResponse, _post(config, bank_id, "/reflect", body))
+    response = _parse(_ReflectResponse, _request(config, bank_id, "/reflect", body))
     text = response.text[: config.budgets.max_total_chars]
     return {
         "bank_id": bank_id,
@@ -382,3 +409,105 @@ def recall_section(config: MemoryConfig, project: str, query: str, repo_root: Pa
         return {**section, **recall(config, project, grant.bank_id, query, repo_root)}
     except MemoryUnavailable as error:
         return {**section, "bank_id": grant.bank_id, "status": "unavailable", "error": str(error), "results": []}
+
+
+def snapshot(
+    config: MemoryConfig, project: str, bank_id: str, captured_by: str, captured_at: Optional[str] = None
+) -> dict[str, Any]:
+    """Export every memory unit in the bank as a ``hindsight-snapshot/v1`` document.
+
+    Pages ``GET /memories/list`` in full. A bank that changes between pages, or that holds more
+    than ``max_snapshot_memories``, is refused rather than exported partially, because a partial
+    snapshot would read as a complete one. Rows are kept as the server returned them, sorted by
+    id: the compiler, not this export, judges their provenance.
+    """
+    authorize(config, project, bank_id, "snapshot")
+    if not captured_by.strip():
+        raise MemoryAccessError("a snapshot needs the operator who captured it")
+    limit = config.budgets.max_snapshot_memories or DEFAULT_MAX_SNAPSHOT_MEMORIES
+    rows: dict[str, dict[str, Any]] = {}
+    total: Optional[int] = None
+    changed = MemoryUnavailable("bank changed during the snapshot; capture again")
+    while True:
+        params = {"limit": SNAPSHOT_PAGE_SIZE, "offset": len(rows)}
+        page = _parse(_ListResponse, _request(config, bank_id, "/memories/list", params=params))
+        if total is None:
+            total = page.total
+            if total > limit:
+                raise MemoryAccessError(f"bank {bank_id!r} holds {total} memories, over max_snapshot_memories={limit}")
+        if page.total != total:
+            raise changed
+        for item in page.items:
+            row_id = _parse(_ListItem, item).id
+            if row_id in rows:
+                raise changed
+            rows[row_id] = item
+        if len(rows) >= total:
+            break
+        if not page.items:
+            raise changed
+    if len(rows) != total:
+        raise changed
+    return {
+        "format": SNAPSHOT_FORMAT,
+        "project": project,
+        "bank_id": bank_id,
+        "captured_at": captured_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "captured_by": captured_by,
+        "hindsight_revision": HINDSIGHT_REVISION,
+        "memories": [rows[row_id] for row_id in sorted(rows)],
+    }
+
+
+def snapshot_bytes(document: dict[str, Any]) -> bytes:
+    """Canonical bytes, matching the compiler's ``wiki_records.canonical``."""
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+
+
+def write_snapshot(document: dict[str, Any], out_dir: Path) -> Path:
+    """Write ``<sha256>.json`` into an existing, non-symlink directory; never overwrite other bytes."""
+    if out_dir.is_symlink() or not out_dir.is_dir():
+        raise MemoryAccessError(f"snapshot directory {out_dir} must be an existing directory, not a symlink")
+    try:
+        data = snapshot_bytes(document)
+    except ValueError:
+        raise MemoryUnavailable("snapshot holds a non-finite number") from None
+    path = out_dir / (hashlib.sha256(data).hexdigest() + ".json")
+    if path.exists():
+        # Content-addressed: an existing file of this name already holds these bytes, unless edited.
+        if path.read_bytes() != data:
+            raise MemoryAccessError(f"{path} exists with other bytes; it was edited after capture")
+        return path
+    with tempfile.NamedTemporaryFile(dir=out_dir, prefix=".snapshot-", delete=False) as handle:
+        handle.write(data)
+    os.replace(handle.name, path)
+    return path
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Export one Hindsight bank as a Swarm Wiki snapshot.")
+    parser.add_argument("command", choices=["snapshot"])
+    parser.add_argument("--config", type=Path, required=True, help="Operator-reviewed memory map (JSON).")
+    parser.add_argument("--project", required=True, help="Project whose granted bank is exported.")
+    parser.add_argument("--captured-by", required=True, help="Operator recorded in the snapshot.")
+    parser.add_argument("--out", type=Path, required=True, help="Existing snapshot directory, outside any repository.")
+    args = parser.parse_args(argv)
+    try:
+        config = load_config(args.config)
+        grant = config.projects.get(args.project)
+        if grant is None:
+            raise MemoryAccessError(f"project {args.project!r} has no memory bank in the map")
+        document = snapshot(config, args.project, grant.bank_id, args.captured_by)
+        path = write_snapshot(document, args.out)
+    except MemoryAccessError as error:
+        print(f"stop: {error}", file=sys.stderr)
+        return 2
+    except MemoryUnavailable as error:
+        print(f"unavailable: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps({"path": str(path), "bank_id": grant.bank_id, "memories": len(document["memories"])}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
