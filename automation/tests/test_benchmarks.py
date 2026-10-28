@@ -9,18 +9,21 @@ asserts the measured result without touching consumer repository state.
 from __future__ import annotations
 
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from automation.context.build_context import build_context_bundle
 from automation.schemas import models
-from automation.supervisor import policy
+from automation.supervisor import kanban_projection, policy
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_QUEUE = REPO_ROOT / "automation/examples/example-slices.json"
 EXAMPLE_HANDOFF = REPO_ROOT / "automation/examples/example-handoff.json"
+EXAMPLE_KANBAN_BOARD = REPO_ROOT / "automation/examples/kanban-board.sql"
+EXAMPLE_KANBAN_OVERLAY = REPO_ROOT / "automation/examples/kanban-overlay.json"
 
 
 @pytest.mark.benchmark
@@ -77,3 +80,22 @@ def test_build_context_bundle_benchmark(benchmark, tmp_path):
 
     assert context_bundle["slice"]["slice_id"] == slice_id
     assert context_bundle["previous_handoff"]["slice_id"] == "today-nonfocus-add-to-focus"
+
+
+@pytest.mark.benchmark
+def test_project_kanban_board_benchmark(benchmark, tmp_path):
+    board_dir = tmp_path / "example-board"
+    board_dir.mkdir()
+    with sqlite3.connect(board_dir / "kanban.db") as conn:
+        conn.executescript(EXAMPLE_KANBAN_BOARD.read_text(encoding="utf-8"))
+    overlay = kanban_projection.load_overlay(EXAMPLE_KANBAN_OVERLAY)
+
+    def run():
+        return kanban_projection.project(kanban_projection.read_board(board_dir), overlay)
+
+    projection = benchmark(run)
+
+    assert len(projection.queue["slices"]) == 6
+    selected_slice = policy.select_next_slice(projection.queue)
+    assert selected_slice is not None
+    assert selected_slice["slice_id"] == "kanban.example-board.t_000000a3"
