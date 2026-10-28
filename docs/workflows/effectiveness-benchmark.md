@@ -505,6 +505,13 @@ writes where it was told to, and one instance's cleanroom materializes and fails
 egress probes. That last check writes its receipt to `out/preflight/cleanroom.json`, so the
 artifact carries it even when no cell ran.
 
+The trivial session is stopped after 600 seconds. It runs with the profile's 18000s provider
+timeouts, which are sized for a lane's longest response, and unbounded it let run 40665254421
+wait 1h40m on a `z-ai/glm-5.3-flash` that never answered ("didn't respond in time on any of 3
+attempts ... Connection error"). The slowest preflight that passed took 4m55s (run
+36578712988), so 600s leaves twice that and turns a silent provider into a fast, logged failure.
+The lanes keep their phase budgets; only this step is bounded.
+
 An optional second secret, **`NVIDIA_API_KEY_2`**, is a rate-limit fallback. The pinned Hermes
 seeds numbered siblings of `NVIDIA_API_KEY` into its credential pool by itself, so passing the
 name with `--agent-env` is the whole opt-in. It answers from the first key, retries a 429 once on
