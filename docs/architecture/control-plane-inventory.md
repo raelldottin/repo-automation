@@ -248,6 +248,7 @@ SPDX identifiers come from the GitHub license API unless noted [E17], [E19].
 ```python
 # Read-only: immutable=1 means no locks and no -wal/-shm access. Prints shapes and counts only.
 import json, os, sqlite3
+
 root = os.path.expanduser("~/.hermes/kanban/boards")
 for slug in sorted(os.listdir(root)):
     db = os.path.join(root, slug, "kanban.db")
@@ -255,10 +256,12 @@ for slug in sorted(os.listdir(root)):
         continue
     con = sqlite3.connect(f"file:{db}?immutable=1", uri=True)
     tables = [r[0] for r in con.execute("select name from sqlite_master where type='table'")]
-    print(slug,
-          {t: con.execute(f'select count(*) from "{t}"').fetchone()[0] for t in tables},
-          dict(con.execute("select status, count(*) from tasks group by status")),
-          con.execute("select max(id) from task_events").fetchone()[0])
+    print(
+        slug,
+        {t: con.execute(f'select count(*) from "{t}"').fetchone()[0] for t in tables},
+        dict(con.execute("select status, count(*) from tasks group by status")),
+        con.execute("select max(id) from task_events").fetchone()[0],
+    )
 ```
 
 Payload key sets were gathered the same way, with `json.loads(payload).keys()` per event `kind`. Values were never printed.
