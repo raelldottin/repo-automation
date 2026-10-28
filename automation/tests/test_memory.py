@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,10 @@ SECRET = "test-key-not-a-real-credential"
 
 
 class FakeHindsight:
-    """Answers every POST with a canned (status, body) after an optional delay, and records requests."""
+    """Answers every POST with a canned (status, body) after an optional delay, and records requests.
+
+    A GET answers from ``list_page(limit, offset)``, which pages ``rows`` by default.
+    """
 
     def __init__(self) -> None:
         self.status = 200
@@ -39,16 +43,32 @@ class FakeHindsight:
         self.delay = 0.0
         self.headers: dict[str, str] = {}
         self.requests: list[dict[str, Any]] = []
+        self.rows: list[dict[str, Any]] = []
+        self.list_page = lambda limit, offset: {
+            "items": self.rows[offset : offset + limit],
+            "total": len(self.rows),
+            "limit": limit,
+            "offset": offset,
+        }
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                parts = urllib.parse.urlsplit(self.path)
+                query = {key: int(value) for key, value in urllib.parse.parse_qsl(parts.query)}
+                fake.requests.append({"path": parts.path, "headers": dict(self.headers), "query": query})
+                self._answer(fake.list_page(query["limit"], query["offset"]))
+
             def do_POST(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 fake.requests.append(
                     {"path": self.path, "headers": dict(self.headers), "body": json.loads(self.rfile.read(length))}
                 )
+                self._answer(fake.body)
+
+            def _answer(self, body: Any) -> None:
                 time.sleep(fake.delay)
-                payload = fake.body if isinstance(fake.body, bytes) else json.dumps(fake.body).encode()
+                payload = body if isinstance(body, bytes) else json.dumps(body).encode()
                 try:
                     self.send_response(fake.status)
                     for name, value in fake.headers.items():

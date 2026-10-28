@@ -10,10 +10,11 @@
     "reflect_max_tokens": 512,
     "max_results": 5,
     "max_result_chars": 600,
-    "max_total_chars": 2000
+    "max_total_chars": 2000,
+    "max_snapshot_memories": 10000
   },
   "projects": {
     "example-project": {"bank_id": "example-bank", "board": "example-board", "operations": ["recall"]},
-    "other-project": {"bank_id": "other-bank", "board": "other-board", "operations": ["recall", "retain", "reflect"]}
+    "other-project": {"bank_id": "other-bank", "board": "other-board", "operations": ["recall", "retain", "reflect", "snapshot"]}
   }
 }
