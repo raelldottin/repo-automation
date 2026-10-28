@@ -139,12 +139,12 @@ error, which is why the preflight now makes the agent write a file and checks wh
 landed before any budget is spent.
 
 The profile also sets `providers.nvidia.request_timeout_seconds` and
-`stale_timeout_seconds` to 18000 (5 hours). The deployment reaches glm-5.3 through a
+`stale_timeout_seconds` to 18000 (5 hours). The deployment reaches its model through a
 LiteLLM gateway on `127.0.0.1`, which Hermes treats as a local endpoint: both stale
 detectors are off and only the gateway's 5-hour cap applies. The benchmark calls NVIDIA
 directly, where Hermes' defaults would cut a silent response at 90s non-streaming (up to
-240s on large contexts) or 180s on a stream, then retry it. glm-5.3 is not on the pinned
-revision's reasoning-model list, so no floor raises those numbers. With both keys set, a
+240s on large contexts) or 180s on a stream, then retry it. glm-5.3-flash, like glm-5.3, is
+not on the pinned revision's reasoning-model list, so no floor raises those numbers. With both keys set, a
 response is bounded by its phase budget alone. Runs before this change measured lanes
 under the shorter cutoffs, so their call latencies and retry counts are not comparable.
 
@@ -522,6 +522,15 @@ The model id is pinned in the job environment, not read straight off `inputs.mod
 falsy, so the guard supplies the baseline id for both — and for any trigger added later. It
 was written when a nightly schedule existed; the schedule is gone, but a run whose model id
 resolved to the empty string is still the failure worth preventing.
+
+That baseline id is **`z-ai/glm-5.3-flash`**. NVIDIA retired `z-ai/glm-5.3` at
+2026-10-28T08:00Z: run 40663847346 failed its first preflight with `HTTP 410 Gone` ("reached
+its end of life"), and the credential's catalog no longer lists it. `z-ai/glm-5.3-flash` was the
+only `z-ai` id left. The pinned Hermes revision gives both ids the same 1,310,720-token context
+length, and neither has a reasoning stale-timeout floor, so the profile and timeouts carry over
+unchanged. The model does not: every glm-5.3 result, run 40298563694's 30.8% included, is a
+different model's history. The first flash run starts a new baseline, and earlier scores,
+latencies and phase durations are not comparable with it.
 
 Dispatching with **`preflight_only`** runs the deterministic checks and stops: the config
 check, the cleanroom materialization and its egress probes, and nothing that spends a model

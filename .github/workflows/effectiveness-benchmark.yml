@@ -51,7 +51,7 @@ on:
       model:
         description: "Model id served by the NVIDIA endpoint"
         type: string
-        default: "z-ai/glm-5.3"
+        default: "z-ai/glm-5.3-flash"
       preflight_only:
         description: "Verify the benchmark environment and stop; no agent session, no cell, no model tokens"
         type: boolean
@@ -99,7 +99,7 @@ jobs:
       HERMES_INFERENCE_MODEL: >-
         ${{ github.event_name == 'workflow_dispatch'
             && inputs.model
-            || 'z-ai/glm-5.3' }}
+            || 'z-ai/glm-5.3-flash' }}
       NVIDIA_BASE_URL: https://integrate.api.nvidia.com/v1
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       # Empty when the secret is unset; Hermes skips an empty key, so the pool is then one key.

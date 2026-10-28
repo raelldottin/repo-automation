@@ -62,7 +62,7 @@ compression:
 moa:
   active_preset: ""
 
-# The operator's deployment answers glm-5.3 through a LiteLLM gateway on 127.0.0.1, which
+# The operator's deployment answers its model through a LiteLLM gateway on 127.0.0.1, which
 # Hermes treats as a local endpoint: both stale detectors are off and a response may take
 # up to the 5-hour cap set there. CI calls NVIDIA directly, so left at Hermes' defaults a
 # response would be cut at 90s non-streaming (240s on large contexts) or 180s on a silent
