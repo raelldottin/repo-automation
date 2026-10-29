@@ -1,0 +1,58 @@
+name: Swarm Wiki compiler
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compiler:
+    name: Pinned Swarm Wiki compiler
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The ref must equal automation/context/swarm_wiki.py COMPILER_COMMIT;
+      # automation/tests/test_swarm_wiki.py fails if they drift apart.
+      - name: Check out the pinned compiler
+        uses: actions/checkout@v7
+        with:
+          repository: raelldottin/hermes-swarm-protocol
+          ref: b7ab59c097be475f7674c746120c762544cc4b65
+          path: .swarm-wiki-compiler
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync dev dependencies
+        run: uv sync --frozen --python 3.12
+
+      # The compiler gets its own interpreter so its dependencies never enter this
+      # repository's lockfile or a consumer's runtime.
+      - name: Compiler environment
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/compiler-venv"
+          uv pip install --python "$RUNNER_TEMP/compiler-venv/bin/python" pytest==9.1.1 ruamel.yaml==0.19.1
+
+      - name: Build and check a Hindsight-backed wiki with the pinned compiler
+        run: uv run --frozen pytest -q -rs automation/tests/test_swarm_wiki.py
+        env:
+          SWARM_WIKI_COMPILER: ${{ github.workspace }}/.swarm-wiki-compiler
+          SWARM_WIKI_PYTHON: ${{ runner.temp }}/compiler-venv/bin/python
+
+      - name: Compiler acceptance tests at the pin
+        working-directory: .swarm-wiki-compiler
+        run: "$RUNNER_TEMP/compiler-venv/bin/python -m pytest -q tests/test_swarm_wiki.py tests/test_swarm_wiki_hindsight.py"
