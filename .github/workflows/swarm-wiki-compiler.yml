@@ -53,6 +53,15 @@ jobs:
           SWARM_WIKI_COMPILER: ${{ github.workspace }}/.swarm-wiki-compiler
           SWARM_WIKI_PYTHON: ${{ runner.temp }}/compiler-venv/bin/python
 
+      # One compiler test runs ops/build_wiki.py with its default --hermes-source
+      # (~/.hermes/hermes-agent), which a runner does not have. The stub supplies only
+      # the Kanban status set that the compiler imports from it.
       - name: Compiler acceptance tests at the pin
         working-directory: .swarm-wiki-compiler
-        run: "$RUNNER_TEMP/compiler-venv/bin/python -m pytest -q tests/test_swarm_wiki.py tests/test_swarm_wiki_hindsight.py"
+        run: |
+          mkdir -p "$RUNNER_TEMP/hermes-stub/hermes_cli"
+          : > "$RUNNER_TEMP/hermes-stub/hermes_cli/__init__.py"
+          echo 'VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}' \
+            > "$RUNNER_TEMP/hermes-stub/hermes_cli/kanban_db.py"
+          PYTHONPATH="$RUNNER_TEMP/hermes-stub" "$RUNNER_TEMP/compiler-venv/bin/python" -m pytest -q \
+            tests/test_swarm_wiki.py tests/test_swarm_wiki_hindsight.py
