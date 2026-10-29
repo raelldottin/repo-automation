@@ -1,6 +1,6 @@
 # Kanban write-back contract (RA-CP-005)
 
-Status: **wired into `run_next` behind explicit flags, never run against a real board.** The JSON queue stays the default and the operational authority. No board under `~/.hermes` was read or written to build this.
+Status: **wired into `run_next` behind explicit flags, and run once against a dedicated canary board with the real `hermes` CLI ([canary](#canary-2026-10-29)).** The JSON queue stays the default and the operational authority. No board other than the two canary boards was written.
 
 Code: `automation/supervisor/kanban_writer.py`, and `KanbanQueue` in `automation/supervisor/run_next.py`. Tests: `automation/tests/test_kanban_writer.py`, `automation/tests/test_run_next_kanban.py`. Read side: [the Kanban projection](kanban-projection.md).
 
@@ -44,7 +44,41 @@ SPEC-001 forbids raw SQLite writes, so every write is a `hermes kanban --board <
 
 The writer runs once or twice per slice and is bounded by a subprocess, so it is not a performance-critical path. It shares `read_only` with `kanban_projection.read_board`, which is registered. `build_context_bundle`, also registered, gained an optional `queue_data` argument that skips its own `load_queue` when a caller already holds the queue. Each pull request's CodSpeed run covers those paths.
 
+## Canary (2026-10-29)
+
+Run with the owner's approval on a dedicated board, `ra-cp-canary`. It used the real CLI (Hermes Agent `31bde0d`) while the gateway was running. The supervisor was repo-automation `843077f`, run from a throwaway consumer repository holding that commit's `automation/` tree. The agent was a script, not a model: it appends the slice id to `canary.txt`, commits, and writes a handoff. The overlay approved two of the board's three unassigned `ready` tasks, both with `allowed_paths: ["canary.txt"]` and `required_validations: ["git diff --check"]`.
+
+**Setup.**
+
+- **Gateway.** With `kanban.default_assignee` empty, the gateway doesn't dispatch unassigned tasks (`_resolve_default_assignee` and `skipped_unassigned` in `hermes_cli/kanban_db_dispatch.py`). It never claimed a canary task. Every run on the board is the supervisor's.
+- **Current board.** `~/.hermes/kanban/current` stayed `tachikoma` throughout.
+
+**Runs.**
+
+| Step | Result on the board |
+| --- | --- |
+| Dry run | Selected task A. No run was created and every task stayed `ready`. |
+| Normal path, A | Claimed as run 1. The agent committed, and the supervisor replayed `git diff --check` (exit 0). Verdict `done` was recorded as `request-review`: A is `review`, and run 1 is `review_requested` with `{"slice_id", "handoff_sha256"}`. That sha256 matches the handoff file byte for byte. |
+| Failure, B | The agent exited 3 before writing a handoff. B was recorded as `block --kind transient`, with reason `… (handoff sha256 none)`. B is `blocked`, and run 2 is `blocked`. |
+| Retry, B | Unblocked with `hermes kanban unblock`, as a person would. The next pass claimed a fresh run 3 and recorded `review_requested`. Run 2 is unchanged. |
+| Unapproved, C | Never claimed. Once A and B were in review, the next pass stopped with `no eligible queued slice found` while C was still `ready`. |
+| Idempotent write | Recording run 1's `done` again, or run 2's `failed` again, returned `False` with no Hermes call. |
+| Stale and foreign transitions | These were refused before Hermes was called: a claim of A while it was in `review` ("not ready"), a claim at the pre-canary revision (`StaleRevisionError`), and a `done` on the ended run 2 ("not ours to close"). |
+| Rollback rehearsal | Before any run, the board was exported (`hermes kanban boards export`), then imported afterwards as `ra-cp-canary-rollback`. Its projection, recomputed under the original slug, has exactly the pre-canary revision `ad70a7ed…3af8`: three `ready` tasks and no runs. |
+
+**Git provenance.** The consumer repository ended clean, with one commit per completed slice, and each handoff names its slice.
+
+**Not exercised by the canary.**
+
+- Hermes's own `expected_run_id` refusal. Our pre-check refuses first, so that guard is covered only by the stand-in in the tests.
+- A claim racing the gateway.
+- Goal-mode tasks.
+
+**Left for the owner.**
+
+- A and B are in `review`. Approving them in Kanban is the explicit approval of canonical state that RA-CP-005 asks for.
+- The two canary boards remain until you archive them (`hermes kanban boards rm <slug>` archives by default).
+
 ## Not done here
 
-1. A canary on a real, dedicated test board with the real CLI, including a rollback rehearsal. This needs the owner's approval of the board and the run.
-2. Hindsight installed for the memory half of the canary. This is an owner decision, as it was for RA-CP-003 and RA-CP-004.
+1. Hindsight installed for the memory half of the canary. This is an owner decision, as it was for RA-CP-003 and RA-CP-004.
