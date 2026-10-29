@@ -23,7 +23,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Generator, Literal, Optional
 
 from pydantic import Field
 
@@ -135,17 +135,8 @@ def read_board(board_dir: Path) -> BoardSnapshot:
 
     The board slug is the directory name, as in Hermes's ``boards/<slug>/kanban.db`` layout.
     """
-    board = board_dir.name
-    if not re.match(BOARD_SLUG_PATTERN, board):
-        raise ProjectionError(f"not a Kanban board slug: {board!r}")
-    db = board_dir / "kanban.db"
-    if not db.is_file() or db.is_symlink():
-        raise ProjectionError(f"missing board database: {db}")
-
-    uri = db.resolve().as_uri() + "?mode=ro"
-    with contextlib.closing(sqlite3.connect(uri, uri=True, isolation_level=None)) as conn:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
+    board = board_slug(board_dir)
+    with read_only(board_dir) as conn:
         conn.execute("BEGIN")
         try:
             for table, required in REQUIRED_COLUMNS.items():
@@ -176,8 +167,28 @@ def read_board(board_dir: Path) -> BoardSnapshot:
     return BoardSnapshot(board, tasks, links, creators, int(watermark), revision)
 
 
+def board_slug(board_dir: Path) -> str:
+    board = board_dir.name
+    if not re.match(BOARD_SLUG_PATTERN, board):
+        raise ProjectionError(f"not a Kanban board slug: {board!r}")
+    return board
+
+
+@contextlib.contextmanager
+def read_only(board_dir: Path) -> Generator[sqlite3.Connection]:
+    """Open ``<board_dir>/kanban.db`` with ``mode=ro`` and ``query_only``; never through Hermes."""
+    db = board_dir / "kanban.db"
+    if not db.is_file() or db.is_symlink():
+        raise ProjectionError(f"missing board database: {db}")
+    uri = db.resolve().as_uri() + "?mode=ro"
+    with contextlib.closing(sqlite3.connect(uri, uri=True, isolation_level=None)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        yield conn
+
+
 def require_revision(snapshot: BoardSnapshot, expected: str) -> None:
-    """The guard a future write adapter runs on a fresh snapshot before any write."""
+    """The guard ``kanban_writer.claim`` runs on a fresh snapshot before it writes."""
     if snapshot.revision != expected:
         raise StaleRevisionError(f"board {snapshot.board!r} is at revision {snapshot.revision}, not the expected {expected}")
 
