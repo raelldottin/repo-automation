@@ -36,6 +36,7 @@ nav:
   - Control Plane Specification: architecture/control-plane.md
   - Control Plane Inventory: architecture/control-plane-inventory.md
   - Kanban Projection Contract: architecture/kanban-projection.md
+  - Kanban Write-back Contract: architecture/kanban-cutover.md
   - Memory Interface Contract: architecture/memory-interface.md
   - Swarm Wiki Compiler Pin: architecture/swarm-wiki-compiler.md
   - Roadmap: roadmap.md

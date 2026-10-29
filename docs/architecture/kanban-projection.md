@@ -75,7 +75,7 @@ Expected-revision semantics come before any write adapter:
 1. A writer acts on a projection and keeps its `revision`.
 2. Before writing, it takes a fresh snapshot and calls `require_revision(fresh, expected)`. A mismatch raises `StaleRevisionError`.
 3. On a mismatch it writes nothing, re-projects and re-decides. It never merges its intent into a newer board.
-4. The snapshot check and the write aren't atomic across processes. A write adapter must also make the write conditional on the row state it read (for example `UPDATE … WHERE id = ? AND status = ?`), as Hermes's own transitions do. RA-CP-005 owns that adapter and its one-writer cutover. This slice adds no write path.
+4. The snapshot check and the write aren't atomic across processes. A write adapter must also make the write conditional on the row state it read (for example `UPDATE … WHERE id = ? AND status = ?`), as Hermes's own transitions do. RA-CP-005 owns that adapter and its one-writer cutover: see [the write-back contract](kanban-cutover.md). Hermes's `expected_run_id` is that condition. This slice adds no write path.
 
 ## Evidence
 
