@@ -229,3 +229,20 @@ def test_unknown_verdicts_and_foreign_boards_are_refused(board, hermes, handoff,
 def test_a_missing_hermes_is_a_refusal(board, tmp_path):
     with pytest.raises(kw.KanbanWriteError, match="cannot run"):
         take(board, (str(tmp_path / "no-hermes"),))
+
+
+def test_a_failure_before_any_handoff_is_recorded_without_a_digest(board, hermes, tmp_path):
+    held = take(board, hermes)
+
+    assert kw.record(board, held, "failed", "agent exited 3", tmp_path / "never-written.json", hermes) is True
+
+    assert calls(tmp_path)[-1]["argv"][-1] == "agent exited 3 (handoff sha256 absent)"
+
+
+def test_a_done_verdict_without_its_handoff_is_refused(board, hermes, tmp_path):
+    held = take(board, hermes)
+
+    with pytest.raises(kw.KanbanWriteError, match="needs the handoff"):
+        kw.record(board, held, "done", "validated", None, hermes)
+
+    assert [call["argv"][3] for call in calls(tmp_path)] == ["claim"]

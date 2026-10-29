@@ -78,10 +78,14 @@ def record(
     held: Claim,
     verdict: str,
     reason: str,
-    handoff_path: Path,
+    handoff_path: Optional[Path],
     hermes: Sequence[str] = ("hermes",),
 ) -> bool:
-    """Record a verdict on the claimed run. Returns False when it was already recorded."""
+    """Record a verdict on the claimed run. Returns False when it was already recorded.
+
+    ``handoff_path`` is None, or names a missing file, when the slice failed before the agent
+    wrote a handoff; the transition then says so instead of citing a digest.
+    """
     if verdict not in VERDICTS:
         raise KanbanWriteError(f"no Kanban transition for verdict {verdict!r}")
     if kp.board_slug(board_dir) != held.board:
@@ -93,7 +97,12 @@ def record(
     if run["status"] != "running" or _task(board_dir, held.task_id)["current_run_id"] != held.run_id:
         raise KanbanWriteError(f"run {held.run_id} of {held.task_id} is {run['outcome'] or run['status']}; not ours to close")
 
-    digest = hashlib.sha256(handoff_path.read_bytes()).hexdigest()
+    if handoff_path is not None and handoff_path.is_file():
+        digest = hashlib.sha256(handoff_path.read_bytes()).hexdigest()
+    elif verdict == "done":
+        raise KanbanWriteError(f"a done verdict for {held.task_id} needs the handoff it was judged on")
+    else:
+        digest = "absent"
     if verdict == "done":
         evidence = {"slice_id": kp.slice_id_for(held.board, held.task_id), "handoff_sha256": digest}
         args = [command, held.task_id, "--summary", reason, "--metadata", json.dumps(evidence, sort_keys=True)]

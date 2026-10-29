@@ -9,6 +9,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -16,10 +17,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from automation.context.build_context import build_context_bundle
-from automation.supervisor import policy
+from automation.supervisor import kanban_projection as kp
+from automation.supervisor import kanban_writer, policy
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the next eligible queued slice under the automation supervisor.")
     parser.add_argument("--queue", default="automation/queue/slices.json", help="Path to the live queue JSON file.")
     parser.add_argument("--handoff-dir", default="automation/handoffs", help="Directory where handoff artifacts are expected.")
@@ -35,17 +37,87 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="When no queued slice is eligible, report blocked/deferred slices and their recommended unblockers.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--kanban-board",
+        type=Path,
+        help="Take slices from this Hermes Kanban board (~/.hermes/kanban/boards/<slug>) instead of --queue. "
+        "Opt-in; see docs/architecture/kanban-cutover.md.",
+    )
+    parser.add_argument("--kanban-overlay", type=Path, help="Approval overlay for --kanban-board; required with it.")
+    parser.add_argument("--hermes", default="hermes", help="The hermes command that writes to the board.")
+    args = parser.parse_args(argv)
+    if (args.kanban_board is None) != (args.kanban_overlay is None):
+        parser.error("--kanban-board and --kanban-overlay go together")
+    return args
 
 
-def main() -> int:
-    args = parse_args()
-    repo_root = REPO_ROOT
-    queue_path = repo_root / args.queue
+class JsonQueueIntake:
+    """The operational authority: the JSON queue file, which the supervisor itself updates."""
+
+    def __init__(self, queue_path: Path) -> None:
+        self.queue_path = queue_path
+
+    def load(self) -> dict:
+        return policy.load_queue(self.queue_path)
+
+    def start(self, slice_record: dict) -> None:
+        queue_data = policy.set_slice_status(self.load(), slice_record["slice_id"], "in_progress")
+        policy.write_json(self.queue_path, queue_data)
+
+    def finish(self, slice_record: dict, status: str, reason: str, handoff_path: Path) -> None:
+        queue_data = policy.set_slice_status(self.load(), slice_record["slice_id"], status)
+        policy.write_json(self.queue_path, queue_data)
+
+
+class KanbanIntake:
+    """One Kanban board, projected read-only each time and written only through ``hermes kanban``.
+
+    The projected queue is kept outside the repository as a working copy for the context
+    builder; the board stays the authority for it, and the JSON queue is never touched.
+    """
+
+    def __init__(self, board_dir: Path, overlay_path: Path, work_dir: Path, hermes: str) -> None:
+        self.board_dir, self.overlay_path, self.hermes = board_dir, overlay_path, shlex.split(hermes)
+        self.queue_path = work_dir / "kanban-queue.json"
+        self.revision = ""
+        self.held: Optional[kanban_writer.Claim] = None
+
+    def load(self) -> dict:
+        projection = kp.project(kp.read_board(self.board_dir), kp.load_overlay(self.overlay_path))
+        self.revision = projection.revision
+        policy.write_json(self.queue_path, projection.queue)
+        return projection.queue
+
+    def start(self, slice_record: dict) -> None:
+        traced = kp.parse_slice_id(slice_record["slice_id"])
+        assert traced is not None, slice_record["slice_id"]
+        self.held = kanban_writer.claim(self.board_dir, traced[1], self.revision, self.hermes)
+        self.load()
+
+    def finish(self, slice_record: dict, status: str, reason: str, handoff_path: Path) -> None:
+        assert self.held is not None
+        kanban_writer.record(self.board_dir, self.held, status, reason, handoff_path, self.hermes)
+        self.held = None
+
+
+def main(argv: Optional[list[str]] = None, repo_root: Path = REPO_ROOT) -> int:
+    args = parse_args(argv)
     handoff_dir = repo_root / args.handoff_dir
     handoff_dir.mkdir(parents=True, exist_ok=True)
+    if args.kanban_board is None:
+        return supervise(args, repo_root, handoff_dir, JsonQueueIntake(repo_root / args.queue))
+    with tempfile.TemporaryDirectory(prefix="kanban-intake-") as work_dir:
+        intake = KanbanIntake(args.kanban_board, args.kanban_overlay, Path(work_dir), args.hermes)
+        try:
+            return supervise(args, repo_root, handoff_dir, intake)
+        except kp.ProjectionError as error:
+            # Claim and record fail closed; the board keeps whatever Hermes last accepted.
+            print(f"stop: kanban: {error}", file=sys.stderr)
+            return 2
 
-    queue_data = policy.load_queue(queue_path)
+
+def supervise(args: argparse.Namespace, repo_root: Path, handoff_dir: Path, intake: Any) -> int:
+    queue_data = intake.load()
     active = policy.active_slice(queue_data)
     if active is not None:
         print(f"stop: queue already has in_progress slice {active['slice_id']}", file=sys.stderr)
@@ -61,8 +133,22 @@ def main() -> int:
     autonomous_limit = args.autonomous_limit or queue_data["policy"]["consecutive_autonomous_limit"]
     completed_runs = 0
 
+    def fail(slice_record: dict, reason: str, handoff_path: Path) -> None:
+        intake.finish(slice_record, "failed", reason, handoff_path)
+        print(
+            json.dumps(
+                make_failure_report(
+                    slice_record=slice_record,
+                    reason=reason,
+                    completed_runs=completed_runs,
+                    autonomous_limit=autonomous_limit,
+                ),
+                indent=2,
+            )
+        )
+
     while True:
-        queue_data = policy.load_queue(queue_path)
+        queue_data = intake.load()
         next_slice = policy.select_next_slice(queue_data)
         if next_slice is None:
             print("stop: no eligible queued slice found.")
@@ -92,7 +178,7 @@ def main() -> int:
         handoff_filename = policy.make_handoff_filename(next_slice["slice_id"], timestamp_token)
         handoff_path = handoff_dir / handoff_filename
         context_bundle = build_context_bundle(
-            repo_root=repo_root, queue_path=queue_path, handoff_dir=handoff_dir, slice_id=next_slice["slice_id"]
+            repo_root=repo_root, queue_path=intake.queue_path, handoff_dir=handoff_dir, slice_id=next_slice["slice_id"]
         )
 
         if args.dry_run:
@@ -105,6 +191,8 @@ def main() -> int:
                 "allowed_paths": next_slice["allowed_paths"],
                 "context_documents": [doc["path"] for doc in context_bundle["documents"]],
             }
+            if isinstance(intake, KanbanIntake):
+                report["kanban_revision"] = intake.revision
             if args.include_blocked:
                 report["blocked_slices"] = [
                     {
@@ -118,8 +206,8 @@ def main() -> int:
             print(json.dumps(report, indent=2))
             return 0
 
-        queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "in_progress")
-        policy.write_json(queue_path, queue_data)
+        intake.start(next_slice)
+        queue_data = intake.load()
 
         try:
             exit_code = run_agent(
@@ -131,90 +219,25 @@ def main() -> int:
                 command_template=agent_command_template,
             )
         except Exception as error:  # pragma: no cover - last-resort queue recovery
-            queue_data = policy.load_queue(queue_path)
-            queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
-            policy.write_json(queue_path, queue_data)
-            print(
-                json.dumps(
-                    make_failure_report(
-                        slice_record=next_slice,
-                        reason=f"Supervisor error while running slice: {error}",
-                        completed_runs=completed_runs,
-                        autonomous_limit=autonomous_limit,
-                    ),
-                    indent=2,
-                )
-            )
+            fail(next_slice, f"Supervisor error while running slice: {error}", handoff_path)
             return 2
 
         if exit_code != 0:
-            queue_data = policy.load_queue(queue_path)
-            queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
-            policy.write_json(queue_path, queue_data)
-            print(
-                json.dumps(
-                    make_failure_report(
-                        slice_record=next_slice,
-                        reason=(f"Agent command exited with code {exit_code} for slice {next_slice['slice_id']}."),
-                        completed_runs=completed_runs,
-                        autonomous_limit=autonomous_limit,
-                    ),
-                    indent=2,
-                )
-            )
+            fail(next_slice, f"Agent command exited with code {exit_code} for slice {next_slice['slice_id']}.", handoff_path)
             return exit_code
 
         if not handoff_path.exists():
-            queue_data = policy.load_queue(queue_path)
-            queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
-            policy.write_json(queue_path, queue_data)
-            print(
-                json.dumps(
-                    make_failure_report(
-                        slice_record=next_slice,
-                        reason=(f"Missing handoff artifact for slice {next_slice['slice_id']} at {handoff_path}"),
-                        completed_runs=completed_runs,
-                        autonomous_limit=autonomous_limit,
-                    ),
-                    indent=2,
-                )
-            )
+            fail(next_slice, f"Missing handoff artifact for slice {next_slice['slice_id']} at {handoff_path}", handoff_path)
             return 2
 
         try:
             handoff = policy.load_handoff(handoff_path)
         except ValueError as error:
-            queue_data = policy.load_queue(queue_path)
-            queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
-            policy.write_json(queue_path, queue_data)
-            print(
-                json.dumps(
-                    make_failure_report(
-                        slice_record=next_slice,
-                        reason=f"Invalid handoff artifact: {error}",
-                        completed_runs=completed_runs,
-                        autonomous_limit=autonomous_limit,
-                    ),
-                    indent=2,
-                )
-            )
+            fail(next_slice, f"Invalid handoff artifact: {error}", handoff_path)
             return 2
 
         if handoff["slice_id"] != next_slice["slice_id"]:
-            queue_data = policy.load_queue(queue_path)
-            queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], "failed")
-            policy.write_json(queue_path, queue_data)
-            print(
-                json.dumps(
-                    make_failure_report(
-                        slice_record=next_slice,
-                        reason="Handoff slice_id does not match the in-progress slice.",
-                        completed_runs=completed_runs,
-                        autonomous_limit=autonomous_limit,
-                    ),
-                    indent=2,
-                )
-            )
+            fail(next_slice, "Handoff slice_id does not match the in-progress slice.", handoff_path)
             return 2
 
         dirty_paths_after_run = policy.git_dirty_paths(repo_root)
@@ -243,9 +266,7 @@ def main() -> int:
             post_run_commit_sha=post_run_commit_sha,
         )
 
-        queue_data = policy.load_queue(queue_path)
-        queue_data = policy.set_slice_status(queue_data, next_slice["slice_id"], decision.queue_status)
-        policy.write_json(queue_path, queue_data)
+        intake.finish(next_slice, decision.queue_status, decision.stop_reason or decision.decision, handoff_path)
 
         print(
             json.dumps(

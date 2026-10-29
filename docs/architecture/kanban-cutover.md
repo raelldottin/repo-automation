@@ -1,8 +1,8 @@
 # Kanban write-back contract (RA-CP-005)
 
-Status: **adapter only, not wired into the supervisor, never run against a real board.** The JSON queue stays the operational authority. Nothing calls this module yet, and no board under `~/.hermes` was read or written to build it.
+Status: **wired into `run_next` behind an opt-in flag, never run against a real board.** Without `--kanban-board` the supervisor reads and writes the JSON queue exactly as before, and that queue stays the operational authority. No board under `~/.hermes` was read or written to build this.
 
-Code: `automation/supervisor/kanban_writer.py`. Tests: `automation/tests/test_kanban_writer.py`. Read side: [the Kanban projection](kanban-projection.md).
+Code: `automation/supervisor/kanban_writer.py`, `automation/supervisor/run_next.py` (`KanbanIntake`). Tests: `automation/tests/test_kanban_writer.py`, `automation/tests/test_run_next_kanban.py`. Read side: [the Kanban projection](kanban-projection.md).
 
 ## One writer, through Hermes
 
@@ -21,6 +21,21 @@ SPEC-001 forbids raw SQLite writes, so every write is a `hermes kanban --board <
 - **Idempotent.** If the run already has the outcome a verdict produces, `record` returns `False` and calls nothing. A run that ended any other way (for example `reclaimed`) is refused.
 - **Fail closed.** A Hermes refusal, a timeout, a missing `hermes`, or a write Hermes reported that the board doesn't show all raise `KanbanWriteError`. Nothing is retried or guessed.
 
+## Supervisor intake
+
+```bash
+python3 automation/supervisor/run_next.py --kanban-board ~/.hermes/kanban/boards/<slug> \
+  --kanban-overlay <approval overlay> [--hermes "hermes"] [--dry-run]
+```
+
+- **Both flags or neither.** With them, `run_next` takes slices from the board's projection instead of `--queue`. Without them, nothing changes: `JsonQueueIntake` performs the same queue reads and writes as before.
+- **Each pass projects again.** The projected queue is written to a temporary directory outside the repository, only because `build_context_bundle` reads a queue file. It is a working copy. The board stays the authority, and the JSON queue isn't read or written.
+- **Claim, then run.** `claim` runs at the revision projected in the same pass, after the context is built and before the agent starts. If the board changed in between, or Hermes refuses, `run_next` stops with `stop: kanban: …` and exit code 2, and the agent never starts.
+- **Every outcome is recorded.** The verdict from `evaluate_completion` goes through `record`. So does every failure that happens after the claim: the agent exits non-zero, the handoff is missing or invalid, or the slice id doesn't match. Each of those becomes `failed` (Kanban `block --kind transient`). A failure before any handoff exists is recorded with `handoff sha256 absent`. A `done` verdict always cites the handoff it was judged on.
+- **A retry is a human unblock.** A blocked task returns to `ready` only through Kanban. The next run claims a fresh Hermes run and can close only that one.
+- **Other work on the board stops it.** If any approved task is already `running`, `run_next` refuses to start, as it does for an `in_progress` slice in the JSON queue.
+- `--dry-run` projects and reports `kanban_revision`. It never claims.
+
 ## Known limits
 
 - **The claim can't be renewed.** Hermes locks a claim to the claiming process (`host:pid`), and a CLI claim's process exits at once. So the TTL must cover the whole slice. After it expires Hermes reclaims the task, and `record` fails closed. The default is two hours. If slices outgrow that, the upgrade is an in-process claim through `hermes_cli.kanban_db`, which couples to Hermes internals.
@@ -33,6 +48,5 @@ The writer runs once or twice per slice and is bounded by a subprocess, so it is
 
 ## Not done here
 
-1. Wiring into `run_next`: a board and overlay as an alternative intake, `claim` before the agent starts, `record` after `evaluate_completion`, and context built from the projection.
-2. A canary on a real, dedicated test board with the real CLI, including a rollback rehearsal. This needs the owner's approval of the board and the run.
-3. Hindsight installed for the memory half of the canary. This is an owner decision, as it was for RA-CP-003 and RA-CP-004.
+1. A canary on a real, dedicated test board with the real CLI, including a rollback rehearsal. This needs the owner's approval of the board and the run.
+2. Hindsight installed for the memory half of the canary. This is an owner decision, as it was for RA-CP-003 and RA-CP-004.
