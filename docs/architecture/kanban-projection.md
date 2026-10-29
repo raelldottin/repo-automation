@@ -1,6 +1,6 @@
 # Kanban projection contract (RA-CP-002)
 
-Status: **read-only adapter, not wired into the supervisor.** The JSON queue (`automation/queue/slices.json`) stays the operational authority until the reviewed cutover in RA-CP-005. Nothing here writes to a board, starts a worker, or replaces `policy.load_queue`.
+Status: **read-only adapter.** `run_next --kanban-board … --kanban-overlay …` uses it as the queue ([write-back contract](kanban-cutover.md)); without those flags the JSON queue (`automation/queue/slices.json`) stays the operational authority until the reviewed cutover in RA-CP-005. Nothing here writes to a board, starts a worker, or replaces `policy.load_queue`.
 
 Code: `automation/supervisor/kanban_projection.py`. Tests: `automation/tests/test_kanban_projection.py`. Inputs and gaps: [the control-plane inventory](control-plane-inventory.md).
 
