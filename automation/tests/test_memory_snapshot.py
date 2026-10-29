@@ -57,6 +57,7 @@ def test_snapshot_pages_the_whole_bank_in_id_order(fake, api_key):
         "captured_at": CAPTURED_AT,
         "captured_by": "operator",
         "hindsight_revision": memory.HINDSIGHT_REVISION,
+        "total": 250,
     }
     assert document["memories"] == [row(index) for index in range(250)]
     assert [request["query"] for request in fake.requests] == [
@@ -69,7 +70,9 @@ def test_snapshot_pages_the_whole_bank_in_id_order(fake, api_key):
 
 
 def test_empty_bank_is_an_empty_snapshot(fake, api_key):
-    assert take(make_config(fake.endpoint))["memories"] == []
+    document = take(make_config(fake.endpoint))
+    assert document["memories"] == []
+    assert document["total"] == 0
     assert len(fake.requests) == 1
 
 

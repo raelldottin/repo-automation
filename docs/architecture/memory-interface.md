@@ -118,9 +118,9 @@ python -m automation.context.memory snapshot --config <memory map> --project <pr
 ```
 
 - **Authorization.** The bank is the one the map grants the project, and the grant must include `snapshot`.
-- **Complete or nothing.** The list route is paged 100 rows at a time. If `total` changes, a row repeats or a page comes back short, the capture stops with `MemoryUnavailable`, because a partial snapshot would look complete. A bank over `max_snapshot_memories` is refused before more pages are read.
+- **Complete or nothing.** The list route is paged 100 rows at a time. If `total` changes, a row repeats or a page comes back short, the capture stops with `MemoryUnavailable`, because a partial snapshot would look complete. A bank over `max_snapshot_memories` is refused before more pages are read. The document also records the route's `total`, so the compiler can tell a whole bank from part of one without trusting which tool wrote the file (raelldottin/hermes-swarm-protocol#8 makes it required).
 - **Faithful.** Rows are kept as the server returned them, sorted by `id`. The export does not judge provenance. The compiler labels every memory `UNVERIFIED` and reports missing provenance, changed sources and generated consolidations.
-- **Format.** `{"format": "hindsight-snapshot/v1", "project", "bank_id", "captured_at", "captured_by", "hindsight_revision", "memories"}` as canonical JSON (sorted keys, no whitespace, ASCII).
+- **Format.** `{"format": "hindsight-snapshot/v1", "project", "bank_id", "captured_at", "captured_by", "hindsight_revision", "memories", "total"}` as canonical JSON (sorted keys, no whitespace, ASCII).
 - **Content-addressed.** The file is named `<sha256 of its bytes>.json` and written atomically into an existing, non-symlink directory. Capturing an unchanged bank again at the same instant reuses the file. A file of that name with other bytes was edited after capture, so it is never overwritten. The compiler shows such a file as `CHANGED SNAPSHOT`.
 - **Where.** Snapshots hold project memory, so the directory belongs outside any repository. This repository holds none.
 
