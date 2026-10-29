@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ import pytest
 
 from automation.supervisor import run_next
 from automation.tests import test_kanban_writer
-from automation.tests.test_kanban_writer import BOARD, READY, calls, row
+from automation.tests.test_kanban_writer import BOARD, READY, calls, execute, row
 
 board = test_kanban_writer.board
 hermes = test_kanban_writer.hermes
@@ -101,3 +102,53 @@ def test_board_and_overlay_go_together(consumer, board, monkeypatch, capsys):
 
     assert run_next._cli_entry() == 2
     assert "go together" in capsys.readouterr().err
+
+
+def test_an_unblock_in_kanban_is_the_retry(consumer, board, hermes, agent, monkeypatch, capsys, tmp_path):
+    assert supervise(monkeypatch, board, hermes, agent, exit_code=3) == 3
+    execute(board, f"UPDATE tasks SET status = 'ready' WHERE id = '{READY}';")  # a person unblocks it
+    capsys.readouterr()
+
+    assert supervise(monkeypatch, board, hermes, agent) == 0
+
+    with sqlite3.connect(board / "kanban.db") as conn:
+        runs = conn.execute("SELECT id, outcome FROM task_runs WHERE task_id = ? ORDER BY id", (READY,)).fetchall()
+    assert runs == [(1, "blocked"), (2, "review_requested")]
+    assert row(board, "SELECT status FROM tasks WHERE id = ?", READY) == ("review",)
+
+
+def test_a_dry_run_never_writes_to_the_board(consumer, board, hermes, agent, monkeypatch, capsys, tmp_path):
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(agent))} {{handoff_file}} {{slice_id}} 0"
+    argv = ["run_next", "--kanban-board", str(board), "--kanban-overlay", str(OVERLAY), "--agent-cmd", command]
+    monkeypatch.setattr(sys, "argv", [*argv, "--hermes", shlex.join(hermes), "--dry-run"])
+
+    assert run_next._cli_entry() == 0
+
+    assert json.loads(capsys.readouterr().out)["selected_slice"] == f"kanban.{BOARD}.{READY}"
+    assert calls(tmp_path) == []
+    assert row(board, "SELECT status FROM tasks WHERE id = ?", READY) == ("ready",)
+
+
+def test_a_board_edited_after_projection_is_never_claimed(consumer, board, hermes, agent, monkeypatch, capsys, tmp_path):
+    real_build = run_next.build_context_bundle
+
+    def build_then_edit(**kwargs):
+        execute(board, "UPDATE tasks SET priority = 9 WHERE id = 't_000000a1';")  # someone edits the board
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(run_next, "build_context_bundle", build_then_edit)
+
+    assert supervise(monkeypatch, board, hermes, agent) == 2
+
+    assert "not the expected" in capsys.readouterr().err  # StaleRevisionError, before any write
+    assert calls(tmp_path) == []
+    assert row(board, "SELECT status FROM tasks WHERE id = ?", READY) == ("ready",)
+
+
+def test_another_running_task_stops_the_supervisor(consumer, board, hermes, agent, monkeypatch, capsys, tmp_path):
+    execute(board, "UPDATE tasks SET status = 'running' WHERE id = 't_000000a2';")
+
+    assert supervise(monkeypatch, board, hermes, agent) == 2
+
+    assert "already has in_progress slice" in capsys.readouterr().err
+    assert calls(tmp_path) == []
