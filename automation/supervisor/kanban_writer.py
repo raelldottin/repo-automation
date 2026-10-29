@@ -78,7 +78,7 @@ def record(
     held: Claim,
     verdict: str,
     reason: str,
-    handoff_path: Path,
+    handoff_path: Optional[Path],
     hermes: Sequence[str] = ("hermes",),
 ) -> bool:
     """Record a verdict on the claimed run. Returns False when it was already recorded."""
@@ -93,7 +93,10 @@ def record(
     if run["status"] != "running" or _task(board_dir, held.task_id)["current_run_id"] != held.run_id:
         raise KanbanWriteError(f"run {held.run_id} of {held.task_id} is {run['outcome'] or run['status']}; not ours to close")
 
-    digest = hashlib.sha256(handoff_path.read_bytes()).hexdigest()
+    # A run can fail before the agent wrote a handoff; the record then says so instead of a digest.
+    digest = hashlib.sha256(handoff_path.read_bytes()).hexdigest() if handoff_path and handoff_path.is_file() else "none"
+    if verdict == "done" and digest == "none":
+        raise KanbanWriteError(f"a done verdict for {held.task_id} needs its handoff")
     if verdict == "done":
         evidence = {"slice_id": kp.slice_id_for(held.board, held.task_id), "handoff_sha256": digest}
         args = [command, held.task_id, "--summary", reason, "--metadata", json.dumps(evidence, sort_keys=True)]

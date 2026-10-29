@@ -60,8 +60,11 @@ def build_context_bundle(
     max_doc_chars: int = 2500,
     memory_config: Optional[memory.MemoryConfig] = None,
     memory_project: Optional[str] = None,
+    queue_data: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    queue_data = policy.load_queue(queue_path)
+    # A caller that already holds the queue (a Kanban projection has no file) passes it in.
+    if queue_data is None:
+        queue_data = policy.load_queue(queue_path)
     slice_record = policy.find_slice(queue_data, slice_id)
     if slice_record is None:
         raise KeyError(f"Unknown slice_id: {slice_id}")
