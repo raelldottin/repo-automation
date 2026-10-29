@@ -456,6 +456,8 @@ def snapshot(
         "captured_by": captured_by,
         "hindsight_revision": HINDSIGHT_REVISION,
         "memories": [rows[row_id] for row_id in sorted(rows)],
+        # The list route's total, so the compiler can tell a whole bank from a page of one.
+        "total": total,
     }
 
 
