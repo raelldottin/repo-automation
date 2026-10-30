@@ -27,7 +27,7 @@ P0.1–P0.3 can be designed/tested independently; **P0.4 depends on all three**.
 
 ## First implementation slices (proposed, not started)
 
-**Admission while the JSON queue is authoritative.** Kanban is not wired into the supervisor yet, so these slices cannot be admitted from a board. Until the reviewed cutover in RA-CP-005, each RA-CP slice is admitted the same way as any other work today: either as a record in `automation/queue/slices.json` that passes `policy.validate_document` and is selected by `policy.select_next_slice`, or as an ordinary reviewed pull request with explicit scope, allowed paths and validation. No slice is admitted by being written on a board, in memory or in the wiki.
+**Admission while the JSON queue is authoritative.** `run_next` can take slices from a Kanban board behind explicit flags (`--kanban-board`, `--kanban-overlay`; see [the Kanban write-back contract](architecture/kanban-cutover.md)), but that is opt-in and the JSON queue stays the default. Until the reviewed cutover in RA-CP-005, each RA-CP slice is admitted the same way as any other work today: either as a record in `automation/queue/slices.json` that passes `policy.validate_document` and is selected by `policy.select_next_slice`, or as an ordinary reviewed pull request with explicit scope, allowed paths and validation. No slice is admitted by being written on a board, in memory or in the wiki.
 
 ### RA-CP-001 — Control-plane inventory and gap audit
 
