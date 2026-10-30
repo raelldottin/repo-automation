@@ -8,11 +8,13 @@ about a reused, bridged or wrongly mounted container is a refusal.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
+from automation.benchmark.cleanroom import CleanroomError
 from automation.benchmark.witness import RELEASE_PREFIX, WITNESS_SUFFIX, SandboxWitness
 
 IMAGE = "programbench/abishekvashok_1776_cmatrix.5c082c6:task_cleanroom_v6"
@@ -27,13 +29,15 @@ SESSION_TASK_ID = "32c58fde-13c6-4448-bbb5-b90482b19290"
 class FakeDocker:
     """A Docker whose container list the test changes while the session 'runs'."""
 
-    def __init__(self, *, containers: list[str], inspect: dict, unremovable: tuple[str, ...] = ()) -> None:
+    def __init__(self, *, containers: list[str], inspect: dict, unremovable: tuple[str, ...] = (), reclaims: bool = True) -> None:
         self.containers = containers
         # One record per container id, or one record for whatever is asked about.
         self.inspect = inspect
         # Containers `docker rm -f` cannot get rid of: a wedged runtime, a shutting-down
         # daemon. The cell has to notice rather than hand the next phase a busy runner.
         self.unremovable = unremovable
+        # Whether the `docker run` that hands the workspace back to the harness succeeds.
+        self.reclaims = reclaims
         self.calls: list[list[str]] = []
 
     def __call__(self, argv: list[str]) -> tuple[int, str, str]:
@@ -49,6 +53,8 @@ class FakeDocker:
                 return 1, "", f"Error response from daemon: cannot remove {container}\n"
             self.containers.remove(container)
             return 0, f"{container}\n", ""
+        if argv[1] == "run":
+            return (0, "", "") if self.reclaims else (125, "", "docker: Error response from daemon: no such image\n")
         raise AssertionError(f"unexpected docker call: {argv}")
 
 
@@ -340,6 +346,58 @@ class WitnessTests(unittest.TestCase):
             self.assertFalse(record["removed_by_harness"])
             self.assertFalse(record["removed_after_cleanup"])
             self.assertEqual([f"the container {CONTAINER} outlived its session and could not be removed"], witness.violations)
+
+    def test_the_workspace_is_handed_back_to_the_harness_once_nothing_can_write_to_it(self) -> None:
+        # The agent's tools run as the image's root, so on a Linux runner everything they
+        # create in the bind mount is root's. Run 40784747377 died on the harness's next
+        # write: research had made `.rpi`, and installing `.rpi/build.sh` before implement
+        # raised PermissionError. After the reap, so no leaked container is still writing.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(containers=[], inspect=inspected(workspace))
+
+            witness = self.watch(docker, workspace, sessions, removes=False)
+
+            verbs = [call[1] for call in docker.calls if call[1] in ("rm", "run")]
+            self.assertEqual(["rm", "run"], verbs)
+            run = next(call for call in docker.calls if call[1] == "run")
+            self.assertEqual(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--user",
+                    "0:0",
+                    "-v",
+                    f"{workspace.resolve()}:/workspace",
+                    "--entrypoint",
+                    "chown",
+                    IMAGE_ID,
+                    "-R",
+                    "-h",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "/workspace",
+                ],
+                run,
+            )
+            self.assertEqual([], witness.violations)
+
+    def test_a_workspace_the_harness_cannot_take_back_stops_the_cell_there(self) -> None:
+        # Carrying on would only move the failure to the harness's next write, as a bare
+        # PermissionError that says nothing about why.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace, sessions = Path(temp_dir) / "ws", Path(temp_dir) / "s"
+            workspace.mkdir()
+            docker = FakeDocker(containers=[], inspect=inspected(workspace), reclaims=False)
+
+            with self.assertRaises(CleanroomError) as refusal:
+                self.watch(docker, workspace, sessions, removes=True)
+
+            self.assertIn("could not hand the workspace back", str(refusal.exception))
+            self.assertIn("no such image", str(refusal.exception))
 
     def test_a_session_that_ended_cleanly_is_not_reaped(self) -> None:
         # Hermes removed its own container, so there is nothing to clean up and the receipt

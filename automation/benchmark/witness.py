@@ -14,9 +14,10 @@ system prompt's own probe gets ``prompt-backend-probe``, and the terminal, file 
 code_execution tools the model calls get ``default``. First-container-wins recorded the
 probe's and hid the one that matters.
 
-One thing it does rather than records: a container it saw that is still listed once the
-session is gone gets removed by id, because a budget kill leaves Hermes no chance to. See
-``_reap``.
+Two things it does rather than records: a container it saw that is still listed once the
+session is gone gets removed by id, because a budget kill leaves Hermes no chance to (see
+``_reap``), and the workspace the agent wrote into as root is handed back to the harness
+(see ``_reclaim``).
 
 What is never recorded: the container's environment. The inspect format below does not ask
 for ``.Config.Env``, so the provider key cannot reach this process, let alone the artifact.
@@ -31,7 +32,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator, Optional
 
-from .cleanroom import NETWORK_MODE, WORKSPACE_DIR, DockerRun, _subprocess_docker
+from .cleanroom import NETWORK_MODE, WORKSPACE_DIR, CleanroomError, DockerRun, _subprocess_docker
 
 # Hermes labels every container it owns. Baseline on the label alone and not on the image:
 # a container running the wrong image is exactly one of the things this has to catch, and
@@ -276,6 +277,33 @@ class SandboxWitness:
                 record["removed_after_exit"] = record["container_id"] not in remaining
         self._reap()
         self._flush()
+        self._reclaim()
+
+    def _reclaim(self) -> None:
+        """Hand the workspace back to the harness, now that no container of this session can write to it.
+
+        The agent's tools run as the image's root, so on a Linux runner everything they
+        create in the bind mount is root's, and the harness's own writes between phases fail
+        on it. Run 40784747377 died that way: research had made ``.rpi``, and installing
+        ``.rpi/build.sh`` before implement raised PermissionError. A restore after a budget
+        kill deletes the agent's directories and would fail the same way.
+
+        Done from a container rather than by running the agent as the host user: under
+        ``docker_run_as_host_user`` the image has no writable ``HOME`` and its root-owned
+        toolchain caches refuse writes, which is a different environment from ProgramBench's.
+        After the reap, so a container a killed session left running cannot write behind it.
+        """
+        argv = [
+            "docker", "run", "--rm", "--network", NETWORK_MODE, "--user", "0:0",
+            "-v", f"{self._workspace}:{WORKSPACE_DIR}", "--entrypoint", "chown",
+            # By id: the image this cell was proved against, never whatever the tag says now.
+            self._image_id, "-R", "-h", f"{os.getuid()}:{os.getgid()}", WORKSPACE_DIR,
+        ]  # fmt: skip
+        returncode, stdout, stderr = self._run(argv)
+        if returncode != 0:
+            raise CleanroomError(
+                f"could not hand the workspace back to the harness (rc {returncode}): {(stdout + stderr).strip()}"
+            )
 
     def _reap(self) -> None:
         """Remove what a killed session left behind - and only what this witness saw.
