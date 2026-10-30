@@ -38,7 +38,25 @@ SPEC-001 forbids raw SQLite writes, so every write is a `hermes kanban --board <
 
 - **The claim can't be renewed.** Hermes locks a claim to the claiming process (`host:pid`), and a CLI claim's process exits at once. So the TTL must cover the whole slice. After it expires Hermes reclaims the task, and `record` fails closed. The default is two hours. If slices outgrow that, the upgrade is an in-process claim through `hermes_cli.kanban_db`, which couples to Hermes internals.
 - **Goal-mode tasks.** For a task with `goal_mode`, Hermes runs a goal judge before `request-review` and may refuse. The adapter reports that refusal; it doesn't work around it.
-- **Tested against a stand-in.** The stand-in `hermes` applies the guards of `claim_task`, `request_review` and `block_task` as they are in the local Hermes build `31bde0d`. The real CLI hasn't been run, because its launcher can't start with a throwaway `HERMES_HOME`.
+- **CI uses a stand-in.** The unit tests' stand-in `hermes` applies the guards of `claim_task`, `request_review` and `block_task` from the local Hermes build `31bde0d`. The real CLI is covered by an opt-in test; see the next section.
+
+## Real Hermes CLI evidence
+
+`test_the_real_hermes_cli_honours_the_contract` runs the real `hermes kanban` code on a throwaway `HERMES_HOME`. It is skipped unless `HERMES_AGENT_PYTHON` names an interpreter with Hermes's dependencies and `HERMES_AGENT_SOURCE` a `hermes-agent` checkout, because the installed launcher can't start with a throwaway home and CI has no Hermes:
+
+```bash
+HERMES_AGENT_PYTHON=~/.hermes/hermes-agent/venv/bin/python HERMES_AGENT_SOURCE=~/.hermes/hermes-agent \
+  python -m pytest automation/tests/test_kanban_writer.py -k real_hermes
+```
+
+On 2026-10-29 it passed against the local build `31bde0d`. The board, its three tasks and every write lived in the throwaway home; `~/.hermes/kanban` was not modified. It showed:
+
+- a claim at a stale revision is refused before Hermes is called;
+- `claim` then `record done` leaves the task in `review` with outcome `review_requested` and the `slice_id` and handoff digest in the run's metadata; recording again is a no-op;
+- `record failed` without a handoff leaves the task `blocked` with `block_kind` `transient`;
+- after an operator `reclaim` and a new claim, `record` refuses the superseded run, and **Hermes itself** refuses a `request-review` that names it, leaving the newer claim running.
+
+This is evidence about the CLI contract, not the canary: no real board, gateway or agent was involved.
 
 ## Performance evidence
 

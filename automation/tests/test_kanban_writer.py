@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -229,3 +232,64 @@ def test_unknown_verdicts_and_foreign_boards_are_refused(board, hermes, handoff,
 def test_a_missing_hermes_is_a_refusal(board, tmp_path):
     with pytest.raises(kw.KanbanWriteError, match="cannot run"):
         take(board, (str(tmp_path / "no-hermes"),))
+
+
+# The real Hermes CLI, on a throwaway HERMES_HOME. Skipped unless HERMES_AGENT_PYTHON names an
+# interpreter with Hermes's dependencies and HERMES_AGENT_SOURCE a hermes-agent checkout.
+
+HERMES_PYTHON = os.environ.get("HERMES_AGENT_PYTHON")
+HERMES_SOURCE = os.environ.get("HERMES_AGENT_SOURCE")
+needs_hermes = pytest.mark.skipif(not (HERMES_PYTHON and HERMES_SOURCE), reason="HERMES_AGENT_PYTHON/SOURCE not set")
+SHIM = """
+import sys
+sys.path.insert(0, {source!r})
+from hermes_cli.main import main
+sys.argv[0] = "hermes"
+sys.exit(main())
+"""
+
+
+@pytest.fixture
+def real_board(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    shim = tmp_path / "hermes_shim.py"
+    shim.write_text(SHIM.format(source=HERMES_SOURCE), encoding="utf-8")
+    cli = (str(HERMES_PYTHON), "-I", str(shim))
+    subprocess.run([*cli, "kanban", "boards", "create", "canary"], check=True, capture_output=True)
+    tasks = []
+    for title in ("done path", "failed path", "reclaimed path"):
+        out = subprocess.run([*cli, "kanban", "--board", "canary", "create", title], check=True, capture_output=True, text=True)
+        created = re.search(r"Created (t_[0-9a-f]{8})", out.stdout)
+        assert created, out.stdout
+        tasks.append(created.group(1))
+    return tmp_path / "home/kanban/boards/canary", cli, tasks
+
+
+@needs_hermes
+def test_the_real_hermes_cli_honours_the_contract(real_board, handoff):
+    board_dir, cli, (done_task, failed_task, reclaimed_task) = real_board
+
+    with pytest.raises(kp.StaleRevisionError):
+        kw.claim(board_dir, done_task, "0" * 64, cli)
+    held = kw.claim(board_dir, done_task, kp.read_board(board_dir).revision, cli, ttl_seconds=600)
+    assert kw.record(board_dir, held, "done", "validated", handoff, cli) is True
+    assert kw.record(board_dir, held, "done", "validated", handoff, cli) is False
+    failed = kw.claim(board_dir, failed_task, kp.read_board(board_dir).revision, cli, ttl_seconds=600)
+    assert kw.record(board_dir, failed, "failed", "agent exited 3", None, cli) is True
+
+    mine = kw.claim(board_dir, reclaimed_task, kp.read_board(board_dir).revision, cli, ttl_seconds=600)
+    kw._hermes(cli, "canary", ["reclaim", reclaimed_task])
+    theirs = kw.claim(board_dir, reclaimed_task, kp.read_board(board_dir).revision, cli, ttl_seconds=600)
+    with pytest.raises(kw.KanbanWriteError, match="not ours to close"):
+        kw.record(board_dir, mine, "done", "late", handoff, cli)
+    with pytest.raises(kw.KanbanWriteError, match="refused"):  # Hermes alone refuses a superseded run
+        kw._hermes(cli, "canary", ["request-review", reclaimed_task, "--summary", "late"], mine)
+
+    with kp.read_only(board_dir) as conn:
+        state = {row[0]: tuple(row[1:]) for row in conn.execute("SELECT id, status, block_kind, current_run_id FROM tasks")}
+        review = conn.execute("SELECT outcome, metadata FROM task_runs WHERE id = ?", (held.run_id,)).fetchone()
+    assert state[done_task][0] == "review" and state[failed_task][:2] == ("blocked", "transient")
+    assert state[reclaimed_task] == ("running", None, theirs.run_id)
+    assert review[0] == "review_requested" and json.loads(review[1])["slice_id"] == kp.slice_id_for("canary", done_task)
