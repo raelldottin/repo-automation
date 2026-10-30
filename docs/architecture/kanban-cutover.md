@@ -88,7 +88,7 @@ Run with the owner's approval on a dedicated board, `ra-cp-canary`. It used the 
 
 **Not exercised by the canary.**
 
-- Hermes's own `expected_run_id` refusal. Our pre-check refuses first, so that guard is covered only by the stand-in in the tests.
+- Hermes's own `expected_run_id` refusal. Our pre-check refuses first, so the canary never reached it. The real CLI's refusal is covered by `test_the_real_hermes_cli_honours_the_contract` ([Real Hermes CLI evidence](#real-hermes-cli-evidence)).
 - A claim racing the gateway.
 - Goal-mode tasks.
 
