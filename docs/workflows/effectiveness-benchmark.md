@@ -319,6 +319,17 @@ of `docker_persist_across_processes: false` there is:
 | was budget-killed | `false` | `true` | `true` |
 | left something unremovable | `false` | `true` | `false` → **cell refused** |
 
+After the reap, the witness hands the workspace back to the harness. The agent's tools run
+as the image's root, so on a Linux runner every file and directory they create in the bind
+mount is owned by root, and the harness's own writes between phases fail on it: run
+40784747377 crashed installing `.rpi/build.sh` into the `.rpi` research had created, and
+a restore after a budget kill deletes the agent's directories the same way. One
+`docker run --rm --network none` of the cell's image, by id, runs
+`chown -R -h <runner uid>:<gid> /workspace`; if it fails, the cell stops there with the
+reason instead of failing later with a bare `PermissionError`. The agent is not run as the
+host user instead: under `docker_run_as_host_user` the image has no writable `HOME` and
+its root-owned toolchain caches refuse writes, which is not ProgramBench's environment.
+
 Every container, not the first: Hermes builds one backend per `task_id`, and there are
 three kinds. The system prompt's own probe gets `prompt-backend-probe`. The CLI parent's
 tool calls get `default`. Every tool call *inside an agent turn* gets a session-scoped id,
