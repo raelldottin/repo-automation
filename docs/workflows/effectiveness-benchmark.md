@@ -1151,6 +1151,23 @@ calls; it does not give implement more time. Only research prompts carry the rul
 the research probe), and the rest of research's prompt is unchanged byte for byte. Research results
 from before this change are not comparable with research results after it.
 
+Plan then started doing implement's job. In nemotron-3-ultra runs `40784747377` and `41021760018`,
+plan ran 1790 and 1696 seconds and both times wrote the whole program: source, `compile.sh`, and a
+build over the reference `executable`. Its prompt said "Do **not** implement it". Implement
+inherited a finished program and only re-verified it, so lane C read `administered: valid` while
+measuring something closer to Research, then Plan and Implement merged, then Verify. Two changes
+followed. First, every phase that owes only an artifact (research, plan and both compactions) has
+its workspace **put back**. Before the session, the harness archives the workspace, less `.git`
+and `.rpi`, to the cell's control directory outside the mount. Afterwards, any path the session
+added, removed or modified is restored from that archive, the reference `executable` included,
+before the next phase starts. Each phase result records those paths as `discarded`. It is empty
+when the phase wrote only its artifact, and non-empty means the session did work its phase does
+not own. Second, plan's prompt now ends with a **stop rule** like research's. It may write only
+`plan.json`, anything else is put back, and the plan is done when it names every file, the
+order, and how each step will be checked; running those checks belongs to implement. The rest
+of plan's prompt is unchanged byte for byte. Plan and implement results from before this change
+are not comparable with those after it.
+
 The protocol held - and uncovered a path bug underneath it. Run `37440878348` administered
 it against the same instance, model, transport and 1800-second ceiling: the artifact was
 written as the **first** tool action at 4.8 seconds and updated **eight** times, with at most

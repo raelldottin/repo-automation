@@ -48,6 +48,7 @@ from automation.benchmark.strategies import (
     _CHECKPOINT_TAIL,
     _IMPLEMENT_BODY,
     _PLAN_CHECKPOINT,
+    _PLAN_DONE,
     _RESEARCH_CHECKPOINT,
     _RESEARCH_DONE,
     plan_prompt,
@@ -608,13 +609,40 @@ class ResearchStopRuleTests(unittest.TestCase):
                     self.assertEqual(session["phase"] == "research", "## When research is done" in session["prompt"])
 
 
+class PlanStopRuleTests(unittest.TestCase):
+    """Runs 40784747377 and 41021760018: plan wrote the whole program both times.
+
+    Plan now ends by saying it may write only its artifact, that anything else is put back, and
+    when it is done. These pin that rule and that only plan got it.
+    """
+
+    def test_plan_ends_with_the_stop_rule_naming_its_own_artifact(self) -> None:
+        for workspace in ("", WORKSPACE_DIR):
+            with self.subTest(workspace=workspace or "local"):
+                path = artifact_path(PLAN_ARTIFACT, workspace)
+                prompt = plan_prompt(TASK, agent_workspace=workspace)
+                self.assertTrue(prompt.endswith(_PLAN_DONE.format(path=path)))
+                rule = " ".join(prompt.split("## When the plan is done", 1)[1].split())
+                self.assertIn(f"Write nothing in the workspace except `{path}`", rule)
+                self.assertIn("put back as it was before implement starts", rule)
+                self.assertIn("end the session with a one-line reply", rule)
+
+    def test_only_plan_sessions_get_the_stop_rule(self) -> None:
+        for lane in ALL_LANES:
+            strategy = RpiStrategy(compaction=True, jspace=FIXTURE_ARTIFACT) if lane == "E" else None
+            agent, _, _ = run_lane(lane, strategy=strategy)
+            for session in agent.sessions:
+                with self.subTest(lane=lane, phase=session["phase"]):
+                    self.assertEqual(session["phase"] == "plan", "## When the plan is done" in session["prompt"])
+
+
 class UnchangedPromptBytesTests(unittest.TestCase):
     """The build-first protocol moved only the RPI implement prompt.
 
     Goldens are the SHA-256 of each prompt rendered at origin/main 443f207, before the
     protocol landed, so research, plan, compaction and lane A results stay comparable across
-    it. Research is compared without the stop rule ResearchStopRuleTests pins, so the rule is
-    shown to be the only thing it added. Lane B's rendering carries per-run temp paths and is pinned by
+    it. Research and plan are compared without the stop rules ResearchStopRuleTests and
+    PlanStopRuleTests pin, so each rule is shown to be the only thing it added. Lane B's rendering carries per-run temp paths and is pinned by
     LaneBIsTheUnchangedHarnessTests instead.
     """
 
@@ -636,18 +664,20 @@ class UnchangedPromptBytesTests(unittest.TestCase):
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _without_research_done(prompt: str, workspace: str) -> str:
-        """Research's prompt minus the one section ResearchStopRuleTests pins."""
-        tail = "\n\n" + _RESEARCH_DONE.format(path=artifact_path(RESEARCH_ARTIFACT, workspace))
-        assert prompt.endswith(tail), "the stop rule is no longer research's trailing section"
+    def _without_stop_rule(prompt: str, rule: str, artifact: str, workspace: str) -> str:
+        """A prompt minus the trailing stop rule its own test class pins."""
+        tail = "\n\n" + rule.format(path=artifact_path(artifact, workspace))
+        assert prompt.endswith(tail), "the stop rule is no longer the prompt's trailing section"
         return prompt[: -len(tail)] + "\n"
 
     def test_research_and_plan_prompts_are_byte_for_byte_what_they_were(self) -> None:
         for name, workspace in (("local", ""), ("sandbox", WORKSPACE_DIR)):
             with self.subTest(workspace=name):
-                research = self._without_research_done(research_prompt(TASK, agent_workspace=workspace), workspace)
+                research = research_prompt(TASK, agent_workspace=workspace)
+                research = self._without_stop_rule(research, _RESEARCH_DONE, RESEARCH_ARTIFACT, workspace)
                 self.assertEqual(self.GOLDEN[f"research/{name}"], self._sha(research))
-                self.assertEqual(self.GOLDEN[f"plan/{name}"], self._sha(plan_prompt(TASK, agent_workspace=workspace)))
+                plan = self._without_stop_rule(plan_prompt(TASK, agent_workspace=workspace), _PLAN_DONE, PLAN_ARTIFACT, workspace)
+                self.assertEqual(self.GOLDEN[f"plan/{name}"], self._sha(plan))
 
     def test_lane_a_and_compaction_prompts_are_byte_for_byte_what_they_were(self) -> None:
         for name, runner in (("local", run_lane), ("sandbox", run_in_sandbox)):

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from automation.benchmark import last_build
-from automation.benchmark.strategies import AGENT_TIMEOUT_RETURNCODE, EXCLUDED_FROM_SUBMISSION, RPI_DIR
+from automation.benchmark.strategies import AGENT_TIMEOUT_RETURNCODE, ARTIFACT_PHASE_MAY_CHANGE, EXCLUDED_FROM_SUBMISSION, RPI_DIR
 from automation.tests.test_benchmark_lanes import FakeAgent, run_lane
 
 GOOD = "int main(void){return 0;}\n"
@@ -123,6 +123,68 @@ class RestoreTests(unittest.TestCase):
             tar.addfile(info, io.BytesIO(payload))
         last_build.restore(workspace, RPI_DIR, EXCLUDED_FROM_SUBMISSION)
         self.assertFalse((workspace / RPI_DIR / "plan.json").exists())
+
+
+class PutBackTests(unittest.TestCase):
+    """What an artifact-only phase changed outside its artifact directory is undone."""
+
+    def _hold(self, workspace: Path) -> tuple[Path, dict]:
+        archive = Path(tempfile.mkdtemp(prefix="held-")) / "workspace-before.tar"
+        return archive, last_build.hold(workspace, archive, ARTIFACT_PHASE_MAY_CHANGE)
+
+    def test_a_program_written_outside_the_artifact_is_put_back_reference_binary_and_all(self) -> None:
+        workspace = _workspace()
+        archive, held = self._hold(workspace)
+        (workspace / "src" / "main.c").write_text(BROKEN, encoding="utf-8")
+        (workspace / "cmatrix.c").write_text(GOOD, encoding="utf-8")
+        (workspace / "executable").write_text("the plan's own build\n", encoding="utf-8")
+        (workspace / "compile.sh").unlink()
+        (workspace / RPI_DIR / "plan.json").write_text("{}\n", encoding="utf-8")
+
+        changed = last_build.put_back(workspace, RPI_DIR, archive, held, ARTIFACT_PHASE_MAY_CHANGE)
+
+        self.assertEqual(("cmatrix.c", "compile.sh", "executable", "src/main.c"), changed)
+        self.assertEqual(GOOD, (workspace / "src" / "main.c").read_text(encoding="utf-8"))
+        self.assertFalse((workspace / "cmatrix.c").exists())
+        self.assertEqual("reference binary\n", (workspace / "executable").read_text(encoding="utf-8"))
+        self.assertTrue((workspace / "compile.sh").stat().st_mode & 0o100, "compile.sh must stay executable")
+        # The artifact directory and VCS metadata are the phase's to change.
+        self.assertEqual("{}\n", (workspace / RPI_DIR / "plan.json").read_text(encoding="utf-8"))
+        self.assertTrue((workspace / ".git" / "HEAD").is_file())
+
+    def test_a_phase_that_wrote_only_its_artifact_changes_nothing(self) -> None:
+        workspace = _workspace()
+        archive, held = self._hold(workspace)
+        (workspace / RPI_DIR / "research.json").write_text("{}\n", encoding="utf-8")
+        self.assertEqual((), last_build.put_back(workspace, RPI_DIR, archive, held, ARTIFACT_PHASE_MAY_CHANGE))
+
+
+class PlansAProgram(FakeAgent):
+    """Plan writes the program, as nemotron's plan phase did; implement records what it inherits."""
+
+    def __call__(self, command, workspace, env, timeout):
+        returncode = super().__call__(command, workspace, env, timeout)
+        phase = self.sessions[-1]["phase"]
+        if phase == "plan":
+            (workspace / "cmatrix.c").write_text(GOOD, encoding="utf-8")
+            (workspace / "compile.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        return returncode
+
+    def _write_artifact(self, workspace, phase):
+        if phase == "implement":
+            self.inherited = sorted(entry.name for entry in workspace.iterdir())
+        super()._write_artifact(workspace, phase)
+
+
+class LanePutBackTests(unittest.TestCase):
+    def test_implement_inherits_the_plan_artifact_and_not_the_program_plan_wrote(self) -> None:
+        agent, result, _ = run_lane("C", agent=PlansAProgram())
+        self.assertNotIn("cmatrix.c", agent.inherited)
+        self.assertNotIn("compile.sh", agent.inherited)
+        phases = {phase["phase"]: phase for phase in result.strategy.to_dict()["phases"]}
+        self.assertEqual(["cmatrix.c", "compile.sh"], phases["plan"]["discarded"])
+        self.assertEqual([], phases["research"]["discarded"])
+        self.assertEqual([], phases["implement"]["discarded"])
 
 
 class BuildsThenBreaks(FakeAgent):

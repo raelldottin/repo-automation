@@ -47,6 +47,12 @@ RPI_DIR = ".rpi"
 EXCLUDED_FROM_SUBMISSION = frozenset({".git", RPI_DIR, "executable"})
 # A restored build (``last_build``) swaps out exactly the rest, so it never touches these either.
 
+# What a phase that owes only an artifact may change. Narrower than the line above on purpose:
+# ``executable`` is the reference binary, never submitted but the thing every later phase
+# probes, and run 41021760018's plan phase built over it.
+ARTIFACT_PHASE_MAY_CHANGE = frozenset({".git", RPI_DIR})
+_HELD_WORKSPACE = "workspace-before.tar"
+
 # What timeout(1) reports, so the code means the same thing here as it does in a shell.
 AGENT_TIMEOUT_RETURNCODE = 124
 
@@ -155,6 +161,9 @@ class PhaseResult:
     # Time after the budget kill, spent flushing and shutting down rather than working.
     # Kept out of ``seconds`` so the phase is still charged exactly what it was granted.
     grace_seconds: float = 0.0
+    # What an artifact-only phase changed outside the artifact directory, put back before the
+    # next phase started. Non-empty means the session did work its phase does not own.
+    discarded: tuple[str, ...] = ()
 
     @property
     def state(self) -> str:
@@ -172,6 +181,7 @@ class PhaseResult:
             "artifact_chars": self.artifact_chars,
             "artifact_valid": self.artifact_valid,
             "artifact_errors": list(self.artifact_errors),
+            "discarded": list(self.discarded),
         }
 
 
@@ -515,6 +525,23 @@ The research phase's artifact is at `{research_path}`. Read it before you plan: 
 the only research you are given.
 """
 
+# Runs 40784747377 and 41021760018: plan ran 1790s and 1696s and wrote the whole program both
+# times - source, compile.sh, a build - despite "Do **not** implement it" above, and implement
+# only re-verified what plan built. ``_artifact_phase`` now puts back anything plan changes
+# outside its artifact, so this says so, and says when the plan is finished: research's prompt
+# has had that rule since run 40298563694, plan's never did, and "how each step will be
+# validated" reads as an invitation to go and validate.
+_PLAN_DONE = """## When the plan is done
+
+Write nothing in the workspace except `{path}`: no source files, no `compile.sh`, no build.
+Those are the implement phase's. Anything else this session leaves in the workspace is put
+back as it was before implement starts, so building here only spends this phase's time.
+
+The plan is done when `{path}` names every file implement must create, the order to create
+them in, and how each step will be checked. Running those checks is implement's job. Write
+the artifact one last time, then end the session with a one-line reply.
+"""
+
 _IMPLEMENT_BODY = """## Phase: Implement
 
 Execute the plan. Build the program in the workspace, write `compile.sh`, and make
@@ -673,12 +700,14 @@ def plan_prompt(
     instruction resolved, so no two sections can disagree about either file.
     """
     research_path = artifact_path(research_filename, agent_workspace)
+    path = artifact_path(PLAN_ARTIFACT, agent_workspace)
     return compose_prompt(
         f"# Plan: {task.public_id}",
         envelope(task, agent_workspace),
         _PLAN_BODY.format(research_path=research_path),
         artifact_instruction(PLAN_SPEC, agent_workspace=agent_workspace),
-        _PLAN_CHECKPOINT.format(path=artifact_path(PLAN_ARTIFACT, agent_workspace), research_path=research_path),
+        _PLAN_CHECKPOINT.format(path=path, research_path=research_path),
+        _PLAN_DONE.format(path=path),
         jspace=jspace,
     )
 
@@ -909,6 +938,22 @@ class RpiStrategy:
         result.artifact_errors = tuple(errors)
         return data
 
+    def _artifact_phase(
+        self, run: _BudgetedRun, ctx: ExecutionContext, name: str, prompt: str, data: dict[str, Any]
+    ) -> PhaseResult:
+        """Run a phase that owes only its artifact, then put back whatever else it changed.
+
+        Every phase before implement is handed on by its artifact alone, so anything else it
+        leaves in the workspace is work the next phase would inherit without the treatment
+        handing it over - in runs 40784747377 and 41021760018, a finished program.
+        """
+        archive = Path(ctx.control_dir) / name / _HELD_WORKSPACE
+        held = last_build.hold(ctx.workspace, archive, ARTIFACT_PHASE_MAY_CHANGE)
+        result = run.phase(name, prompt, data)
+        result.discarded = last_build.put_back(ctx.workspace, RPI_DIR, archive, held, ARTIFACT_PHASE_MAY_CHANGE)
+        archive.unlink()
+        return result
+
     def _compact(
         self,
         run: _BudgetedRun,
@@ -937,7 +982,7 @@ class RpiStrategy:
             ),
             jspace=self.jspace,
         )
-        result = run.phase(f"{label}_compact", prompt, {"budget_chars": COMPACT_BUDGET_CHARS})
+        result = self._artifact_phase(run, ctx, f"{label}_compact", prompt, {"budget_chars": COMPACT_BUDGET_CHARS})
         compacted = self._validate(result, spec, ctx.workspace, out_filename)
         raw_chars = len(raw_json)
         compact_chars = result.artifact_chars
@@ -990,7 +1035,7 @@ class RpiStrategy:
         research_filename = RESEARCH_ARTIFACT
 
         prompt = research_prompt(ctx.task, self.jspace, ctx.agent_workspace)
-        research_result = run.phase("research", prompt, {"objective": ctx.task.objective})
+        research_result = self._artifact_phase(run, ctx, "research", prompt, {"objective": ctx.task.objective})
         research = self._validate(research_result, RESEARCH_SPEC, ctx.workspace, RESEARCH_ARTIFACT)
         if not research_result.artifact_valid:
             return self._not_administered(run, compaction_stats)
@@ -1005,7 +1050,7 @@ class RpiStrategy:
             return self._not_administered(run, compaction_stats, phase="plan")
 
         prompt = plan_prompt(ctx.task, research_filename, self.jspace, ctx.agent_workspace)
-        plan_result = run.phase("plan", prompt, {"research": research})
+        plan_result = self._artifact_phase(run, ctx, "plan", prompt, {"research": research})
         handoff = {"mode": PLAN_RESEARCH_HANDOFF, "artifact": research_filename}
         plan = self._validate(plan_result, PLAN_SPEC, ctx.workspace, PLAN_ARTIFACT)
         if not plan_result.artifact_valid:
