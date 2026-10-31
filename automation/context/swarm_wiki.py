@@ -22,7 +22,7 @@ from typing import Any, Optional
 from automation.supervisor import policy
 
 COMPILER_REPOSITORY = "raelldottin/hermes-swarm-protocol"
-COMPILER_COMMIT = "b7ab59c097be475f7674c746120c762544cc4b65"
+COMPILER_COMMIT = "d8cdc741a6d89ff827de4bf3a91dba0c71bd72d2"
 COMPILER_ENTRY = "ops/build_wiki.py"
 # Flags this wrapper owns; the operator chooses build or check with the subcommand instead.
 WRAPPER_FLAGS = frozenset({"--check"})

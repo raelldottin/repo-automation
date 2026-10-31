@@ -176,12 +176,13 @@ def board(tmp_path):
     return {"workspace": workspace, "snapshots": snapshots, "out": out, "args": args}
 
 
-def capture(board: dict, metadata: dict) -> Path:
+def capture(board: dict, metadata: dict, total: int = 1) -> Path:
     document = {
         "format": memory.SNAPSHOT_FORMAT, "project": "p", "bank_id": "p-bank", "captured_at": "2026-10-29T00:00:00Z",
         "captured_by": "operator", "hindsight_revision": memory.HINDSIGHT_REVISION,
         "memories": [{"id": "m1", "text": "Issuer lookup is tenant scoped", "fact_type": "world",
                       "metadata": metadata, "state": "valid"}],
+        "total": total,
     }  # fmt: skip
     return memory.write_snapshot(document, board["snapshots"])
 
@@ -234,3 +235,13 @@ def test_pinned_compiler_shows_invalid_provenance_and_changed_snapshots(board):
     pages = [page.read_text(encoding="utf-8") for page in board["out"].rglob("memory/*.md")]
     assert any("CHANGED SNAPSHOT" in page for page in pages)
     assert not any("Issuer lookup is global" in page for page in pages)
+
+
+@needs_compiler
+def test_pinned_compiler_flags_a_snapshot_holding_part_of_a_bank(board):
+    partial = capture(board, {"source_path": SOURCE, "evidence_ref": "commit:abc1234"}, total=2)
+
+    evidence = compile_wiki(board, check=False)
+
+    assert "incomplete-memory-snapshot" in snapshot_findings(evidence, partial)
+    assert any("INCOMPLETE SNAPSHOT" in page.read_text(encoding="utf-8") for page in board["out"].rglob("memory/*.md"))
