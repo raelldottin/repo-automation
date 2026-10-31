@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import tarfile
 from pathlib import Path
 from typing import Any, Optional
@@ -78,7 +79,7 @@ def restore(workspace: Path, rpi_dir: str, excluded: frozenset[str], snapshot: O
 
     staging = workspace / rpi_dir / _STAGING_NAME
     shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir()
+    staging.mkdir(parents=True)
     try:
         with tarfile.open(snapshot) as tar:
             members = [member for member in tar.getmembers() if _top_level(member.name) not in excluded | {""}]
@@ -109,12 +110,24 @@ def hold(workspace: Path, archive: Path, kept: frozenset[str]) -> dict[str, tupl
     Returns what was there, for ``put_back`` to compare against. ``archive`` belongs outside
     the workspace, where the session cannot reach it.
     """
+    workspace = Path(workspace)
+    held = _listing(workspace, kept)
+    # Run 41177348090: ``docker cp`` keeps the image's modes, and the reference executable ships
+    # with no owner-read bit. The agent runs as root and never notices; the harness does. Read is
+    # granted only while the archive is written, and ``put_back`` restores every held mode.
+    unreadable = [path for path, entry in held.items() if stat.S_ISREG(entry[0]) and not entry[0] & stat.S_IRUSR]
     archive.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(archive, "w") as tar:
-        for entry in sorted(Path(workspace).iterdir()):
-            if entry.name not in kept:
-                tar.add(entry, arcname=entry.name)
-    return _listing(Path(workspace), kept)
+    try:
+        for path in unreadable:
+            (workspace / path).chmod(stat.S_IMODE(held[path][0]) | stat.S_IRUSR)
+        with tarfile.open(archive, "w") as tar:
+            for entry in sorted(workspace.iterdir()):
+                if entry.name not in kept:
+                    tar.add(entry, arcname=entry.name)
+    finally:
+        for path in unreadable:
+            (workspace / path).chmod(stat.S_IMODE(held[path][0]))
+    return held
 
 
 def put_back(
@@ -127,6 +140,10 @@ def put_back(
         record = restore(workspace, rpi_dir, kept, archive)
         if not record["restored"]:
             raise RuntimeError(f"could not put the workspace back after an artifact-only session: {record['reason']}")
+        # Extraction's ``data`` filter grants owner read and write; put back the modes as held.
+        for path, entry in held.items():
+            if not stat.S_ISLNK(entry[0]):
+                (Path(workspace) / path).chmod(stat.S_IMODE(entry[0]))
     return changed
 
 
