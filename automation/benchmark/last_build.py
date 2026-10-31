@@ -11,14 +11,23 @@ transcript, and compiling host-side would test a toolchain the grader does not u
 snapshot is taken inside the build itself: the implement prompt's build command is
 ``SCRIPT_NAME``, which runs ``compile.sh`` in the agent's own environment and, only when it
 exits 0, records the tree it just built. A session that is killed is graded on that record.
+
+The same swap serves the phases before implement, in the other direction (``hold`` and
+``put_back``). In runs 40784747377 and 41021760018 the plan phase wrote the whole program -
+source, ``compile.sh``, and a build over the reference ``executable`` - so implement only
+re-verified it, and lane C measured something other than the treatment its name claims. A phase
+that owes an artifact may change the artifact directory and nothing else: whatever else it
+changed is put back as it was before the next phase starts. The archive is written host-side,
+outside the workspace, so the session it guards cannot touch it.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 import tarfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 SCRIPT_NAME = "build.sh"
 SNAPSHOT_NAME = "last-build.tar"
@@ -56,14 +65,14 @@ def install(workspace: Path, rpi_dir: str, excluded: frozenset[str]) -> Path:
     return script
 
 
-def restore(workspace: Path, rpi_dir: str, excluded: frozenset[str]) -> dict[str, Any]:
-    """Replace the workspace's submittable contents with the last recorded build.
+def restore(workspace: Path, rpi_dir: str, excluded: frozenset[str], snapshot: Optional[Path] = None) -> dict[str, Any]:
+    """Replace the workspace's contents, less ``excluded``, with ``snapshot``: by default the last recorded build.
 
     Everything is extracted and checked before anything in the workspace is removed, so a
     record that cannot be read leaves the workspace as the agent left it.
     """
     workspace = Path(workspace)
-    snapshot = workspace / rpi_dir / SNAPSHOT_NAME
+    snapshot = snapshot or workspace / rpi_dir / SNAPSHOT_NAME
     if not snapshot.is_file():
         return {"restored": False, "reason": "no successful build was recorded"}
 
@@ -94,6 +103,54 @@ def restore(workspace: Path, rpi_dir: str, excluded: frozenset[str]) -> dict[str
     return {"restored": True, "entries": restored}
 
 
+def hold(workspace: Path, archive: Path, kept: frozenset[str]) -> dict[str, tuple[int, ...]]:
+    """Archive the workspace, less ``kept``, to ``archive`` before a session that owes only an artifact.
+
+    Returns what was there, for ``put_back`` to compare against. ``archive`` belongs outside
+    the workspace, where the session cannot reach it.
+    """
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "w") as tar:
+        for entry in sorted(Path(workspace).iterdir()):
+            if entry.name not in kept:
+                tar.add(entry, arcname=entry.name)
+    return _listing(Path(workspace), kept)
+
+
+def put_back(
+    workspace: Path, rpi_dir: str, archive: Path, held: dict[str, tuple[int, ...]], kept: frozenset[str]
+) -> tuple[str, ...]:
+    """Undo whatever the session changed outside ``kept``; return the paths it had changed."""
+    after = _listing(Path(workspace), kept)
+    changed = tuple(sorted(path for path in held.keys() | after.keys() if held.get(path) != after.get(path)))
+    if changed:
+        record = restore(workspace, rpi_dir, kept, archive)
+        if not record["restored"]:
+            raise RuntimeError(f"could not put the workspace back after an artifact-only session: {record['reason']}")
+    return changed
+
+
+def _listing(workspace: Path, kept: frozenset[str]) -> dict[str, tuple[int, ...]]:
+    """Every path under the workspace, less ``kept``, with what a change to it would alter.
+
+    A directory is listed by mode alone: its mtime moves whenever a file inside it does, and
+    that file is already listed in its own right.
+    """
+    listing: dict[str, tuple[int, ...]] = {}
+    for root, dirs, files in os.walk(workspace):
+        if Path(root) == workspace:
+            dirs[:] = [name for name in dirs if name not in kept]
+            files = [name for name in files if name not in kept]
+        for name in dirs:
+            path = Path(root) / name
+            listing[str(path.relative_to(workspace))] = (path.lstat().st_mode,)
+        for name in files:
+            path = Path(root) / name
+            stat = path.lstat()
+            listing[str(path.relative_to(workspace))] = (stat.st_mode, stat.st_size, stat.st_mtime_ns)
+    return listing
+
+
 def _top_level(name: str) -> str:
     parts = [part for part in name.split("/") if part not in ("", ".")]
     return parts[0] if parts else ""
@@ -105,4 +162,4 @@ def checkpointed_build_command(agent_workspace: str, rpi_dir: str) -> str:
     return f"cd {agent_workspace.rstrip('/')} && {script}" if agent_workspace else script
 
 
-__all__ = ["SCRIPT_NAME", "SNAPSHOT_NAME", "checkpointed_build_command", "install", "restore"]
+__all__ = ["SCRIPT_NAME", "SNAPSHOT_NAME", "checkpointed_build_command", "hold", "install", "put_back", "restore"]
