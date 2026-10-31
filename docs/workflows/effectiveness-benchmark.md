@@ -1168,6 +1168,14 @@ order, and how each step will be checked; running those checks belongs to implem
 of plan's prompt is unchanged byte for byte. Plan and implement results from before this change
 are not comparable with those after it.
 
+The first run with the put-back, `41177348090`, crashed before research began. `docker cp` keeps
+the image's mode bits, and the reference `executable` ships as `---x--x--x`: the runner owns it
+but cannot open it. The agent runs as root, which ignores the missing read bit, so nothing had
+read the binary host-side before. The archive now grants owner read only while it is written,
+and the put-back restores every path's held mode, so the binary goes back as `0111` with its
+original bytes. The put-back also no longer assumes `.rpi` exists: a phase that writes no
+artifact may never create it.
+
 The protocol held - and uncovered a path bug underneath it. Run `37440878348` administered
 it against the same instance, model, transport and 1800-second ceiling: the artifact was
 written as the **first** tool action at 4.8 seconds and updated **eight** times, with at most

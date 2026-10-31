@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -151,6 +153,35 @@ class PutBackTests(unittest.TestCase):
         # The artifact directory and VCS metadata are the phase's to change.
         self.assertEqual("{}\n", (workspace / RPI_DIR / "plan.json").read_text(encoding="utf-8"))
         self.assertTrue((workspace / ".git" / "HEAD").is_file())
+
+    def test_an_execute_only_reference_binary_is_held_and_put_back_with_its_mode(self) -> None:
+        """Run 41177348090: ``docker cp`` keeps the image's mode, and the reference binary has no owner-read bit.
+
+        The agent runs as root, which ignores it; the harness does not.
+        """
+        workspace = _workspace()
+        reference = workspace / "executable"
+        reference.chmod(0o111)
+        archive, held = self._hold(workspace)
+        self.assertEqual(0o111, stat.S_IMODE(reference.stat().st_mode), "holding must not leave the mode changed")
+        reference.chmod(0o755)
+        reference.write_text("the plan's own build\n", encoding="utf-8")
+
+        changed = last_build.put_back(workspace, RPI_DIR, archive, held, ARTIFACT_PHASE_MAY_CHANGE)
+
+        self.assertEqual(("executable",), changed)
+        self.assertEqual(0o111, stat.S_IMODE(reference.stat().st_mode))
+        reference.chmod(0o755)
+        self.assertEqual("reference binary\n", reference.read_text(encoding="utf-8"))
+
+    def test_a_session_that_never_made_the_artifact_directory_is_still_put_back(self) -> None:
+        """Nothing guarantees ``.rpi`` exists: a phase that writes no artifact may never create it."""
+        workspace = _workspace()
+        shutil.rmtree(workspace / RPI_DIR)
+        archive, held = self._hold(workspace)
+        (workspace / "probe.py").write_text("print(1)\n", encoding="utf-8")
+        self.assertEqual(("probe.py",), last_build.put_back(workspace, RPI_DIR, archive, held, ARTIFACT_PHASE_MAY_CHANGE))
+        self.assertFalse((workspace / "probe.py").exists())
 
     def test_a_phase_that_wrote_only_its_artifact_changes_nothing(self) -> None:
         workspace = _workspace()
