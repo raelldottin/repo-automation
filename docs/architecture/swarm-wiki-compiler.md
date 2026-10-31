@@ -9,11 +9,11 @@ Code: `automation/context/swarm_wiki.py`. Tests: `automation/tests/test_swarm_wi
 | | |
 | --- | --- |
 | Repository | `raelldottin/hermes-swarm-protocol` |
-| Commit | `b7ab59c097be475f7674c746120c762544cc4b65` (`main` after raelldottin/hermes-swarm-protocol#7) |
+| Commit | `d8cdc741a6d89ff827de4bf3a91dba0c71bd72d2` (`main` after raelldottin/hermes-swarm-protocol#8) |
 | Entry point | `ops/build_wiki.py` |
 | Compiler dependency | `ruamel.yaml` 0.19.1, for ByteRover frontmatter, installed in the compiler's own interpreter |
 
-This commit adds authorized Hindsight snapshot ingestion and keeps ByteRover `.brv/context-tree` input. The pin lives in two places: `COMPILER_COMMIT` in the module and `ref` in the workflow. A test fails if they differ, so a new revision moves both in one reviewed change.
+This commit ingests authorized Hindsight snapshots and keeps ByteRover `.brv/context-tree` input. It requires each snapshot's `total`, the bank size that `memory.snapshot` records, and flags a snapshot holding fewer memories than that. The pin lives in two places: `COMPILER_COMMIT` in the module and `ref` in the workflow. A test fails if they differ, so a new revision moves both in one reviewed change.
 
 ## Build and check
 
@@ -45,7 +45,8 @@ The `Pinned Swarm Wiki compiler` job checks out the pinned commit and runs `auto
 - `check` against the published wiki matches;
 - the snapshot files are unchanged afterwards;
 - a memory with missing provenance is reported as `invalid-provenance`;
-- an edited snapshot is reported as `changed-snapshot`, and its text is not projected.
+- an edited snapshot is reported as `changed-snapshot`, and its text is not projected;
+- a snapshot holding fewer memories than its `total` is reported as `incomplete-memory-snapshot`, and its page is labelled `INCOMPLETE SNAPSHOT`.
 
 The synthetic ByteRover node is linked to no Kanban work, so the compiler reports it as `orphan-topic` and exits `1`. The test expects exactly that finding and requires no finding against the snapshot. The job then runs the compiler's own wiki acceptance tests at the pin.
 

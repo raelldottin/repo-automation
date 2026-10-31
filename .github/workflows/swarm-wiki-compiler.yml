@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: raelldottin/hermes-swarm-protocol
-          ref: b7ab59c097be475f7674c746120c762544cc4b65
+          ref: d8cdc741a6d89ff827de4bf3a91dba0c71bd72d2
           path: .swarm-wiki-compiler
           persist-credentials: false
 
