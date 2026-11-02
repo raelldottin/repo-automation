@@ -43,7 +43,7 @@ jobs:
       - name: Post coverage comment
         # Post even when the floor fails, so the PR shows the number that failed it.
         if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: MishaKav/pytest-coverage-comment@v1.12.3
+        uses: MishaKav/pytest-coverage-comment@v1.13.0
         with:
           pytest-xml-coverage-path: coverage.xml
           junitxml-path: pytest.xml
